@@ -1,0 +1,247 @@
+/* ============================================================
+   Base styles
+   ============================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-size: var(--fs-14);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+h1, h2, h3, h4, p, ul, ol {
+  margin: 0;
+  padding: 0;
+}
+
+a {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+  padding: 1px 5px;
+}
+
+pre {
+  font-family: var(--font-mono);
+  font-size: var(--fs-13);
+  line-height: var(--lh-mono);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-6);
+  padding: var(--sp-3) var(--sp-4);
+  overflow-x: auto;
+  color: var(--text-1);
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+/* --- 滚动条（克制） --- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--r-pill);
+  border: 2px solid var(--bg-0);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* --- 焦点可见性 --- */
+:focus-visible {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+  border-radius: var(--r-4);
+}
+
+/* --- 通用工具类 --- */
+.mono {
+  font-family: var(--font-mono);
+}
+.text-2 {
+  color: var(--text-2);
+}
+.text-3 {
+  color: var(--text-3);
+}
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- 按钮（全局） --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--r-6);
+  font-size: var(--fs-13);
+  font-weight: 500;
+  border: 1px solid transparent;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn--primary {
+  background: var(--accent);
+  color: var(--text-inverse);
+}
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+.btn--ghost {
+  background: var(--bg-2);
+  border-color: var(--border);
+  color: var(--text-1);
+}
+.btn--ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-0);
+}
+.btn--danger {
+  background: transparent;
+  border-color: rgba(224, 84, 84, 0.4);
+  color: var(--danger-text);
+}
+.btn--danger:hover:not(:disabled) {
+  background: var(--danger-dim);
+}
+
+/* --- 入场淡入 --- */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise {
+  animation: rise var(--dur-med) var(--ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --- 卡片悬浮（生产级微交互） --- */
+.card-hover {
+  transition: transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-2);
+}
+
+/* --- 按压反馈 --- */
+.press {
+  transition: transform var(--dur-fast) var(--ease);
+}
+.press:active {
+  transform: scale(0.96);
+}
+
+/* --- 工作态脉冲（执行中徽标 / 进度点） --- */
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 var(--accent-dim); }
+  70% { box-shadow: 0 0 0 6px rgba(84, 185, 124, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(84, 185, 124, 0); }
+}
+.pulse {
+  animation: pulse 1.8s var(--ease) infinite;
+}
+
+/* --- 骨架屏 --- */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-2) 25%,
+    var(--bg-3) 37%,
+    var(--bg-2) 63%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease infinite;
+  border-radius: var(--r-4);
+}
+
+/* --- 聊天消息 stagger 入场 --- */
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.msg-in {
+  animation: msg-in var(--dur-med) var(--ease) both;
+}
+
+/* --- 工具调用展开 --- */
+@keyframes expand {
+  from { opacity: 0; transform: translateY(-4px); max-height: 0; }
+  to { opacity: 1; transform: translateY(0); max-height: 600px; }
+}
+.expand {
+  animation: expand var(--dur-med) var(--ease) both;
+  overflow: hidden;
+}
+
+/* --- 全局过渡基类 --- */
+.t-soft {
+  transition: color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}

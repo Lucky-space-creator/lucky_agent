@@ -1,0 +1,69 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: lucky-agent
+  main:
+    banner-mode: off
+
+logging:
+  level:
+    root: INFO
+    com.lucky.agent: INFO
+    io.agentscope: WARN
+
+# 工作空间目录规范（§3.0）：根路径为 Agent 必备目录，硬编码不可更改
+# 单根=<user.home>/.lucky_agent，必备子目录无点前缀（config/memory/platform/skills/mcp 等）
+
+# 模型模块
+model:
+  context-threshold: 0.9
+  health-probe-sec: 60
+
+# 执行臂
+executor:
+  transport: local
+  boundary-strict: true
+  sandbox-enabled: false
+  cmd-timeout-sec: 30
+
+# 编排
+core:
+  plan-max-steps: 12
+  act-max-steps: 30
+  run-max-turns: 30
+  run-max-budget: -1
+  subagent-enabled: false
+  subagent-max-concurrency: 4
+  subagent-task-timeout-sec: 300
+  # 主回环最大迭代次数（安全阀 N：超过强制结束并总结）
+  orchestrator-max-iterations: 5
+  # 早停置信阈值：客观验证通过率低于该值转 ASK 让用户决策（0~1）
+  early-stop-confidence-threshold: 0.3
+  # 子任务局部重试上限（G：超限提前终止并告知用户）
+  orchestrator-max-retries: 2
+  # 重试指数退避基础毫秒数（第 n 次重试 = base * 2^(n-1)，上限 8s）
+  retry-backoff-ms: 500
+  # 客观验证器总开关（D 节点：文件存在性 / 校验命令退出码）
+  verification-enabled: true
+  # 单个客观验证器超时（秒）
+  verification-timeout-sec: 120
+
+# Skill（渐进披露式技能加载）
+skill:
+  # 语义召回 Top-K（非全量注入，省 token）
+  topK: 5
+  # 用户自定义 Skill 目录（相对框架根，默认 skills）
+  userDir: skills
+  # 平台预置目录（相对框架根，默认 platform，只读）
+  platformDir: platform
+  # 热插拔：定时扫描新增/删除 Skill（true=开启）
+  hot-reload: true
+  # 热插拔扫描周期（毫秒，默认 30000；@Scheduled 的 fixedDelay 单位为毫秒）
+  hot-reload-ms: 30000
+
+# MCP Server 配置（热加载定时扫描）
+mcp:
+  # 热加载扫描周期（毫秒，默认 60000；@Scheduled 的 fixedDelay 单位为毫秒）
+  hot-reload-ms: 60000

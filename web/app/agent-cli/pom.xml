@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.lucky.agent</groupId>
+        <artifactId>lucky-agent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>agent-cli</artifactId>
+    <name>agent-cli</name>
+    <description>CLI Agent（复用同一内核、配置、记忆与执行臂，消费同一 Flux&lt;AgentEvent&gt;）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-workspace</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-permission</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-memory</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-model</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-executor</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-persona</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.lucky.agent.cli.CliApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

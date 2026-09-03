@@ -1,0 +1,68 @@
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.project
+.classpath
+.settings/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ===== Java / Maven build =====
+target/
+**/target/
+*.class
+*.jar
+*.war
+*.log
+
+# ===== Node / frontend =====
+node_modules/
+fronted/dist/
+fronted/.vite/
+*.tsbuildinfo
+
+# ===== Agent runtime / framework hidden dirs =====
+.trash/
+.tmp/
+.trash
+.cache/
+*.local
+
+# ===== AI tooling / editor hidden config (not project source) =====
+.claude/
+.codebuddy/
+.codemoss/
+.codeium/
+
+# ===== Secrets =====
+*.key
+*.pem
+*.env
+.env.*
+secret*.json
+application-secret*.yml
+application-secret*.properties
+
+# ===== Logs =====
+logs/
+*.log
+
+# ===== 不入库：项目规则/本地脚本/临时与探测文件 =====
+AGENTS.md
+convert_log.ps1
+probe.ps1
+restore_encoding.ps1
+lucky
+lucky.bat
+lucky.sh
+resources/
+web/app/cp.txt
+web/app/probe.ps1
+web/app/run-verify.ps1
+web/app/tok.txt

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.lucky.agent</groupId>
+        <artifactId>lucky-agent</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>agent-permission</artifactId>
+    <name>agent-permission</name>
+    <description>权限级别配置 + deny/ask/allow 规则链 + Web 文件操作转发 + 危险操作识别 + 审计</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-workspace</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
