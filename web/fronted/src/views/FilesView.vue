@@ -7,6 +7,7 @@ import Icon from '@/components/common/Icon.vue'
 import Badge from '@/components/common/Badge.vue'
 import Spinner from '@/components/common/Spinner.vue'
 import FileTreeNode, { type FNode } from '@/components/files/FileTreeNode.vue'
+import CodeViewer from '@/components/files/CodeViewer.vue'
 
 const workspace = useWorkspaceStore()
 const root = ref<FNode | null>(null)
@@ -16,6 +17,12 @@ const previewLoading = ref(false)
 const newName = ref('')
 const creating = ref(false)
 const err = ref('')
+/** 是否处于编辑态（用 textarea 修改文件内容）。 */
+const editing = ref(false)
+/** 编辑器内临时内容。 */
+const draft = ref('')
+const saving = ref(false)
+const editErr = ref('')
 const PREVIEW_MAX_LINES = 200
 const showAll = ref(false)
 const previewLines = computed(() => {
@@ -91,17 +98,90 @@ async function open(node: FNode) {
   if (node.dir) return
   selectedPath.value = node.path
   showAll.value = false
+  editing.value = false
+  editErr.value = ''
   previewLoading.value = true
   try {
-    preview.value = await fileApi.op({
+    const r = await fileApi.op({
       opType: 'READ',
       workspaceId: workspace.current!.workspaceId,
       path: node.path,
     })
+    preview.value = r
+    draft.value = r.content ?? ''
   } catch (e) {
     preview.value = { ok: false, requestId: '', size: 0, error: (e as Error).message }
   } finally {
     previewLoading.value = false
+  }
+}
+
+/** 可写权限判定：MODIFY/FULL 允许编辑。 */
+const canEdit = computed(
+  () =>
+    preview.value?.ok === true &&
+    selectedPath.value !== '' &&
+    (workspace.current?.permissionLevel === 'MODIFY' || workspace.current?.permissionLevel === 'FULL'),
+)
+
+/** 进入编辑态：从已读内容初始化草稿。 */
+function startEdit() {
+  if (!canEdit.value) return
+  editErr.value = ''
+  // 展开全部行再编辑，避免保存时丢掉被 200 行截断的内容
+  if (previewTruncated.value) {
+    draft.value = preview.value?.content ?? ''
+  }
+  editing.value = true
+}
+
+/** 取消编辑：丢弃草稿回到只读预览。 */
+function cancelEdit() {
+  editing.value = false
+  editErr.value = ''
+  if (preview.value) draft.value = preview.value.content ?? ''
+}
+
+/** 保存编辑：WRITE 落盘后刷新预览。 */
+async function saveEdit() {
+  if (!selectedPath.value || saving.value) return
+  saving.value = true
+  editErr.value = ''
+  try {
+    const r = await fileApi.op({
+      opType: 'WRITE',
+      workspaceId: workspace.current!.workspaceId,
+      path: selectedPath.value,
+      content: draft.value,
+    })
+    if (!r.ok) {
+      editErr.value = r.error || '保存失败'
+      return
+    }
+    editing.value = false
+    // 保存后本地同步内容（磁盘一致由 WRITE 成功保证），避免整页重读闪烁
+    const cur = preview.value
+    preview.value = {
+      ok: true,
+      requestId: cur?.requestId ?? '',
+      size: new TextEncoder().encode(draft.value).length,
+      content: draft.value,
+      path: cur?.path ?? selectedPath.value,
+    }
+    // 目录行大小等变化异步刷新一次
+    void refresh()
+  } catch (e) {
+    editErr.value = (e as Error).message
+  } finally {
+    saving.value = false
+  }
+}
+
+function onEditKeydown(e: KeyboardEvent) {
+  // 仅保存-快捷键建议：Ctrl/Cmd + S 保存（阻止浏览器默认下载）
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault()
+    void saveEdit()
   }
 }
 
@@ -249,15 +329,67 @@ init()
         <div class="files__loading"><Spinner :size="16" /> 读取中…</div>
       </template>
       <template v-else-if="preview">
-        <header class="preview__head">
-          <span class="mono preview__path">{{ preview.path }}</span>
-          <Badge :tone="preview.ok ? 'teal' : 'danger'">{{ preview.ok ? '已读取' : '失败' }}</Badge>
-        </header>
-        <pre v-if="preview.ok" class="preview__content">{{ previewLines }}</pre>
-        <button v-if="previewTruncated" class="preview__more mono" @click="toggleShowAll">
+        <!-- 工具栏：读/写模式切换 -->
+        <div v-if="preview.ok" class="preview__toolbar">
+          <span class="preview__mode mono">{{ editing ? '编辑' : '只读' }}</span>
+          <div class="preview__toolbar-actions">
+            <template v-if="!editing">
+              <button
+                v-if="canEdit"
+                class="preview__btn mono"
+                :disabled="previewLoading"
+                title="修改文件内容"
+                @click="startEdit"
+              >
+                编辑
+              </button>
+              <button
+                v-else-if="workspace.current?.permissionLevel === 'READ_ONLY'"
+                class="preview__btn mono"
+                disabled
+                title="当前工作空间为只读权限，无法编辑"
+              >
+                只读权限
+              </button>
+            </template>
+            <template v-else>
+              <button class="preview__btn mono" @click="cancelEdit">取消</button>
+              <button
+                class="preview__btn preview__btn--primary mono"
+                :disabled="saving"
+                @click="saveEdit"
+              >
+                {{ saving ? '保存中…' : '保存' }}
+              </button>
+            </template>
+          </div>
+        </div>
+        <p v-if="editErr" class="preview__toolbar-err">{{ editErr }}</p>
+
+        <!-- 编辑态：可修改的代码编辑器 -->
+        <textarea
+          v-if="editing"
+          v-model="draft"
+          class="preview__editor mono"
+          spellcheck="false"
+          @keydown="onEditKeydown"
+        />
+        <!-- 只读态：语法高亮预览 -->
+        <CodeViewer v-else :path="selectedPath" :content="previewLines" />
+        <template v-if="!preview.ok">
+          <div class="preview__fail">
+            <span class="mono preview__path">{{ preview.path }}</span>
+            <Badge tone="danger">失败</Badge>
+            <p class="preview__err">{{ preview.error }}</p>
+          </div>
+        </template>
+        <button
+          v-if="previewTruncated && !editing"
+          class="preview__more mono"
+          @click="toggleShowAll"
+        >
           展开全部内容（共 {{ preview.content?.split('\n').length }} 行）
         </button>
-        <p v-else-if="preview && !preview.ok" class="preview__err">{{ preview.error }}</p>
       </template>
       <template v-else>
         <div class="files__none files__none--center text-3 mono">选择文件查看内容</div>
@@ -349,15 +481,17 @@ init()
   display: flex;
   flex-direction: column;
   background: var(--bg-0);
+  padding: 0 12px 12px;
 }
 .preview__crumbs {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 9px 16px;
+  padding: 9px 4px;
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
   white-space: nowrap;
+  flex: none;
 }
 .preview__crumb {
   background: none;
@@ -384,36 +518,23 @@ init()
   color: var(--text-2);
   font-size: var(--fs-13);
 }
-.preview__head {
+.preview__fail {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  padding: 16px 4px;
 }
 .preview__path {
   font-size: var(--fs-12);
   color: var(--text-1);
 }
-.preview__content {
-  flex: 1;
-  overflow: auto;
-  max-height: 100%;
-  margin: 0;
-  padding: 16px;
-  background: var(--bg-0);
-  border: none;
-  color: var(--text-1);
-  font-size: var(--fs-13);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 .preview__more {
-  margin: 0;
+  flex: none;
+  margin: 8px 4px 0;
   padding: 8px 16px;
   background: var(--bg-1);
-  border: none;
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--r-6);
   color: var(--accent-text);
   font-size: var(--fs-12);
   text-align: center;
@@ -423,7 +544,76 @@ init()
   background: var(--accent-dim);
 }
 .preview__err {
-  padding: 16px;
+  margin: 0;
   color: var(--danger-text);
+  font-size: var(--fs-13);
+}
+.preview__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 4px 4px;
+  flex: none;
+}
+.preview__mode {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-3);
+}
+.preview__toolbar-actions {
+  display: flex;
+  gap: 6px;
+}
+.preview__btn {
+  padding: 4px 14px;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-6);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.preview__btn:hover:not(:disabled) {
+  color: var(--text-1);
+  background: var(--bg-2);
+}
+.preview__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.preview__btn--primary {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+}
+.preview__btn--primary:hover:not(:disabled) {
+  color: var(--accent-strong);
+  background: var(--accent-dim);
+}
+.preview__toolbar-err {
+  margin: 4px 0 0;
+  color: var(--danger-text);
+  font-size: var(--fs-12);
+}
+.preview__editor {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-8);
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-size: var(--fs-13);
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  white-space: pre;
+  overflow: auto;
+}
+.preview__editor:focus {
+  border-color: var(--accent-border);
 }
 </style>

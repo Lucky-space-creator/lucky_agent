@@ -4,6 +4,8 @@ export interface Block {
   type: 'text' | 'code'
   /** type=code 时为原始文本；type=text 时为已转义+转换的 HTML */
   content: string
+  /** type=code 时的语言标签（围栏 ```lang 的第一段），用于语法高亮 */
+  lang?: string
 }
 
 function escapeHtml(s: string): string {
@@ -45,6 +47,9 @@ export function renderMarkdown(text: string): Block[] {
 
     // 围栏代码块
     if (line.trim().startsWith('```')) {
+      // 提取语言标签（```java、``` typescript 等）
+      const firstToken = line.trim().slice(3).trim().split(/\s+/)[0]
+      const lang = firstToken && firstToken.length < 24 ? firstToken : undefined
       const code: string[] = []
       i++
       while (i < lines.length && !lines[i].trim().startsWith('```')) {
@@ -52,7 +57,7 @@ export function renderMarkdown(text: string): Block[] {
         i++
       }
       i++ // 跳过结束围栏
-      blocks.push({ type: 'code', content: code.join('\n') })
+      blocks.push({ type: 'code', content: code.join('\n'), lang })
       continue
     }
 

@@ -18,9 +18,11 @@ import com.lucky.agent.core.planactask.Replanner;
 import com.lucky.agent.core.runtime.AgentEventPublisher;
 import com.lucky.agent.core.runtime.ConversationStateManager;
 import com.lucky.agent.core.subagent.TaskProgressTracker;
+import com.lucky.agent.core.subagent.TaskScheduler;
 import com.lucky.agent.core.verify.VerificationChain;
 import com.lucky.agent.core.verify.VerificationVerdict;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
@@ -78,7 +80,8 @@ class OrchestratorTest {
                 mock(LoopMemoryManager.class), props, suspender,
                 new StepLimitGuard(props.planMaxSteps(), props.actMaxSteps()),
                 new EarlyStopPolicy(props.earlyStopConfidenceThreshold()),
-                new ActScheduler(engine));
+                new ActScheduler(engine),
+                mock(TaskScheduler.class));
     }
 
     /** 构造一个含单个步骤的计划（模型判定需拆分）。 */
@@ -190,5 +193,65 @@ class OrchestratorTest {
     private String planJson() {
         return "{\"goal\":\"完成任务\",\"steps\":[{\"id\":1,\"type\":\"file\",\"desc\":\"写文件\","
                 + "\"target\":\"app.txt\",\"safe\":true}],\"canAutoExecute\":false}";
+    }
+
+    /** 含子代理声明的 PLAN JSON（无 steps，纯子代理决策）。 */
+    private String planJsonWithSubagent() {
+        return "{\"goal\":\"完成高复杂度任务\",\"steps\":[],\"canAutoExecute\":false,"
+                + "\"subagents\":[{\"id\":\"sa-1\",\"name\":\"评审A\",\"task\":\"独立评审模块A\"}]}";
+    }
+
+    private CoreProperties propsEnabled(int maxIter, int maxRetry) {
+        return new CoreProperties(12, 30, 30, -1, true, 4, 300,
+                maxIter, maxRetry, "reactor", Boolean.TRUE, 120, 500, 0.3);
+    }
+
+    // ---------- 5. subagent-enabled=true 且 PLAN 声明 subagents → 路由到 TaskScheduler ----------
+    @Test
+    void testSubAgentRoutedWhenEnabled() {
+        Engine engine = mock(Engine.class);
+        when(engine.run(any(), any(), anyString())).thenAnswer(inv -> {
+            Phase phase = inv.getArgument(1);
+            if (phase == Phase.PLAN) {
+                return Mono.just(EngineRunResult.of(SESSION, Phase.PLAN,
+                        planJsonWithSubagent(), 0, "m", "success"));
+            }
+            return Mono.just(EngineRunResult.of(SESSION, Phase.ACT, "完成", 0, "m", "success"));
+        });
+        VerificationChain chain = mock(VerificationChain.class);
+        when(chain.verify(any(), any(), anyString(), anyString(), any()))
+                .thenReturn(new VerificationVerdict(true, "完成", "x", List.of()));
+        CoreProperties props = propsEnabled(5, 2);
+        AskSuspender suspender = mock(AskSuspender.class);
+        TaskScheduler scheduler = mock(TaskScheduler.class);
+        // 子代理调度返回一条摘要结果
+        when(scheduler.scheduleSerial(any(), any(), anyString(), anyString()))
+                .thenReturn(Flux.just(new com.lucky.agent.core.subagent.SubAgentResult(
+                        "sa-1", "模块A已独立评审通过", true)));
+        Orchestrator orch = orchestrator(engine, chain, props, suspender, scheduler);
+
+        EngineRunResult r = orch.run(new SessionRef(SESSION, "u-1", "ws-1"), ctx(PermissionLevel.FULL),
+                mock(AgentEventPublisher.class));
+
+        assertEquals("success", r.status());
+        // 子代理调度器应被调用
+        verify(scheduler, times(1)).scheduleSerial(any(), any(), anyString(), anyString());
+    }
+
+    /** 装配支持注入 TaskScheduler 的编排器。 */
+    private Orchestrator orchestrator(Engine engine, VerificationChain chain,
+                                     CoreProperties props, AskSuspender suspender, TaskScheduler scheduler) {
+        ConversationStateManager stateManager = mock(ConversationStateManager.class);
+        ConversationStateManager.SessionState state = mock(ConversationStateManager.SessionState.class);
+        when(state.messages()).thenReturn(new java.util.concurrent.CopyOnWriteArrayList<>());
+        when(stateManager.session(any())).thenReturn(state);
+        return new Orchestrator(engine, stateManager,
+                new PlanGenerator(), new com.lucky.agent.core.models.PlanValidator(),
+                new Replanner(engine), new TaskProgressTracker(), chain,
+                mock(LoopMemoryManager.class), props, suspender,
+                new StepLimitGuard(props.planMaxSteps(), props.actMaxSteps()),
+                new EarlyStopPolicy(props.earlyStopConfidenceThreshold()),
+                new ActScheduler(engine),
+                scheduler);
     }
 }

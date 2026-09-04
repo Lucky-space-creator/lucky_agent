@@ -3,6 +3,7 @@ package com.lucky.agent.core.planactask;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.core.models.Plan;
+import com.lucky.agent.core.subagent.SubAgentIntent;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -59,6 +60,64 @@ public class PlanGenerator {
             log.debug("计划解析失败：{}", e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /**
+     * 解析计划 JSON 中可选声明的 {@code subagents} 数组。
+     *
+     * <p>与 {@link #parse} 读取同一份模型输出，只抽取 {@code subagents} 顶层字段；
+     * 无该字段或为空返回空列表。仅当 {@code core.subagent-enabled=true} 且列表非空时，
+     * 主回环才会把对应子任务交给隔离子代理（TaskScheduler）执行。</p>
+     *
+     * @param text 模型 PLAN 输出文本
+     * @return 子代理意图列表（可能为空）
+     */
+    public List<SubAgentIntent> parseSubagents(String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        String json = extractJson(text);
+        try {
+            JsonNode node = objectMapper.readTree(json);
+            JsonNode subs = node.path("subagents");
+            if (!subs.isArray() || subs.isEmpty()) {
+                return List.of();
+            }
+            List<SubAgentIntent> list = new ArrayList<>();
+            for (JsonNode s : subs) {
+                String id = s.path("id").asText("");
+                String name = s.path("name").asText("");
+                String task = s.path("task").asText("");
+                if (id.isBlank() || task.isBlank()) {
+                    continue;
+                }
+                list.add(new SubAgentIntent(
+                        id,
+                        name.isBlank() ? id : name,
+                        task,
+                        toStringList(s.get("tools")),
+                        toStringList(s.get("disallowedTools")),
+                        s.path("permissionMode").asText("default"),
+                        s.path("summaryOnly").asBoolean(true)));
+            }
+            return list.isEmpty() ? List.of() : List.copyOf(list);
+        } catch (Exception e) {
+            log.debug("子代理声明解析失败：{}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    private List<String> toStringList(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return null;
+        }
+        List<String> out = new ArrayList<>();
+        node.forEach(v -> {
+            if (v.isTextual() && !v.asText().isBlank()) {
+                out.add(v.asText());
+            }
+        });
+        return out.isEmpty() ? null : List.copyOf(out);
     }
 
     /**

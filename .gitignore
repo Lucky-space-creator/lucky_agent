@@ -23,8 +23,8 @@ target/
 
 # ===== Node / frontend =====
 node_modules/
-fronted/dist/
-fronted/.vite/
+**/dist/
+**/.vite/
 *.tsbuildinfo
 
 # ===== Agent runtime / framework hidden dirs =====

@@ -2,6 +2,7 @@ package com.lucky.agent.model.endpoint;
 
 import com.lucky.agent.model.api.dto.InferenceDepth;
 import com.lucky.agent.model.api.dto.ModelConfig;
+import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
@@ -17,11 +18,27 @@ import java.time.Duration;
  * 均由官方 SDK 处理，本类只负责「本机配置 → 官方模型」的桥接与推理深度映射，不再手写 HTTP。
  * {@code baseUrl} 语义与官方一致：OpenAI 兼容 base_url（如 {@code https://api.deepseek.com}
  * 或 {@code https://.../compatible-mode/v1}），接口路径 {@code /chat/completions} 由 SDK 拼接。</p>
+ *
+ * <p><b>思考链回传（thinking 模式硬要求）</b>：DeepSeek 等推理模型在响应中返回
+ * {@code reasoning_content}，并<b>要求下一轮请求把该字段原样回传</b>，否则第二次调用直接被拒
+ * （{@code The `reasoning_content` in the thinking mode must be passed back to the API.}）。
+ * LangChain4j 官方适配器需同时开启两个开关才能闭环：
+ * {@code returnThinking(true)} 把响应中的 {@code reasoning_content} 解析进
+ * {@code AiMessage.thinking()}，{@code sendThinking(true, "reasoning_content")} 在下一轮
+ * 把 {@code AiMessage.thinking()} 以 {@code reasoning_content} 字段名写回 assistant 消息。
+ * 二者缺一都会导致第二轮调用失败：只开 sendThinking 时 thinking 恒为空（没有回传内容），
+ * 只开 returnThinking 时内容不会序列化到请求里。</p>
  */
 @Slf4j
 public class OpenAiCompatibleModel implements ChatModel {
 
     private static final Duration CALL_TIMEOUT = Duration.ofSeconds(180);
+
+    /**
+     * 思考链字段名：DeepSeek / Qwen / GLM 等 OpenAI 兼容厂商在 thinking 模式下的约定字段。
+     * 官方 builder 的默认值即为该值，此处显式声明，避免升级 SDK 时默认值漂移导致思考链回传失效。
+     */
+    private static final String THINKING_FIELD = "reasoning_content";
 
     private final ModelConfig config;
     private final OpenAiChatModel delegate;
@@ -35,7 +52,13 @@ public class OpenAiCompatibleModel implements ChatModel {
                 .timeout(CALL_TIMEOUT)
                 // 推理深度：OFF 明确关闭思考，其余档位开启并映射 effort
                 .reasoningEffort(resolveReasoningEffort(inferenceDepth))
-                .sendThinking(inferenceDepth != InferenceDepth.OFF);
+                // 思考链回传：与推理深度解耦，恒为 true。
+                // 1) 模型本身是推理模型时（deepseek-reasoner 等）无论 effort 都会返回 reasoning_content，
+                //    若按深度关闭回传，第二轮必然被拒；
+                // 2) 非思考模型不会返回该字段，AiMessage.thinking() 恒为空，也就不会写出任何多余参数，
+                //    对普通模型零影响。
+                .returnThinking(true)
+                .sendThinking(true, THINKING_FIELD);
         if (config.temperature() != null) {
             builder.temperature(config.temperature());
         }
@@ -64,11 +87,11 @@ public class OpenAiCompatibleModel implements ChatModel {
                     && restored.aiMessage().toolExecutionRequests() != null
                     ? restored.aiMessage().toolExecutionRequests().size() : 0;
             log.info("[模型调用] OpenAI 请求成功：model={} cost={}ms finishReason={} "
-                            + "inputTokens={} outputTokens={} toolCalls={}",
+                            + "inputTokens={} outputTokens={} toolCalls={} thinkingLength={}",
                     config.modelName(), cost, restored.finishReason(),
                     usage == null ? 0 : usage.inputTokenCount(),
                     usage == null ? 0 : usage.outputTokenCount(),
-                    toolCalls);
+                    toolCalls, thinkingLength(restored.aiMessage()));
             String replyText = restored.aiMessage() != null && restored.aiMessage().text() != null
                     ? restored.aiMessage().text() : "(无文本回复/仅工具调用)";
             log.info("[模型回复] model={} 长度={} 内容={}",
@@ -88,6 +111,13 @@ public class OpenAiCompatibleModel implements ChatModel {
                     config.modelName(), config.endpointUrl(), cost, e.getMessage());
             throw e;
         }
+    }
+
+    /**
+     * 思考链长度（用于确认 thinking 模式是否真的解析到 reasoning_content）。
+     */
+    private static int thinkingLength(AiMessage ai) {
+        return ai == null || ai.thinking() == null ? 0 : ai.thinking().length();
     }
 
     /**

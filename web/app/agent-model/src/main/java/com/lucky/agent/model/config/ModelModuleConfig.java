@@ -1,5 +1,7 @@
 package com.lucky.agent.model.config;
 
+import com.lucky.agent.common.constant.WorkspaceDirs;
+import com.lucky.agent.model.prompt.BasePromptStore;
 import com.lucky.agent.model.prompt.PromptCacheService;
 import com.lucky.agent.model.prompt.SystemPromptAssembler;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -19,6 +21,12 @@ public class ModelModuleConfig {
     @Bean
     public SystemPromptAssembler systemPromptAssembler() {
         return new SystemPromptAssembler();
+    }
+
+    /** 基座提示词存储（{@code <frameworkRoot>/LUCKY.md}，用户可直接编辑，改完即时生效）。 */
+    @Bean
+    public BasePromptStore basePromptStore(WorkspaceDirs dirs) {
+        return new BasePromptStore(dirs);
     }
 
     /** 提示词缓存服务（含命中统计，供状态面板查询）。 */

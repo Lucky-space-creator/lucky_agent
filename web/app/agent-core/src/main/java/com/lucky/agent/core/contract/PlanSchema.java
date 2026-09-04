@@ -44,7 +44,24 @@ public final class PlanSchema {
                     }
                   }
                 },
-                "canAutoExecute": { "type": "boolean" }
+                "canAutoExecute": { "type": "boolean" },
+                "subagents": {
+                  "type": "array",
+                  "description": "可选：高复杂度独立子问题的隔离子代理声明（框架按需启动，只回摘要；普通拆解放 steps 即可）",
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "name", "task"],
+                    "properties": {
+                      "id": { "type": "string" },
+                      "name": { "type": "string" },
+                      "task": { "type": "string" },
+                      "tools": { "type": "array", "items": { "type": "string" } },
+                      "disallowedTools": { "type": "array", "items": { "type": "string" } },
+                      "permissionMode": { "type": "string" },
+                      "summaryOnly": { "type": "boolean" }
+                    }
+                  }
+                }
               }
             }
             """;

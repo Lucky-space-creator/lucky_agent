@@ -16,10 +16,14 @@ import com.lucky.agent.core.planactask.ActScheduler;
 import com.lucky.agent.core.planactask.AskSuspender;
 import com.lucky.agent.core.planactask.PlanGenerator;
 import com.lucky.agent.core.planactask.Replanner;
+import com.lucky.agent.common.contract.SubAgentSpec;
 import com.lucky.agent.core.runtime.AgentEventPublisher;
 import com.lucky.agent.core.runtime.ConversationStateManager;
 import com.lucky.agent.core.runtime.RunBudget;
+import com.lucky.agent.core.subagent.SubAgentIntent;
+import com.lucky.agent.core.subagent.SubAgentResult;
 import com.lucky.agent.core.subagent.TaskProgressTracker;
+import com.lucky.agent.core.subagent.TaskScheduler;
 import com.lucky.agent.core.verify.VerificationChain;
 import com.lucky.agent.core.verify.VerificationResult;
 import com.lucky.agent.core.verify.VerificationVerdict;
@@ -80,6 +84,8 @@ public class Orchestrator implements AgentOrchestrator {
     private final StepLimitGuard stepLimitGuard;
     private final EarlyStopPolicy earlyStopPolicy;
     private final ActScheduler actScheduler;
+    /** 子代理调度器（仅 core.subagent-enabled=true 且有 subagents 声明时使用；否则不参与）。 */
+    private final TaskScheduler subAgentScheduler;
 
     public Orchestrator(Engine engine, ConversationStateManager stateManager,
                         PlanGenerator planGenerator, PlanValidator planValidator, Replanner replanner,
@@ -90,7 +96,8 @@ public class Orchestrator implements AgentOrchestrator {
                         AskSuspender askSuspender,
                         StepLimitGuard stepLimitGuard,
                         EarlyStopPolicy earlyStopPolicy,
-                        ActScheduler actScheduler) {
+                        ActScheduler actScheduler,
+                        TaskScheduler subAgentScheduler) {
         this.engine = engine;
         this.stateManager = stateManager;
         this.planGenerator = planGenerator;
@@ -104,6 +111,7 @@ public class Orchestrator implements AgentOrchestrator {
         this.stepLimitGuard = stepLimitGuard;
         this.earlyStopPolicy = earlyStopPolicy;
         this.actScheduler = actScheduler;
+        this.subAgentScheduler = subAgentScheduler;
     }
 
     /**
@@ -130,17 +138,23 @@ public class Orchestrator implements AgentOrchestrator {
                 return tripped.get();
             }
 
-            // B: LLM 分析需求（PLAN 阶段产出结构化计划，由模型判断是否需拆子任务）
+            // B: LLM 分析需求（PLAN 阶段产出结构化计划，由模型判断是否需拆子任务/启动子代理）
             publisher.publish(sessionId, AgentEvent.thought(sessionId,
-                    "【分析】正在分析需求并判断是否需拆分为子任务（第 " + iter + " 轮）…"));
-            Plan plan = analyze(ctx, goal, publisher);
+                    "【分析】正在分析需求并判断是否需拆分为子任务/启动子代理（第 " + iter + " 轮）…"));
+            Analysis analysis = analyze(ctx, goal, publisher);
+            Plan plan = analysis.plan();
+            List<SubAgentIntent> subIntents = analysis.subAgents();
             budget.incrementTurn();
 
-            if (plan == null || plan.steps() == null || plan.steps().isEmpty()) {
-                // C=否：模型判定无需拆分 → 单次 REACT 直接执行（P2-1，由模型判断）
+            // C1: 是否声明了「隔离子代理」（仅 core.subagent-enabled=true 时生效）
+            boolean hasSubAgents = properties.subagentEnabled()
+                    && subIntents != null && !subIntents.isEmpty();
+            boolean hasSteps = plan != null && plan.steps() != null && !plan.steps().isEmpty();
+
+            // C2=否且无子代理 → 单 Agent 直接执行（默认单 agent，P2-1）
+            if (!hasSteps && !hasSubAgents) {
                 publisher.publish(sessionId, AgentEvent.thought(sessionId,
-                        "【分析】模型判定无需拆分，直接执行（单次 REACT）。"));
-                // ACT 阶段调度器（P1-1 接入）：以目标驱动 ACT 运行
+                        "【分析】模型判定无需拆分/子代理，单 Agent 直接执行。"));
                 EngineRunResult direct = actScheduler.execute(ctx, new Plan(goal, List.of(), false)).block();
                 if (direct != null) {
                     budget.addTokens(direct.tokenUsed());
@@ -149,7 +163,6 @@ public class Orchestrator implements AgentOrchestrator {
                     return EngineRunResult.error(sessionId, Phase.ACT, "引擎无返回结果");
                 }
                 if (direct.status() != null && direct.status().equals("ask")) {
-                    // P0-1：非 FULL 权限下高危操作需确认，中断编排并说明原因
                     String reason = askReason(ctx);
                     askSuspender.suspend(ref, reason, ctx.permissionLevel() == null
                             ? "unknown" : ctx.permissionLevel().getCode());
@@ -174,56 +187,110 @@ public class Orchestrator implements AgentOrchestrator {
                 continue;
             }
 
-            // C=是：拆分小任务
-            publisher.publish(sessionId, AgentEvent.thought(sessionId,
-                    "【分析】拆分为 " + plan.steps().size() + " 个子任务，逐一执行。"));
-            List<AgentEvent.TaskItem> tasks = plan.steps().stream()
-                    .map(s -> new AgentEvent.TaskItem("s" + s.id(), s.desc()))
-                    .toList();
-            taskProgressTracker.plan(sessionId, tasks, publisher);
+            // 本轮执行日志（步骤 + 子代理合并，供验证/记忆/总结）
+            StringBuilder roundLog = new StringBuilder();
+            long roundTokens = 0;
+            Plan verifyPlan = plan; // 客观验证基于步骤（无步骤时仅主观）
 
-            // E→F: 逐任务执行（G: 局部重试；H: 重试超限提前终止）
-            ExecOutcome out = executeAll(ctx, stateManager.session(ref), tasks,
-                    publisher, properties.orchestratorMaxRetries());
-            budget.addTokens(out.tokens());
-            if (out.ask()) {
-                // P0-1：高危操作需确认，已挂起，中断整个编排返回
-                return out.askResult();
-            }
-            if (out.aborted()) {
-                accumulated.append(out.log());
-                return EngineRunResult.of(sessionId, Phase.ACT,
-                        "部分子任务多次重试仍失败，已提前终止并告知。"
-                                + "已完成/失败的执行情况：\n" + accumulated,
-                        0, null, "aborted");
-            }
-            accumulated.append(out.log());
+            // C1=是：先启动隔离子代理，收集子问题结果（独立 spec/会话/摘要回灌）
+            if (hasSubAgents) {
+                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                        "【分析】检测到高复杂度子问题，启动 " + subIntents.size() + " 个隔离子代理并行分析…"));
+                // 推任务计划事件，供前端展示子代理清单
+                List<AgentEvent.TaskItem> subTasks = subIntents.stream()
+                        .map(s -> new AgentEvent.TaskItem(s.id(), (s.name() == null ? s.id() : s.name())
+                                + "（子代理）")).toList();
+                taskProgressTracker.plan(sessionId, subTasks, publisher);
 
-            // D → I: 客观验证 + 达成度判定（客观证据注入模型，客观信号优先于主观结论）
+                List<SubAgentSpec> specs = new java.util.ArrayList<>();
+                List<String> tasks = new java.util.ArrayList<>();
+                for (SubAgentIntent s : subIntents) {
+                    specs.add(SubAgentSpec.builder()
+                            .id(s.id())
+                            .name(s.name())
+                            .description("主 Agent 委托的子代理：" + s.task())
+                            .tools(s.tools())
+                            .disallowedTools(s.disallowedTools())
+                            .permissionMode(s.permissionMode())
+                            .summaryOnly(s.summaryOnly())
+                            .isolation("session")
+                            .build());
+                    tasks.add(s.task());
+                }
+                // 串行调度（每个子代理独立 session/隔离）；并行版 scheduleParallel 可选
+                List<SubAgentResult> results = subAgentScheduler
+                        .scheduleSerial(specs, tasks, ref.workspaceId(), sessionId)
+                        .collectList().block();
+                // 进度：全部标记完成
+                for (int i = 0; i < subIntents.size(); i++) {
+                    taskProgressTracker.progress(sessionId, subIntents.get(i).id(),
+                            AgentEvent.TaskProgressStatus.DONE, i + 1, subIntents.size(), publisher);
+                }
+                if (results != null) {
+                    StringBuilder agg = new StringBuilder();
+                    for (int i = 0; i < results.size() && i < subIntents.size(); i++) {
+                        SubAgentResult r = results.get(i);
+                        String name = subIntents.get(i).name() == null ? r.subAgentId() : subIntents.get(i).name();
+                        agg.append("\n- 子代理[").append(name).append("]：")
+                                .append(r.success() ? r.summary() : ("失败 - " + r.summary()));
+                    }
+                    // 子代理摘要回灌：仅追加为普通消息供后续验证/总结参考，不让子代理污染主上下文权限
+                    if (agg.length() > 0) {
+                        stateManager.session(ref).appendMessage(
+                                UserMessage.from("【子代理结果】" + agg));
+                    }
+                    roundLog.append(agg);
+                }
+                // 子代理阶段已把隔离分析做完；若有显式步骤则继续由主 Agent 细化执行
+            }
+
+            // C2=是（且还有步骤）：核心 Agent 把剩余步骤拆开串行执行（D10「拆分成步骤」）
+            if (hasSteps) {
+                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                        "【分析】拆分为 " + plan.steps().size() + " 个步骤执行。"));
+                List<AgentEvent.TaskItem> tasks = plan.steps().stream()
+                        .map(s -> new AgentEvent.TaskItem("s" + s.id(), s.desc()))
+                        .toList();
+                taskProgressTracker.plan(sessionId, tasks, publisher);
+                ExecOutcome out = executeAll(ctx, stateManager.session(ref), tasks,
+                        publisher, properties.orchestratorMaxRetries());
+                roundTokens += out.tokens();
+                if (out.ask()) {
+                    return out.askResult();
+                }
+                if (out.aborted()) {
+                    accumulated.append(out.log());
+                    return EngineRunResult.of(sessionId, Phase.ACT,
+                            "部分步骤多次重试仍失败，已提前终止并告知。已完成/失败执行情况：\n" + accumulated,
+                            0, null, "aborted");
+                }
+                roundLog.append(out.log());
+            }
+            budget.addTokens(roundTokens);
+            accumulated.append(roundLog);
+
+            // D → I: 客观验证 + 达成度判定（仅当存在可客观校验的步骤；子代理/单代理走主观兜底）
             VerificationVerdict verdict = verificationChain.verify(
-                    plan, ctx, goal, out.log().toString(), publisher);
+                    hasSteps ? plan : null, ctx, goal, roundLog.toString(), publisher);
             budget.incrementTurn();
 
-            // J: 已达用户目标 → N 安全阀已在循环头通过 → P 总结 → Q 输出
             if (verdict.done()) {
                 return EngineRunResult.of(sessionId, Phase.ACT, verdict.summary(),
-                        out.tokens(), null, "success");
+                        roundTokens, null, "success");
             }
 
-            // 低置信早停（EarlyStopPolicy）：客观验证通过率过低，转 ASK 让用户决策后续方向
             double confidence = evidenceConfidence(verdict);
             if (earlyStopPolicy.shouldStop(confidence)) {
                 String reason = "多次执行后仍无法客观验证达成，需你明确指示后续方向。";
                 askSuspender.suspend(ref, reason, "low_confidence");
                 return EngineRunResult.of(sessionId, Phase.ACT, verdict.summary(),
-                        out.tokens(), null, "ask");
+                        roundTokens, null, "ask");
             }
 
-            // J=未达成且未超上限 → K: 记忆管理（上下文压缩 + 长期记忆沉淀）→ 回 B 再分析
             publisher.publish(sessionId, AgentEvent.thought(sessionId,
                     "【复查】仍有未完成项，进行记忆/上下文管理后进入下一轮分析（第 " + iter + " 轮已完成）。"));
             loopMemoryManager.manage(ctx, stateManager.session(ref),
-                    out.log() + verdict.evidenceText(), publisher);
+                    roundLog.toString() + verdict.evidenceText(), publisher);
             goal = verdict.continueGoal();
         }
     }
@@ -271,24 +338,40 @@ public class Orchestrator implements AgentOrchestrator {
         return Optional.of(EngineRunResult.of(sessionId, Phase.ACT, summary, 0, null, reason));
     }
 
-    /** B: LLM 分析（PLAN），非法计划重规划一次，仍失败返回 null（表示无需拆分或降级）。 */
-    private Plan analyze(ConversationCtx ctx, String goal, AgentEventPublisher publisher) {
+    /** B: LLM 分析（PLAN），非法计划重规划一次；返回「步骤 + 子代理声明」两类决策。 */
+    private Analysis analyze(ConversationCtx ctx, String goal, AgentEventPublisher publisher) {
         EngineRunResult planResult = engine.run(withSuppress(ctx, Phase.PLAN, goal), Phase.PLAN, goal).block();
         if (planResult == null || planResult.error() != null) {
-            return null;
+            return new Analysis(null, List.of());
         }
-        Optional<Plan> planOpt = planGenerator.parse(planResult.finalText());
+        String raw = planResult.finalText() == null ? "" : planResult.finalText();
+        Optional<Plan> planOpt = planGenerator.parse(raw);
         Plan plan = planOpt.orElse(null);
+        List<SubAgentIntent> subagents = properties.subagentEnabled()
+                ? planGenerator.parseSubagents(raw) : List.of();
         if (plan != null && planValidator.isValid(plan)) {
-            return plan;
+            return new Analysis(plan, subagents);
         }
-        // 非法计划：重规划一次（R3 闭环），仍失败返回 null 降级为「无需拆分」
+        // 计划非法（或无步骤）但声明了子代理：子代理仍是有效决策，优先保留
+        if (!subagents.isEmpty()) {
+            return new Analysis(plan, subagents);
+        }
+        // 非法计划：重规划一次（R3 闭环），仍失败返回空降级为「无需拆分」
         EngineRunResult replanResult = replanner.replan(ctx, goal,
                 plan == null ? "无法解析计划" : String.join(";", planValidator.validate(plan))).block();
         if (replanResult != null && replanResult.error() == null) {
-            return planGenerator.parse(replanResult.finalText()).orElse(null);
+            String replanRaw = replanResult.finalText() == null ? "" : replanResult.finalText();
+            Plan replan = planGenerator.parse(replanRaw).orElse(null);
+            List<SubAgentIntent> replanSubs = properties.subagentEnabled()
+                    ? planGenerator.parseSubagents(replanRaw) : List.of();
+            if (replan != null && planValidator.isValid(replan)) {
+                return new Analysis(replan, replanSubs);
+            }
+            if (!replanSubs.isEmpty()) {
+                return new Analysis(replan, replanSubs);
+            }
         }
-        return null;
+        return new Analysis(null, List.of());
     }
 
     /** F: 逐任务执行（G: 局部重试，含指数退避；H: 重试超限提前终止）。 */
@@ -397,5 +480,9 @@ public class Orchestrator implements AgentOrchestrator {
 
     private record ExecOutcome(boolean aborted, boolean ask, EngineRunResult askResult,
                                StringBuilder log, long tokens) {
+    }
+
+    /** B 分析结果：步骤计划 + 子代理声明（两者可并存或只其一）。 */
+    private record Analysis(Plan plan, List<SubAgentIntent> subAgents) {
     }
 }

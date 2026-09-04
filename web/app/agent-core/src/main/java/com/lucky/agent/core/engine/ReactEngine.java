@@ -22,6 +22,7 @@ import com.lucky.agent.core.runtime.ConversationStateManager;
 import com.lucky.agent.memory.api.MemoryRetriever;
 import com.lucky.agent.memory.api.dto.RecallResult;
 import com.lucky.agent.model.api.ModelRouter;
+import com.lucky.agent.model.prompt.BasePromptStore;
 import com.lucky.agent.model.prompt.SystemPromptAssembler;
 import com.lucky.agent.persona.api.PersonaService;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
@@ -54,9 +55,6 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 public class ReactEngine implements Engine {
 
-    
-    private static final String BASE_PROMPT = "你是 lucky_agent 的助手，所有文件操作限制在工作空间内，禁止外传用户数据。";
-
     /** 工具参数解析复用同一实例（ObjectMapper 线程安全，避免每轮调用重复构造）。 */
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
@@ -71,6 +69,7 @@ public class ReactEngine implements Engine {
     private final LifecycleHookDispatcher hookDispatcher;
     private final MetricsCollector metricsCollector;
     private final StepLimitGuard stepLimitGuard;
+    private final BasePromptStore basePromptStore;
     private final double contextThreshold;
 
     public ReactEngine(ModelRouter modelRouter, ToolGateway toolGateway, PersonaService personaService,
@@ -81,6 +80,7 @@ public class ReactEngine implements Engine {
                        LifecycleHookDispatcher hookDispatcher,
                        MetricsCollector metricsCollector,
                        StepLimitGuard stepLimitGuard,
+                       BasePromptStore basePromptStore,
                        @Value("${model.context-threshold:0.9}") double contextThreshold) {
         this.modelRouter = modelRouter;
         this.toolGateway = toolGateway;
@@ -93,6 +93,7 @@ public class ReactEngine implements Engine {
         this.hookDispatcher = hookDispatcher;
         this.metricsCollector = metricsCollector;
         this.stepLimitGuard = stepLimitGuard;
+        this.basePromptStore = basePromptStore;
         this.contextThreshold = contextThreshold;
     }
 
@@ -133,6 +134,8 @@ public class ReactEngine implements Engine {
             int step = 0;
             String finalText = null;
             long tokenUsed = 0;
+            // 末次模型响应：落库时需保留 thinking（推理模型要求下一轮原样回传 reasoning_content）
+            AiMessage lastAi = null;
             while (step < maxSteps) {
                 step++;
                 AiMessage ai;
@@ -157,6 +160,7 @@ public class ReactEngine implements Engine {
                         modelRouter.contextWindow(modelId),
                         modelRouter.modelName(modelId), false));
                 messages.add(ai);
+                lastAi = ai;
 
                 // 无工具调用 → 最终回复（思考在前，正文流式输出在后）
                 if (ai.toolExecutionRequests() == null || ai.toolExecutionRequests().isEmpty()) {
@@ -220,7 +224,12 @@ public class ReactEngine implements Engine {
             }
 
             if (finalText != null && !finalText.isBlank()) {
-                state.appendMessage(AiMessage.from(finalText));
+                // 落库时保留 thinking：推理模型（deepseek-reasoner 等）要求下一轮把
+                // reasoning_content 原样回传，用 AiMessage.from(text) 重建会丢掉思考链，
+                // 导致下一轮请求被模型厂商拒绝。
+                state.appendMessage(lastAi == null
+                        ? AiMessage.from(finalText)
+                        : lastAi.toBuilder().text(finalText).build());
             }
             // 编排模式（多步连续 run）下不逐次发布 stop，避免前端误将中间步骤当整轮结束而断连；
             // 收尾 stop 由编排层/会话层统一发布（单步运行时照常发布）。
@@ -262,10 +271,13 @@ public class ReactEngine implements Engine {
 
     /**
      * 五层提示词组装：基座 + 人格 + 阶段指令 + 权限约束 + 召回上下文（静态/动态分界）。
+     *
+     * <p>基座层不硬编码：取自 {@code <frameworkRoot>/LUCKY.md}（{@link BasePromptStore}），
+     * 用户改完保存即生效。每次 run 只读一次小文件，不做进程内缓存，避免改完不生效。</p>
      */
     private String assembleSystemPrompt(ConversationCtx ctx, Phase phase) {
         SystemPromptAssembler assembler = new SystemPromptAssembler();
-        assembler.base(BASE_PROMPT);
+        assembler.base(basePromptStore.basePrompt());
         assembler.persona(personaService.renderPersonaLayer(personaId(ctx)));
         assembler.phase(phaseInstruction(phase));
         assembler.permission(permissionInstruction(ctx.permissionLevel()));
@@ -292,7 +304,14 @@ public class ReactEngine implements Engine {
                     - 产物类步骤用 {"type":"file","path":"产物相对路径","contains":"关键内容片段"}；
                     - 可校验步骤用 {"type":"command","command":"校验命令","contains":"期望输出"}，\
                     校验命令按退出码判定（构建/测试/接口状态码/数据库查询均可），仅在全部权限下执行；
-                    无法客观校验的步骤省略 verify，交由整体判定。""";
+                    无法客观校验的步骤省略 verify，交由整体判定。
+                    关于拆解方式，二选一或并存：
+                    1) 常规拆分：若问题可拆成同属你职责的连续步骤，用 "steps" 数组给出 id/type/desc/target/safe/verify；
+                    2) 隔离子代理：仅当任务含多个互相独立、可并行/需隔离上下文的高复杂度子问题（如分别评审多模块、
+                       分别生成多份独立产物）时，用顶层 "subagents" 数组声明，每项 {"id","name","task","tools","permissionMode"}，
+                       框架会为每项启动一个隔离子代理执行并回传摘要；不要把本可由主链路步骤完成的普通拆解放进 subagents。
+                    当拆分与子代理并存时，subagents 优先执行（先并行解决独立子问题），随后再用 steps 完成串行收尾。
+                    子代理不可提升权限、只回摘要；不要在 subagents.task 里要求它去做需要整库上下文才能决策的事。""";
             case ACT -> "【阶段指令】当前为执行阶段：按计划逐步执行，工具调用过程中不要长篇输出过程细节；"
                     + "全部完成后，必须输出一段【简明总结】：概括本次完成的操作、修改/新增的文件路径、"
                     + "以及最终结论或建议，让用户一眼看懂结果，避免罗列中间过程。";

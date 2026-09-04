@@ -6,6 +6,7 @@ import { useChatStore } from '@/stores/chat'
 import PlanCard from './PlanCard.vue'
 import ToolCallCard from './ToolCallCard.vue'
 import AskCard from './AskCard.vue'
+import CodeBlock from './CodeBlock.vue'
 import Icon from '@/components/common/Icon.vue'
 
 const props = defineProps<{ item: ChatItem }>()
@@ -73,7 +74,7 @@ function onConfirm(allow: boolean) {
         <!-- 正文内容（流式增量实时渲染） -->
         <div class="msg__blocks">
           <template v-for="(b, i) in blocks" :key="i">
-            <pre v-if="b.type === 'code'" class="msg__code">{{ b.content }}</pre>
+            <CodeBlock v-if="b.type === 'code'" :code="b.content" :lang="b.lang" />
             <div v-else class="msg__text" v-html="b.content" />
           </template>
         </div>
