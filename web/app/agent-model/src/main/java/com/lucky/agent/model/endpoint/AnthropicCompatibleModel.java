@@ -68,6 +68,11 @@ public class AnthropicCompatibleModel implements ChatModel {
                     usage == null ? 0 : usage.inputTokenCount(),
                     usage == null ? 0 : usage.outputTokenCount(),
                     toolCalls);
+            String replyText = restored.aiMessage() != null && restored.aiMessage().text() != null
+                    ? restored.aiMessage().text() : "(无文本回复/仅工具调用)";
+            log.info("[模型回复] model={} 长度={} 内容={}",
+                    config.modelName(), replyText.length(),
+                    replyText.length() > 3000 ? replyText.substring(0, 3000) + " …(已截断)" : replyText);
             // 仅回填配置模型名（事件/指标展示用），复用官方响应完整对象，
             // 保留 AiMessage 的 thinking/signature 等属性，供多轮思考模式回传
             return ChatResponse.builder()

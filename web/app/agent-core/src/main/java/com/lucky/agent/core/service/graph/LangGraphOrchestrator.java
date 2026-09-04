@@ -18,6 +18,7 @@ import com.lucky.agent.core.planactask.Replanner;
 import com.lucky.agent.core.runtime.AgentEventPublisher;
 import com.lucky.agent.core.runtime.ConversationStateManager;
 import com.lucky.agent.core.runtime.RunBudget;
+import com.lucky.agent.core.service.AgentOrchestrator;
 import com.lucky.agent.core.service.LoopMemoryManager;
 import com.lucky.agent.core.subagent.TaskProgressTracker;
 import com.lucky.agent.core.verify.VerificationChain;
@@ -27,6 +28,7 @@ import dev.langchain4j.data.message.UserMessage;
 import org.bsc.langgraph4j.GraphDefinition;
 import org.bsc.langgraph4j.StateGraph;
 import org.bsc.langgraph4j.state.AgentState;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -61,7 +63,8 @@ import java.util.concurrent.CompletableFuture;
  * stop（{@code suppressStop=true}），收尾 stop 由会话层统一发布。</p>
  */
 @Component
-public class LangGraphOrchestrator {
+@ConditionalOnProperty(prefix = "core", name = "orchestrator-mode", havingValue = "langgraph")
+public class LangGraphOrchestrator implements AgentOrchestrator {
 
     /** 状态键。 */
     private static final String K_GOAL = "goal";

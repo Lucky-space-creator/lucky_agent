@@ -63,7 +63,7 @@ class OrchestratorTest {
 
     private CoreProperties props(int maxIter, int maxRetry) {
         return new CoreProperties(12, 30, 30, -1, false, 4, 300,
-                maxIter, maxRetry, Boolean.TRUE, 120, 500, 0.3);
+                maxIter, maxRetry, "reactor", Boolean.TRUE, 120, 500, 0.3);
     }
 
     private Orchestrator orchestrator(Engine engine, VerificationChain chain,

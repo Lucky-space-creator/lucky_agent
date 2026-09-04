@@ -59,7 +59,7 @@ class VerificationChainTest {
     private VerificationChain chain(FileService fileService, LlmJudgeVerifier judge, boolean enabled) {
         FileVerifier fileVerifier = new FileVerifier(fileService, 30);
         CommandVerifier commandVerifier = new CommandVerifier(fileService, 30);
-        CoreProperties properties = new CoreProperties(12, 30, 30, -1, false, 4, 300, 3, 2, enabled, 120, 500, 0.3);
+        CoreProperties properties = new CoreProperties(12, 30, 30, -1, false, 4, 300, 3, 2, "reactor", enabled, 120, 500, 0.3);
         return new VerificationChain(List.of(fileVerifier, commandVerifier), judge, properties);
     }
 

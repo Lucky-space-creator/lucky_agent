@@ -52,7 +52,7 @@ public class SessionRepository {
                     : (existing != null && existing.title() != null ? existing.title() : "对话");
             SessionMeta meta = new SessionMeta(ref.sessionId(), ref.userId(), ref.workspaceId(),
                     effectiveTitle, existing == null ? now : existing.createdAt(), now);
-            Files.writeString(file, objectMapper.writeValueAsString(meta), StandardCharsets.UTF_8);
+            Files.writeString(file, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(meta), StandardCharsets.UTF_8);
         } catch (IOException e) {
             log.warn("保存会话元数据失败：{}", ref.sessionId(), e);
         }

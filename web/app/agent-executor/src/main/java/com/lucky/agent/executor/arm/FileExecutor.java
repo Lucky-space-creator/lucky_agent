@@ -113,7 +113,8 @@ public class FileExecutor {
         try (Stream<Path> stream = Files.list(absPath)) {
             stream.sorted().forEach(p -> {
                 Path name = p.getFileName();
-                String rel = op.path() == null ? name.toString() : op.path() + "/" + name;
+                String rel = (op.path() == null || op.path().isEmpty())
+                        ? name.toString() : op.path() + "/" + name;
                 try {
                     entries.add(new ExecResult.FileEntry(name.toString(), rel, Files.isDirectory(p), Files.size(p)));
                 } catch (IOException e) {

@@ -53,7 +53,7 @@ public class PersonaStore {
     public void save(PersonaState state) {
         try {
             Files.createDirectories(file.getParent());
-            Files.write(file, objectMapper.writeValueAsBytes(state));
+            Files.write(file, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(state));
         } catch (Exception e) {
             log.error("保存人格配置失败：{}", file, e);
         }

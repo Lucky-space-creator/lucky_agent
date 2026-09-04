@@ -43,6 +43,11 @@ core:
   early-stop-confidence-threshold: 0.3
   # 子任务局部重试上限（G：超限提前终止并告知用户）
   orchestrator-max-retries: 2
+  # 核心编排器实现切换（二选一）：
+  #   reactor   -> Orchestrator：基于 REACT 主回环 + Reactor 事件流（默认，已落地完整决策逻辑）
+  #   langgraph -> LangGraphOrchestrator：基于 LangGraph4j 状态图（DAG）的等价编排实现
+  # 两者语义等价，仅在底层调度形态不同；修改后重启生效。
+  orchestrator-mode: reactor
   # 重试指数退避基础毫秒数（第 n 次重试 = base * 2^(n-1)，上限 8s）
   retry-backoff-ms: 500
   # 客观验证器总开关（D 节点：文件存在性 / 校验命令退出码）

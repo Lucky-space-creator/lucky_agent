@@ -24,6 +24,7 @@ import com.lucky.agent.core.verify.VerificationChain;
 import com.lucky.agent.core.verify.VerificationResult;
 import com.lucky.agent.core.verify.VerificationVerdict;
 import dev.langchain4j.data.message.UserMessage;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -62,7 +63,9 @@ import java.util.Optional;
  * </ul>
  */
 @Component
-public class Orchestrator {
+@ConditionalOnProperty(prefix = "core", name = "orchestrator-mode",
+        havingValue = "reactor", matchIfMissing = true)
+public class Orchestrator implements AgentOrchestrator {
 
     private final Engine engine;
     private final ConversationStateManager stateManager;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, computed } from 'vue'
 import { fileApi } from '@/api'
 import type { ExecResult } from '@/api/types'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -24,6 +24,20 @@ const root = ref<FNode | null>(null)
 const preview = ref<ExecResult | null>(null)
 const previewLoading = ref(false)
 const err = ref('')
+const PREVIEW_MAX_LINES = 200
+const showAll = ref(false)
+const previewLines = computed(() => {
+  const c = preview.value?.content ?? ''
+  if (showAll.value) return c
+  const lines = c.split('\n')
+  return lines.length <= PREVIEW_MAX_LINES ? c : lines.slice(0, PREVIEW_MAX_LINES).join('\n')
+})
+const previewTruncated = computed(
+  () => !showAll.value && (preview.value?.content ?? '').split('\n').length > PREVIEW_MAX_LINES,
+)
+function toggleShowAll() {
+  showAll.value = !showAll.value
+}
 
 async function loadDir(node: FNode): Promise<void> {
   node.loading = true
@@ -55,6 +69,7 @@ async function init() {
 
 async function open(node: FNode) {
   if (node.dir) return
+  showAll.value = false
   previewLoading.value = true
   try {
     preview.value = await fileApi.op({
@@ -154,8 +169,11 @@ onMounted(() => {
             {{ preview.ok ? '已读取' : '失败' }}
           </span>
         </header>
-        <pre v-if="preview.ok" class="pe__content">{{ preview.content ?? '' }}</pre>
-        <p v-else class="pe__err">{{ preview.error }}</p>
+        <pre v-if="preview.ok" class="pe__content">{{ previewLines }}</pre>
+        <button v-if="previewTruncated" class="pe__more mono" @click="toggleShowAll">
+          展开全部内容（共 {{ preview.content?.split('\n').length }} 行）
+        </button>
+        <p v-else-if="preview && !preview.ok" class="pe__err">{{ preview.error }}</p>
       </template>
       <div v-else class="pe__none pe__none--center text-3 mono">选择文件查看内容</div>
     </div>
@@ -306,6 +324,7 @@ onMounted(() => {
 .pe__content {
   flex: 1;
   overflow: auto;
+  max-height: 100%;
   margin: 0;
   padding: 12px;
   background: var(--bg-0);
@@ -314,5 +333,19 @@ onMounted(() => {
   font-size: var(--fs-12);
   white-space: pre-wrap;
   word-break: break-word;
+}
+.pe__more {
+  margin: 0;
+  padding: 6px 10px;
+  background: var(--bg-1);
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--accent-text);
+  font-size: var(--fs-12);
+  text-align: center;
+  cursor: pointer;
+}
+.pe__more:hover {
+  background: var(--accent-dim);
 }
 </style>

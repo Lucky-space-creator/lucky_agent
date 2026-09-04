@@ -28,7 +28,7 @@ class TaskSchedulerTest {
         // subagentMaxConcurrency, subagentTaskTimeoutSec, orchestratorMaxIterations,
         // orchestratorMaxRetries, verificationEnabled, verificationTimeoutSec, retryBackoffMs
         return new TaskScheduler(executor, new ResultAggregator(),
-                new CoreProperties(12, 30, 30, -1, true, 2, 300, 3, 2, true, 120, 500, 0.3));
+                new CoreProperties(12, 30, 30, -1, true, 2, 300, 3, 2, "reactor", true, 120, 500, 0.3));
     }
 
     private SubAgentExecutor mockExecutorReturningSummaries() {

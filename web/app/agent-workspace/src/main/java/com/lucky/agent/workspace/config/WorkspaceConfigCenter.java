@@ -65,7 +65,7 @@ public class WorkspaceConfigCenter implements WorkspaceManager, WorkspaceConfig 
     private synchronized void save() {
         try {
             Files.createDirectories(storeFile.getParent());
-            byte[] bytes = objectMapper.writeValueAsBytes(workspaces);
+            byte[] bytes = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(workspaces);
             Files.write(storeFile, bytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (IOException e) {
             log.error("保存工作空间配置失败：{}", storeFile, e);

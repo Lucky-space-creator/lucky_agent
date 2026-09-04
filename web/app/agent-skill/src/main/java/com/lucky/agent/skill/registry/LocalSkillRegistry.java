@@ -342,7 +342,7 @@ public class LocalSkillRegistry implements SkillRegistry {
             Files.createDirectories(file.getParent());
             Map<String, Boolean> state = loadState();
             state.put(id, enabled);
-            Files.writeString(file, objectMapper.writeValueAsString(state), StandardCharsets.UTF_8);
+            Files.writeString(file, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(state), StandardCharsets.UTF_8);
         } catch (IOException e) {
             log.warn("持久化 Skill 启用状态失败：{}", id, e);
         }
@@ -357,7 +357,7 @@ public class LocalSkillRegistry implements SkillRegistry {
             }
             Map<String, Boolean> state = loadState();
             if (state.remove(id) != null) {
-                Files.writeString(file, objectMapper.writeValueAsString(state), StandardCharsets.UTF_8);
+                Files.writeString(file, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(state), StandardCharsets.UTF_8);
             }
         } catch (IOException e) {
             log.warn("清理 Skill 启用状态失败：{}", id, e);

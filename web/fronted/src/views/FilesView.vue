@@ -16,6 +16,20 @@ const previewLoading = ref(false)
 const newName = ref('')
 const creating = ref(false)
 const err = ref('')
+const PREVIEW_MAX_LINES = 200
+const showAll = ref(false)
+const previewLines = computed(() => {
+  const c = preview.value?.content ?? ''
+  if (showAll.value) return c
+  const lines = c.split('\n')
+  return lines.length <= PREVIEW_MAX_LINES ? c : lines.slice(0, PREVIEW_MAX_LINES).join('\n')
+})
+const previewTruncated = computed(
+  () => !showAll.value && (preview.value?.content ?? '').split('\n').length > PREVIEW_MAX_LINES,
+)
+function toggleShowAll() {
+  showAll.value = !showAll.value
+}
 
 const crumbs = computed(() => {
   const path = selectedPath.value || ''
@@ -76,6 +90,7 @@ async function revealDir(path: string) {
 async function open(node: FNode) {
   if (node.dir) return
   selectedPath.value = node.path
+  showAll.value = false
   previewLoading.value = true
   try {
     preview.value = await fileApi.op({
@@ -238,8 +253,11 @@ init()
           <span class="mono preview__path">{{ preview.path }}</span>
           <Badge :tone="preview.ok ? 'teal' : 'danger'">{{ preview.ok ? '已读取' : '失败' }}</Badge>
         </header>
-        <pre v-if="preview.ok" class="preview__content">{{ preview.content ?? '' }}</pre>
-        <p v-else class="preview__err">{{ preview.error }}</p>
+        <pre v-if="preview.ok" class="preview__content">{{ previewLines }}</pre>
+        <button v-if="previewTruncated" class="preview__more mono" @click="toggleShowAll">
+          展开全部内容（共 {{ preview.content?.split('\n').length }} 行）
+        </button>
+        <p v-else-if="preview && !preview.ok" class="preview__err">{{ preview.error }}</p>
       </template>
       <template v-else>
         <div class="files__none files__none--center text-3 mono">选择文件查看内容</div>
@@ -380,6 +398,7 @@ init()
 .preview__content {
   flex: 1;
   overflow: auto;
+  max-height: 100%;
   margin: 0;
   padding: 16px;
   background: var(--bg-0);
@@ -388,6 +407,20 @@ init()
   font-size: var(--fs-13);
   white-space: pre-wrap;
   word-break: break-word;
+}
+.preview__more {
+  margin: 0;
+  padding: 8px 16px;
+  background: var(--bg-1);
+  border: none;
+  border-top: 1px solid var(--border);
+  color: var(--accent-text);
+  font-size: var(--fs-12);
+  text-align: center;
+  cursor: pointer;
+}
+.preview__more:hover {
+  background: var(--accent-dim);
 }
 .preview__err {
   padding: 16px;

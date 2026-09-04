@@ -30,7 +30,10 @@ public final class PathUtil {
             throw new AgentException("EXEC_INVALID_PATH", "路径不能为空");
         }
         Path baseAbs = base.toAbsolutePath().normalize();
-        Path candidate = baseAbs.resolve(userPath).normalize();
+        // 工作空间内路径均为相对路径；剥离可能误带的前导分隔符（/ 或 \），
+        // 避免 Path.resolve 在 Windows 上将 "/x" 当作绝对路径、从而脱离工作空间根。
+        String normalized = userPath.replaceAll("^[/\\\\]+", "");
+        Path candidate = baseAbs.resolve(normalized).normalize();
         if (!candidate.startsWith(baseAbs)) {
             throw new AgentException("EXEC_OUT_OF_BOUNDS", "路径越界，禁止访问工作空间外：" + userPath);
         }

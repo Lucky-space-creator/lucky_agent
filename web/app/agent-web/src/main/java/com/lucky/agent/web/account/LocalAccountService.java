@@ -60,7 +60,7 @@ public class LocalAccountService {
     private void save() {
         try {
             Files.createDirectories(accountFile.getParent());
-            Files.write(accountFile, objectMapper.writeValueAsBytes(account));
+            Files.write(accountFile, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(account));
         } catch (Exception e) {
             log.error("保存本机账号失败：{}", accountFile, e);
         }

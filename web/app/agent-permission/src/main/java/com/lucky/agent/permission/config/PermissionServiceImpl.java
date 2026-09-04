@@ -94,7 +94,7 @@ public class PermissionServiceImpl implements PermissionService {
         this.rules = new ArrayList<>(rules == null ? List.of() : rules);
         try {
             Files.createDirectories(rulesFile.getParent());
-            byte[] bytes = objectMapper.writeValueAsBytes(this.rules);
+            byte[] bytes = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(this.rules);
             Files.write(rulesFile, bytes);
             log.info("权限规则已保存，共 {} 条", this.rules.size());
         } catch (Exception e) {

@@ -57,16 +57,21 @@ public class PermissionEvaluator {
      * @return 裁决结果
      */
     public PermissionDecision evaluate(FileOp op, PermissionLevel level, Path workspaceRoot, List<PermissionRule> rules) {
-        Path absPath = workspaceRoot.resolve(op.path() == null ? "" : op.path()).normalize();
+        // 工作区根自身可能是符号链接 / 目录联接（如 Windows 的 OneDrive、桌面目录），
+        // 先把根解析到真实路径，作为「真实路径越界」判定的锚点；
+        // 否则 toRealPath() 会把文件解析成另一条真实路径，与未解析的根字符串前缀不匹配而误判越界。
+        Path realRoot = symlinkResolver.resolveReal(workspaceRoot);
+        String opPath = op.path() == null ? "" : op.path().replaceAll("^[/\\\\]+", "");
+        Path absPath = workspaceRoot.resolve(opPath).normalize();
 
         // 0) 断路器打开 → 直接拒绝（防提示注入循环）
         if (breaker.isOpen()) {
             return PermissionDecision.DENY;
         }
 
-        // 0.5) symlink 双路径：真实路径越界即判越界
+        // 0.5) symlink 双路径：用户路径须在根内；真实路径须在「真实根」内（既防软链逃逸，也兼容根本身是软链）
         Path realPath = symlinkResolver.resolveReal(absPath);
-        if (!symlinkResolver.within(workspaceRoot, absPath) || !symlinkResolver.within(workspaceRoot, realPath)) {
+        if (!symlinkResolver.within(workspaceRoot, absPath) || !symlinkResolver.within(realRoot, realPath)) {
             breaker.onDenied();
             return PermissionDecision.DENY;
         }

@@ -55,7 +55,7 @@ public class ExternalHookStore {
     public synchronized void save(List<ExternalHookConfig> configs) {
         try {
             Files.createDirectories(storeFile.getParent());
-            Files.write(storeFile, objectMapper.writeValueAsBytes(configs));
+            Files.write(storeFile, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(configs));
             log.info("外部 Hook 配置已保存，共 {} 个", configs.size());
         } catch (Exception e) {
             log.error("保存外部 Hook 配置失败：{}", storeFile, e);

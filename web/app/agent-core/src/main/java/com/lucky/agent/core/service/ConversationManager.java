@@ -49,7 +49,7 @@ public class ConversationManager {
     private final ConversationStateManager stateManager;
     private final MemoryStore memoryStore;
     private final WorkspaceConfig workspaceConfig;
-    private final Orchestrator orchestrator;
+    private final AgentOrchestrator orchestrator;
     private final LifecycleHookDispatcher hookDispatcher;
     private final SessionRepository sessionRepository;
     private final PermissionService permissionService;
@@ -59,7 +59,7 @@ public class ConversationManager {
     public ConversationManager(ConversationStateManager stateManager,
                                @Qualifier("userMemoryStore") MemoryStore memoryStore,
                                WorkspaceConfig workspaceConfig,
-                               Orchestrator orchestrator,
+                               AgentOrchestrator orchestrator,
                                LifecycleHookDispatcher hookDispatcher,
                                SessionRepository sessionRepository,
                                PermissionService permissionService,
