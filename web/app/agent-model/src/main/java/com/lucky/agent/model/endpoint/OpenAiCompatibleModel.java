@@ -3,13 +3,26 @@ package com.lucky.agent.model.endpoint;
 import com.lucky.agent.model.api.dto.InferenceDepth;
 import com.lucky.agent.model.api.dto.ModelConfig;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.model.ModelProvider;
+import dev.langchain4j.model.chat.Capability;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.model.chat.listener.ChatModelListener;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.PartialResponse;
+import dev.langchain4j.model.chat.response.PartialResponseContext;
+import dev.langchain4j.model.chat.response.PartialThinking;
+import dev.langchain4j.model.chat.response.PartialThinkingContext;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.openai.OpenAiChatModel;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Set;
 
 /**
  * OpenAI 兼容模型接入（LangChain4j 官方 {@link OpenAiChatModel} 适配）。
@@ -30,7 +43,7 @@ import java.time.Duration;
  * 只开 returnThinking 时内容不会序列化到请求里。</p>
  */
 @Slf4j
-public class OpenAiCompatibleModel implements ChatModel {
+public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
 
     private static final Duration CALL_TIMEOUT = Duration.ofSeconds(180);
 
@@ -42,6 +55,7 @@ public class OpenAiCompatibleModel implements ChatModel {
 
     private final ModelConfig config;
     private final OpenAiChatModel delegate;
+    private final OpenAiStreamingChatModel streamingDelegate;
 
     public OpenAiCompatibleModel(ModelConfig config, InferenceDepth inferenceDepth) {
         this.config = config;
@@ -66,6 +80,48 @@ public class OpenAiCompatibleModel implements ChatModel {
             builder.maxTokens(config.maxTokens());
         }
         this.delegate = builder.build();
+
+        // 流式模型：与同步模型保持完全一致的配置（baseUrl/Key/思考回传/温度/上限），
+        // 供引擎对最终回复做真实流式输出（LangChain4j 官方 SSE 增量回调）
+        OpenAiStreamingChatModel.OpenAiStreamingChatModelBuilder streamingBuilder = OpenAiStreamingChatModel.builder()
+                .baseUrl(EndpointFormat.resolveUrl(config.endpointUrl()))
+                .apiKey(config.apiKey())
+                .modelName(config.modelName())
+                .timeout(CALL_TIMEOUT)
+                .reasoningEffort(resolveReasoningEffort(inferenceDepth))
+                .returnThinking(true)
+                .sendThinking(true, THINKING_FIELD);
+        if (config.temperature() != null) {
+            streamingBuilder.temperature(config.temperature());
+        }
+        if (config.maxTokens() != null) {
+            streamingBuilder.maxTokens(config.maxTokens());
+        }
+        this.streamingDelegate = streamingBuilder.build();
+    }
+
+    /**
+     * ChatModel 与 StreamingChatModel 双接口默认实现冲突（provider / supportedCapabilities
+     * 各有默认值），显式统一为官方「OTHER / 无扩展能力」。
+     */
+    @Override
+    public ModelProvider provider() {
+        return ModelProvider.OTHER;
+    }
+
+    @Override
+    public Set<Capability> supportedCapabilities() {
+        return Set.of();
+    }
+
+    @Override
+    public List<ChatModelListener> listeners() {
+        return List.of();
+    }
+
+    @Override
+    public ChatRequestParameters defaultRequestParameters() {
+        return ChatRequestParameters.builder().build();
     }
 
     @Override
@@ -111,6 +167,37 @@ public class OpenAiCompatibleModel implements ChatModel {
                     config.modelName(), config.endpointUrl(), cost, e.getMessage());
             throw e;
         }
+    }
+
+    /**
+     * 流式对话：委托官方 {@link OpenAiStreamingChatModel}，SSE 增量回调实时透传。
+     * 工具名清洗与响应还原与同步路径一致（{@link ToolNameMappingSupport}）。
+     */
+    @Override
+    public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
+        ToolNameMapper names = new ToolNameMapper();
+        ChatRequest wireRequest = ToolNameMappingSupport.sanitizeRequest(request, names);
+        streamingDelegate.chat(wireRequest, new StreamingChatResponseHandler() {
+            @Override
+            public void onPartialResponse(PartialResponse partial, PartialResponseContext context) {
+                handler.onPartialResponse(partial, context);
+            }
+
+            @Override
+            public void onPartialThinking(PartialThinking thinking, PartialThinkingContext context) {
+                handler.onPartialThinking(thinking, context);
+            }
+
+            @Override
+            public void onCompleteResponse(ChatResponse response) {
+                handler.onCompleteResponse(ToolNameMappingSupport.restoreResponse(response, names));
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                handler.onError(error);
+            }
+        });
     }
 
     /**

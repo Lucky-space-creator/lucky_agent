@@ -1,5 +1,6 @@
 package com.lucky.agent.persona.api;
 
+import com.lucky.agent.common.contract.Remote;
 import com.lucky.agent.persona.api.dto.Persona;
 
 import java.util.List;
@@ -10,7 +11,7 @@ import java.util.List;
  * <p>默认预设人格零配置可选；自定义 System Prompt 与行为参数存
  * {@code <frameworkRoot>/.config/persona.json}，运行时注入 core 引擎。</p>
  */
-@com.lucky.agent.common.contract.Remote(serviceName = "persona")
+@Remote(serviceName = "persona")
 public interface PersonaService {
 
     /** 当前激活人格（未配置回落预设默认）。 */

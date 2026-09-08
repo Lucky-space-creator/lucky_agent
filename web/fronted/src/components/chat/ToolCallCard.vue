@@ -11,10 +11,10 @@ const ui = useUiStore()
 const expanded = ref(false)
 const argsText = computed(() => JSON.stringify(props.call.args ?? {}, null, 2))
 
-/** 写类文件工具的成功结果 → 关联的文件路径（供「查看文件」链接跳转）。 */
-const writeTool = computed(() => {
+/** 文件类工具（带路径）：提供「查看文件」定位链接（write/mkdir/rename/delete/read/list/stat 等）。 */
+const fileTool = computed(() => {
   const t = props.call.tool || ''
-  return t === 'file.write' || t === 'file.mkdir' || t === 'file.rename'
+  return t.startsWith('file.')
 })
 const filePath = computed(() => {
   const args = (props.call.args ?? {}) as Record<string, any>
@@ -37,11 +37,11 @@ function openInExplorer() {
       <span class="tool__chev"><Icon :name="expanded ? 'chevronDown' : 'chevronRight'" :size="12" /></span>
     </button>
 
-    <!-- 写类文件工具成功 → 提供「查看文件」链接，点击在右侧文件面板定位展示 -->
+    <!-- 文件类工具（带路径）→ 提供「查看文件」链接，点击在右侧文件面板定位展示 -->
     <button
-      v-if="writeTool && filePath && call.ok && call.status === 'done'"
+      v-if="fileTool && filePath && call.status === 'done'"
       class="tool__file"
-      title="在文件面板中查看"
+      :title="call.ok ? '在文件面板中查看' : '查看该文件（操作失败）'"
       @click="openInExplorer"
     >
       <Icon name="file" :size="12" />

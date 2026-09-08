@@ -28,6 +28,8 @@ public class EndpointAccessCenter {
     private static final String MAIN_ROLE = "main";
     /** 备用端点角色码。 */
     private static final String FALLBACK_ROLE = "fallback";
+    /** 记忆管理 Agent 端点角色码（会话记忆总结专用；未配置时回退主力模型）。 */
+    private static final String MEMORY_ROLE = "memory";
 
     private final ModelConfigStore store;
     private final HealthProbe healthProbe;
@@ -46,8 +48,8 @@ public class EndpointAccessCenter {
     }
 
     /**
-     * 收敛历史脏数据：多个端点同时为 main 时，仅保留第一个，其余降级为 fallback。
-     * 否则主端点由列表顺序隐式决定，一次保存就可能让主端点悄悄换人。
+     * 收敛历史脏数据：多个端点同时为 main 时，仅保留第一个，其余降级为 fallback；
+     * memory（记忆管理 Agent）同样保持唯一，避免主端点或记忆端点悄悄换人。
      */
     private void normalizeRoles() {
         boolean mainSeen = false;
@@ -62,6 +64,16 @@ public class EndpointAccessCenter {
         }
         if (!mainSeen) {
             configs.stream().filter(ModelConfig::enabled).findFirst().ifPresent(c -> c.role(MAIN_ROLE));
+        }
+        boolean memorySeen = false;
+        for (ModelConfig config : configs) {
+            if (MEMORY_ROLE.equals(config.role())) {
+                if (memorySeen) {
+                    config.role(FALLBACK_ROLE);
+                } else {
+                    memorySeen = true;
+                }
+            }
         }
     }
 
@@ -98,12 +110,21 @@ public class EndpointAccessCenter {
                 .orElseGet(() -> configs.stream().filter(ModelConfig::enabled).findFirst().orElse(null));
     }
 
-    /** 备用端点：非主端点的启用端点。*/
+    /** 备用端点：非主端点、且非记忆专用端点的启用端点。 */
     public synchronized Optional<ModelConfig> fallback() {
         ModelConfig primary = primary();
         return configs.stream()
                 .filter(ModelConfig::enabled)
+                .filter(c -> !MEMORY_ROLE.equals(c.role()))
                 .filter(c -> primary == null || !c.id().equals(primary.id()))
+                .findFirst();
+    }
+
+    /** 记忆管理 Agent 端点（role=memory 且启用）；未配置返回空，调用方回退主力模型。 */
+    public synchronized Optional<ModelConfig> memory() {
+        return configs.stream()
+                .filter(ModelConfig::enabled)
+                .filter(c -> MEMORY_ROLE.equals(c.role()))
                 .findFirst();
     }
 
@@ -131,6 +152,12 @@ public class EndpointAccessCenter {
             configs.stream()
                     .filter(c -> !c.id().equals(config.id()))
                     .filter(c -> MAIN_ROLE.equals(c.role()))
+                    .forEach(c -> c.role(FALLBACK_ROLE));
+        }
+        if (MEMORY_ROLE.equals(config.role())) {
+            configs.stream()
+                    .filter(c -> !c.id().equals(config.id()))
+                    .filter(c -> MEMORY_ROLE.equals(c.role()))
                     .forEach(c -> c.role(FALLBACK_ROLE));
         }
         int index = indexOf(config.id());

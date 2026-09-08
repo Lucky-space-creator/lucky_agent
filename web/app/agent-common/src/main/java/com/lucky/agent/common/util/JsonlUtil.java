@@ -3,6 +3,7 @@ package com.lucky.agent.common.util;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.common.exception.AgentException;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -16,6 +17,7 @@ import java.util.function.Function;
 /**
  * JSONL（JSON Lines）读写工具，用于记忆落盘（mem.jsonl）等场景。
  */
+@Slf4j
 public final class JsonlUtil {
 
     private static final ObjectMapper MAPPER = new ObjectMapper().findAndRegisterModules();
@@ -49,10 +51,14 @@ public final class JsonlUtil {
     /**
      * 读取 JSONL 全部行并反序列化。
      *
+     * <p><b>容错</b>：单行损坏（如被外部手工编辑、截断写盘）时跳过该行并告警，
+     * 不中断整库读取——否则一行坏数据会让记忆/会话等全部读取失败，
+     * 导致每次对话都在启动阶段崩溃（“引擎运行失败”）。</p>
+     *
      * @param file      文件
      * @param converter 行反序列化器
      * @param <T>       类型
-     * @return 解析结果列表（文件不存在返回空列表）
+     * @return 解析结果列表（文件不存在返回空列表；坏行被跳过）
      */
     public static <T> List<T> readAll(Path file, Function<String, T> converter) {
         List<T> result = new ArrayList<>();
@@ -65,7 +71,12 @@ public final class JsonlUtil {
                 if (line.isBlank()) {
                     continue;
                 }
-                result.add(converter.apply(line));
+                try {
+                    result.add(converter.apply(line));
+                } catch (RuntimeException e) {
+                    log.warn("JSONL 行解析失败，跳过该行：file={} line={} err={}",
+                            file, truncate(line, 80), e.getMessage());
+                }
             }
             return result;
         } catch (IOException e) {
@@ -85,6 +96,21 @@ public final class JsonlUtil {
         }
     }
 
+    /** 整文件重写（供删除/更新既有行）。 */
+    public static void rewrite(Path file, List<String> lines) {
+        try {
+            Files.createDirectories(file.getParent());
+            if (lines.isEmpty()) {
+                Files.deleteIfExists(file);
+                return;
+            }
+            Files.writeString(file, String.join(System.lineSeparator(), lines) + System.lineSeparator(),
+                    StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new AgentException("JSONL_IO", "JSONL 重写失败：" + file, e);
+        }
+    }
+
     /** 解析单行 JSON 到指定类型。 */
     public static <T> T parseLine(String line, Class<T> type) {
         try {
@@ -92,5 +118,13 @@ public final class JsonlUtil {
         } catch (JsonProcessingException e) {
             throw new AgentException("JSONL_PARSE", "JSONL 行解析失败", e);
         }
+    }
+
+    /** 超长文本截断（仅用于日志展示，避免坏行刷屏）。 */
+    private static String truncate(String text, int max) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() <= max ? text : text.substring(0, max) + "…";
     }
 }

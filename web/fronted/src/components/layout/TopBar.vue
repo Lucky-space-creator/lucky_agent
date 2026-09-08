@@ -40,7 +40,7 @@ const levelLabel = computed(() => {
     <div class="topbar__right">
       <Badge v-if="chat.running" tone="accent" dot>执行中</Badge>
       <Badge v-else-if="model.primary" tone="neutral">
-        <Icon name="cpu" :size="11" /> {{ model.primary.modelName }}
+        <Icon name="sparkles" :size="11" /> {{ model.primary.modelName }}
       </Badge>
       <Badge v-else tone="warn">未配置模型</Badge>
       <!-- 展示/收起右侧工具栏（原主题切换位置） -->

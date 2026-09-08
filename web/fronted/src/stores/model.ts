@@ -30,10 +30,22 @@ export const useModelStore = defineStore('model', () => {
    */
   const selectedId = ref<string | null>(null)
 
-  const primary = computed(() => configs.value.find((c) => c.role === 'main' && c.enabled) ?? configs.value[0] ?? null)
-  /** 实际生效的端点：显式选择优先，否则跟随主端点。 */
+  /** 主对话端点：role=main 且启用优先；否则回退第一个「非记忆」启用端点（记忆端点不做对话模型）。 */
+  const primary = computed(
+    () =>
+      configs.value.find((c) => c.role === 'main' && c.enabled) ??
+      configs.value.find((c) => c.enabled && c.role !== 'memory') ??
+      null,
+  )
+  /** 实际生效的端点：显式选择优先（记忆端点不可选作对话模型），否则跟随主端点。 */
   const active = computed(
-    () => configs.value.find((c) => c.id === selectedId.value) ?? primary.value,
+    () =>
+      configs.value.find((c) => c.id === selectedId.value && c.role !== 'memory') ??
+      primary.value,
+  )
+  /** 记忆管理 Agent 端点（role=memory，会话记忆总结专用）；未配置返回 null（总结回退主力模型）。 */
+  const memoryModel = computed(
+    () => configs.value.find((c) => c.role === 'memory' && c.enabled) ?? null,
   )
   const hasModel = computed(() => configs.value.length > 0)
 
@@ -77,6 +89,7 @@ export const useModelStore = defineStore('model', () => {
     configs,
     primary,
     active,
+    memoryModel,
     selectedId,
     select,
     hasModel,

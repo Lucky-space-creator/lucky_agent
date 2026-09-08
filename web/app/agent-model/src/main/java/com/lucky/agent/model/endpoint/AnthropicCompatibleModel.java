@@ -2,13 +2,26 @@ package com.lucky.agent.model.endpoint;
 
 import com.lucky.agent.model.api.dto.InferenceDepth;
 import com.lucky.agent.model.api.dto.ModelConfig;
+import dev.langchain4j.model.ModelProvider;
 import dev.langchain4j.model.anthropic.AnthropicChatModel;
+import dev.langchain4j.model.anthropic.AnthropicStreamingChatModel;
+import dev.langchain4j.model.chat.Capability;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.model.chat.listener.ChatModelListener;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.PartialResponse;
+import dev.langchain4j.model.chat.response.PartialResponseContext;
+import dev.langchain4j.model.chat.response.PartialThinking;
+import dev.langchain4j.model.chat.response.PartialThinkingContext;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Anthropic 兼容模型接入（LangChain4j 官方 {@link AnthropicChatModel} 适配）。
@@ -19,29 +32,72 @@ import java.time.Duration;
  * （如 DeepSeek 的 {@code https://api.deepseek.com/anthropic}），消息路径由 SDK 拼接。</p>
  */
 @Slf4j
-public class AnthropicCompatibleModel implements ChatModel {
+public class AnthropicCompatibleModel implements ChatModel, StreamingChatModel {
 
     private static final Duration CALL_TIMEOUT = Duration.ofSeconds(180);
 
     private final ModelConfig config;
     private final AnthropicChatModel delegate;
+    private final AnthropicStreamingChatModel streamingDelegate;
 
     public AnthropicCompatibleModel(ModelConfig config, InferenceDepth inferenceDepth) {
         this.config = config;
+        Integer maxTokens = config.maxTokens() == null ? 4096 : config.maxTokens();
+        // 推理深度：OFF 不启用扩展思考；其余档位映射 thinking 预算
+        int thinkingBudget = resolveThinkingBudget(inferenceDepth, maxTokens);
+
         AnthropicChatModel.AnthropicChatModelBuilder builder = AnthropicChatModel.builder()
                 .baseUrl(EndpointFormat.resolveUrl(config.endpointUrl()))
                 .apiKey(config.apiKey())
                 .modelName(config.modelName())
-                .timeout(CALL_TIMEOUT);
-        // 推理深度：OFF 不启用扩展思考；其余档位映射 thinking 预算
-        Integer maxTokens = config.maxTokens() == null ? 4096 : config.maxTokens();
-        builder.maxTokens(maxTokens);
-        AnthropicChatModel.AnthropicChatModelBuilder thinkingBuilder = resolveThinking(builder, inferenceDepth, maxTokens);
+                .timeout(CALL_TIMEOUT)
+                .maxTokens(maxTokens)
+                .thinkingType(thinkingBudget > 0 ? "enabled" : null)
+                .thinkingBudgetTokens(thinkingBudget > 0 ? thinkingBudget : null);
         if (config.temperature() != null) {
             // Anthropic 约束：启用 thinking 时省略 temperature（官方 SDK 会按需处理）
-            thinkingBuilder.temperature(config.temperature());
+            builder.temperature(config.temperature());
         }
-        this.delegate = thinkingBuilder.build();
+        this.delegate = builder.build();
+
+        // 流式模型：与同步模型保持完全一致的配置（baseUrl/Key/thinking 预算/温度/上限），
+        // 供引擎对最终回复做真实流式输出（SSE 增量回调）
+        AnthropicStreamingChatModel.AnthropicStreamingChatModelBuilder streamingBuilder = AnthropicStreamingChatModel.builder()
+                .baseUrl(EndpointFormat.resolveUrl(config.endpointUrl()))
+                .apiKey(config.apiKey())
+                .modelName(config.modelName())
+                .timeout(CALL_TIMEOUT)
+                .maxTokens(maxTokens)
+                .thinkingType(thinkingBudget > 0 ? "enabled" : null)
+                .thinkingBudgetTokens(thinkingBudget > 0 ? thinkingBudget : null);
+        if (config.temperature() != null) {
+            streamingBuilder.temperature(config.temperature());
+        }
+        this.streamingDelegate = streamingBuilder.build();
+    }
+
+    /**
+     * ChatModel 与 StreamingChatModel 双接口默认实现冲突（provider / supportedCapabilities
+     * 各有默认值），显式统一为官方「OTHER / 无扩展能力」。
+     */
+    @Override
+    public ModelProvider provider() {
+        return ModelProvider.OTHER;
+    }
+
+    @Override
+    public Set<Capability> supportedCapabilities() {
+        return Set.of();
+    }
+
+    @Override
+    public List<ChatModelListener> listeners() {
+        return List.of();
+    }
+
+    @Override
+    public ChatRequestParameters defaultRequestParameters() {
+        return ChatRequestParameters.builder().build();
     }
 
     @Override
@@ -90,14 +146,44 @@ public class AnthropicCompatibleModel implements ChatModel {
     }
 
     /**
-     * 推理深度映射为 Anthropic 扩展思考：OFF 关闭；QUICK→2048、BALANCED→8192、
-     * DEEP→16384、MAXIMUM→32768 预算。budget_tokens 必须 &lt; max_tokens，故按上界收敛。
+     * 流式对话：委托官方 {@link AnthropicStreamingChatModel}，SSE 增量回调实时透传。
+     * 工具名清洗与响应还原与同步路径一致（{@link ToolNameMappingSupport}）。
      */
-    private AnthropicChatModel.AnthropicChatModelBuilder resolveThinking(
-            AnthropicChatModel.AnthropicChatModelBuilder builder,
-            InferenceDepth inferenceDepth, int maxTokens) {
+    @Override
+    public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
+        ToolNameMapper names = new ToolNameMapper();
+        ChatRequest wireRequest = ToolNameMappingSupport.sanitizeRequest(request, names);
+        streamingDelegate.chat(wireRequest, new StreamingChatResponseHandler() {
+            @Override
+            public void onPartialResponse(PartialResponse partial, PartialResponseContext context) {
+                handler.onPartialResponse(partial, context);
+            }
+
+            @Override
+            public void onPartialThinking(PartialThinking thinking, PartialThinkingContext context) {
+                handler.onPartialThinking(thinking, context);
+            }
+
+            @Override
+            public void onCompleteResponse(ChatResponse response) {
+                handler.onCompleteResponse(ToolNameMappingSupport.restoreResponse(response, names));
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                handler.onError(error);
+            }
+        });
+    }
+
+    /**
+     * 推理深度映射为 Anthropic 扩展思考预算：OFF 关闭（0）；QUICK→2048、BALANCED→8192、
+     * DEEP→16384、MAXIMUM→32768。budget_tokens 必须 &lt; max_tokens，故按上界收敛；
+     * max_tokens ≤ 2048 时无法满足预算下限，关闭思考。
+     */
+    private int resolveThinkingBudget(InferenceDepth inferenceDepth, int maxTokens) {
         if (inferenceDepth == InferenceDepth.OFF || maxTokens <= 2048) {
-            return builder;
+            return 0;
         }
         int budget = switch (inferenceDepth) {
             case QUICK -> 2048;
@@ -105,8 +191,6 @@ public class AnthropicCompatibleModel implements ChatModel {
             case DEEP -> 16384;
             default -> 32768;
         };
-        return builder
-                .thinkingType("enabled")
-                .thinkingBudgetTokens(Math.max(1024, Math.min(budget, maxTokens - 1024)));
+        return Math.max(1024, Math.min(budget, maxTokens - 1024));
     }
 }

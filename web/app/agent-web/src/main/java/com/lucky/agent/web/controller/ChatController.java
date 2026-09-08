@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -105,6 +106,28 @@ public class ChatController {
         return conversationManager.listSessions(userId);
     }
 
+    /** 新建空白会话（元数据落盘，前端「新对话」立即持久化）。 */
+    @PostMapping("/sessions")
+    public Mono<Map<String, Object>> createSession(@RequestBody SessionCreateRequest request) {
+        return conversationManager.createSession(request.userId(), request.workspaceId(), request.title());
+    }
+
+    /** 更新会话元数据（重命名 / 切换工作空间）。 */
+    @PutMapping("/{sessionId}")
+    public Mono<Map<String, Object>> updateSession(@PathVariable String sessionId,
+                                                   @RequestBody SessionUpdateRequest request) {
+        SessionRef ref = new SessionRef(sessionId, request.userId(), request.workspaceId());
+        return conversationManager.updateMeta(ref, request.title(), request.workspaceId());
+    }
+
+    /** 消息级回溯：撤销某条助手消息执行期间修改过的文件。 */
+    @PostMapping("/{sessionId}/rollback")
+    public Mono<Map<String, Object>> rollbackMessage(@PathVariable String sessionId,
+                                                     @RequestBody RollbackMessageRequest request) {
+        return conversationManager.rollbackMessage(sessionId, request.workspaceId(), request.messageTs())
+                .map(n -> Map.of("restored", n));
+    }
+
     /** 删除会话（内存 + 持久化）。 */
     @DeleteMapping("/{sessionId}")
     public Mono<Map<String, Boolean>> destroy(@PathVariable String sessionId,
@@ -115,5 +138,17 @@ public class ChatController {
     /** 对话提交请求体。modelId 为界面选定的模型端点（可空，空则走默认主端点）。 */
     public record ChatSubmitRequest(String sessionId, String userId, String workspaceId,
                                     String content, Map<String, Object> extra, String modelId) {
+    }
+
+    /** 新建会话请求体。 */
+    public record SessionCreateRequest(String userId, String workspaceId, String title) {
+    }
+
+    /** 更新会话元数据请求体（title / workspaceId 均为可空，缺省保持原值）。 */
+    public record SessionUpdateRequest(String userId, String workspaceId, String title) {
+    }
+
+    /** 消息级回溯请求体。 */
+    public record RollbackMessageRequest(String workspaceId, String messageTs) {
     }
 }

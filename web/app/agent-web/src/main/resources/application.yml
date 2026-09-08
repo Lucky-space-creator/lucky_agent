@@ -72,3 +72,16 @@ skill:
 mcp:
   # 热加载扫描周期（毫秒，默认 60000；@Scheduled 的 fixedDelay 单位为毫秒）
   hot-reload-ms: 60000
+
+# 分层 Markdown 记忆（Hint 型：每层 md 总结，召回按层读取 整体→项目→会话）
+# 总结模型 = 模型配置中 role=memory 的记忆管理 Agent 端点；未配置时回退主力模型
+memory:
+  md:
+    # 分层 md 记忆总开关（false 时回退旧 JSONL 双轨记忆）
+    enabled: true
+    # 分层记忆根目录名（相对框架根 memory/ 下）
+    root: md
+    # 会话内触发总结的轮数阈值（节流参考）
+    trigger-turns: 5
+    # LLM 总结失败重试上限
+    max-retry: 2

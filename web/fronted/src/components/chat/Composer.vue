@@ -5,11 +5,13 @@ import ModelPicker from '@/components/chat/ModelPicker.vue'
 import DepthPicker from '@/components/chat/DepthPicker.vue'
 import { useChatStore } from '@/stores/chat'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { useToastStore } from '@/stores/toast'
 import { fileApi } from '@/api'
 import type { ExecResult } from '@/api/types'
 
 const chat = useChatStore()
 const workspace = useWorkspaceStore()
+const toast = useToastStore()
 
 const text = ref('')
 const ta = ref<HTMLTextAreaElement | null>(null)
@@ -22,10 +24,38 @@ const permOpen = ref(false)
 const permRoot = ref<HTMLElement | null>(null)
 const autoRun = ref(true)
 
+/** 工作空间选择器（绑定到当前会话，切换即改会话归属工作空间）。 */
+const wsOpen = ref(false)
+const wsRoot = ref<HTMLElement | null>(null)
+
 const permLabel = computed(() => {
   const level = workspace.current?.permissionLevel ?? 'MODIFY'
   return { READ_ONLY: '只读', MODIFY: '修改文件', FULL: 'Full access' }[level] ?? 'Full access'
 })
+
+/** 当前会话绑定的工作空间（未绑定返回 null）。 */
+const sessionWs = computed(() => {
+  const wid = chat.currentSession?.workspaceId
+  if (!wid) return null
+  return workspace.workspaces.find((w) => w.workspaceId === wid) ?? null
+})
+
+/** 选择器显示文案：会话绑定优先；未绑定显示占位。 */
+const wsLabel = computed(() => sessionWs.value?.name ?? '选择工作空间')
+
+async function pickWs(workspaceId: string) {
+  wsOpen.value = false
+  if (workspaceId === sessionWs.value?.workspaceId) return
+  // 已有对话记录的会话不允许切换工作空间（即时拦截 + 后端兜底锁定）
+  if (chat.messages.length > 0) {
+    toast.info('该会话已有对话记录，不能切换工作空间；请新建空白会话后再切换')
+    return
+  }
+  const ok = await chat.setSessionWorkspace(workspaceId)
+  if (!ok) {
+    toast.info('该会话已有对话记录，不能切换工作空间；请新建空白会话后再切换')
+  }
+}
 
 // 状态条指标优先取会话级真实数据（chat.metrics），拿不到时才回退本地消息统计
 const rounds = computed(() => chat.metrics?.modelCalls ?? chat.messages.filter((m) => m.role === 'user').length)
@@ -77,7 +107,12 @@ async function onFiles(e: Event) {
   const input = e.target as HTMLInputElement
   const files = Array.from(input.files ?? [])
   input.value = ''
-  if (!files.length || !workspace.current) return
+  if (!files.length) return
+  // 上传需要落盘到某个工作空间：无当前工作空间时给出引导，不禁用按钮
+  if (!workspace.current) {
+    toast.info('请先选择或创建工作空间，再上传文件')
+    return
+  }
   uploading.value = true
   uploadMsg.value = ''
   for (const f of files) {
@@ -142,6 +177,7 @@ async function switchPerm(level: string) {
 
 function onDoc(e: MouseEvent) {
   if (permRoot.value && !permRoot.value.contains(e.target as Node)) permOpen.value = false
+  if (wsRoot.value && !wsRoot.value.contains(e.target as Node)) wsOpen.value = false
 }
 onMounted(() => document.addEventListener('mousedown', onDoc))
 onUnmounted(() => document.removeEventListener('mousedown', onDoc))
@@ -149,10 +185,37 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
 
 <template>
   <div class="composer-wrap">
-    <!-- 上下文注入 -->
-    <div v-if="workspace.current" class="ctx">
+    <!-- 上下文注入（含工作空间选择，始终可见：未绑定会话显示「选择工作空间」占位） -->
+    <div class="ctx">
       <span class="ctx__label">上下文注入</span>
-      <span class="ctx__chip"><Icon name="folder" :size="11" /> {{ workspace.current.name }}</span>
+      <div ref="wsRoot" class="ctx__ws">
+        <button
+          class="ctx__chip"
+          :class="{ 'ctx__chip--open': wsOpen, 'ctx__chip--unbound': !sessionWs }"
+          :title="sessionWs ? '切换工作空间（绑定到当前会话）' : '当前会话未绑定工作空间，点击选择'"
+          @click="wsOpen = !wsOpen"
+        >
+          <Icon name="folder" :size="11" />
+          <span class="ellipsis ctx__ws-name">{{ wsLabel }}</span>
+          <Icon name="chevronDown" :size="10" class="ctx__chev" :class="{ 'ctx__chev--open': wsOpen }" />
+        </button>
+        <Transition name="drop">
+          <div v-if="wsOpen" class="ctx__ws-menu">
+            <button
+              v-for="w in workspace.visible"
+              :key="w.workspaceId"
+              class="ctx__ws-opt"
+              :class="{ 'ctx__ws-opt--on': w.workspaceId === sessionWs?.workspaceId }"
+              @click="pickWs(w.workspaceId)"
+            >
+              <Icon name="folder" :size="11" />
+              <span class="ellipsis">{{ w.name }}</span>
+              <Icon v-if="w.workspaceId === sessionWs?.workspaceId" name="check" :size="10" />
+            </button>
+            <button v-if="!workspace.visible.length" class="ctx__ws-opt" disabled>暂无工作空间，请先在设置中新建</button>
+          </div>
+        </Transition>
+      </div>
       <span class="ctx__chip"><Icon name="shield" :size="11" /> {{ permLabel }}</span>
       <span class="ctx__chip"><Icon name="chat" :size="11" /> {{ chat.currentSession?.title || '新会话' }}</span>
     </div>
@@ -164,8 +227,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
         v-model="text"
         class="console__input"
         rows="1"
-        :placeholder="workspace.current ? '给 Agent 下达指令…' : '请先在左侧配置工作空间'"
-        :disabled="!workspace.current"
+        :placeholder="workspace.current ? '给 Agent 下达指令…' : '给 Agent 下达指令…（当前无工作空间，可先新建/选择）'"
         @input="autoResize"
         @keydown="onKeydown"
       />
@@ -173,8 +235,8 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
       <div class="console__foot">
         <button
           class="console__attach"
-          title="上传文件到工作区"
-          :disabled="!workspace.current || uploading"
+          title="上传文件到当前工作空间"
+          :disabled="uploading"
           @click="pickFile"
         >
           <Icon :name="uploading ? 'refresh' : 'paperclip'" :size="14" :class="{ spin: uploading }" />
@@ -221,7 +283,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
         <button
           class="console__send"
           :class="{ 'console__send--stop': chat.running }"
-          :disabled="!workspace.current || (!text.trim() && !attachments.length && !chat.running)"
+          :disabled="!text.trim() && !attachments.length && !chat.running"
           @click="chat.running ? chat.cancel() : send()"
         >
           <Icon :name="chat.running ? 'stop' : 'send'" :size="14" />
@@ -289,6 +351,84 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
 }
 .ctx__chip svg {
   color: var(--text-3);
+}
+/* 上下文注入行的工作空间选择器（显眼入口，绑定当前会话） */
+.ctx__ws {
+  position: relative;
+}
+.ctx__chip {
+  cursor: pointer;
+}
+.ctx__chip--open {
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+}
+/* 未绑定工作空间的会话：选择器强调提示 */
+.ctx__chip--unbound {
+  border-style: dashed;
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+}
+.ctx__ws-name {
+  max-width: 110px;
+  min-width: 0;
+}
+.ctx__chev {
+  transition: transform var(--dur-med) var(--ease);
+  flex-shrink: 0;
+}
+.ctx__chev--open {
+  transform: rotate(180deg);
+}
+.ctx__ws-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 60;
+  min-width: 180px;
+  max-width: 260px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-0);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-10);
+  box-shadow: var(--shadow-2);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ctx__ws-opt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: none;
+  background: none;
+  border-radius: var(--r-6);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  text-align: left;
+  cursor: pointer;
+}
+.ctx__ws-opt svg:first-child {
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.ctx__ws-opt:hover {
+  background: var(--bg-2);
+  color: var(--text-1);
+}
+.ctx__ws-opt--on {
+  color: var(--accent-text);
+  font-weight: 500;
+  background: var(--accent-dim);
+}
+.ctx__ws-opt:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* 控制台 */
@@ -385,6 +525,12 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
 }
 .perm__btn:disabled {
   opacity: 0.5;
+}
+.perm__label {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .perm__menu {
   position: absolute;

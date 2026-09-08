@@ -12,6 +12,10 @@ const root = ref<HTMLElement | null>(null)
 const label = computed(() => model.active?.modelName || '未配置模型')
 const activeId = computed(() => model.active?.id ?? null)
 
+/** 可选作「对话模型」的端点：排除记忆专用端点（role=memory），
+ *  避免把记忆总结模型误选为会话模型，造成「选了 A 实际在调 B」的错觉。 */
+const convConfigs = computed(() => model.configs.filter((c) => c.role !== 'memory'))
+
 function pick(id: string) {
   model.select(id)
   open.value = false
@@ -27,7 +31,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
 <template>
   <div ref="root" class="mp">
     <button class="mp__btn" @click="open = !open">
-      <Icon name="cpu" :size="12" />
+      <Icon name="sparkles" :size="12" />
       <span class="mp__name ellipsis">{{ label }}</span>
       <span class="mp__level">高</span>
       <Icon name="chevronDown" :size="12" class="mp__chev" :class="{ 'mp__chev--open': open }" />
@@ -35,13 +39,21 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
 
     <Transition name="drop">
       <div v-if="open" class="mp__menu">
-        <div v-if="model.configs.length === 0" class="mp__empty">尚未配置模型端点</div>
-        <button v-for="c in model.configs" :key="c.id" class="mp__opt" :class="{ 'mp__opt--on': activeId === c.id }" @click="pick(c.id!)">
-          <Icon name="cpu" :size="12" />
+        <div v-if="convConfigs.length === 0" class="mp__empty">尚未配置对话模型端点</div>
+        <button v-for="c in convConfigs" :key="c.id" class="mp__opt" :class="{ 'mp__opt--on': activeId === c.id }" @click="pick(c.id!)">
+          <Icon name="sparkles" :size="12" />
           <span class="ellipsis mp__opt-name">{{ c.modelName }}</span>
           <span v-if="c.role === 'main'" class="mp__tag">主</span>
           <Icon v-if="activeId === c.id" name="check" :size="11" class="mp__check" />
         </button>
+        <div v-if="model.configs.length > 0" class="mp__hint">
+          <template v-if="model.memoryModel">
+            记忆总结：{{ model.memoryModel.modelName }}（仅用于记忆整理，不作为对话模型）
+          </template>
+          <template v-else>
+            记忆总结：未配置专用模型，将使用主力模型 {{ model.primary?.modelName || '主端点' }}
+          </template>
+        </div>
       </div>
     </Transition>
   </div>
@@ -113,6 +125,14 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
   font-size: var(--fs-12);
   color: var(--text-3);
   padding: 8px 10px;
+}
+.mp__hint {
+  font-size: 10px;
+  color: var(--text-3);
+  padding: 6px 10px;
+  border-top: 1px dashed var(--border);
+  margin-top: 4px;
+  line-height: 1.5;
 }
 .mp__opt {
   display: flex;

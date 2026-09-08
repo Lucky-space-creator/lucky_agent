@@ -129,6 +129,8 @@ public class Orchestrator implements AgentOrchestrator {
         StringBuilder accumulated = new StringBuilder();
         // P1-2：每次编排独立预算，不跨多轮 submit 累积（会话可无限叠加，靠压缩+新窗口）
         RunBudget budget = new RunBudget(properties.runMaxTurns(), properties.runMaxBudget());
+        // 循环守卫：记录上一轮未达成结论的归一化文本，连续两轮一致判定为死循环/重复
+        String lastSummaryNorm = null;
 
         for (int iter = 1; ; iter++) {
             // N 安全阀（循环头统一检查）：迭代次数 / 回合数 / token 预算 任一耗尽 → 强制结束并总结
@@ -155,7 +157,9 @@ public class Orchestrator implements AgentOrchestrator {
             if (!hasSteps && !hasSubAgents) {
                 publisher.publish(sessionId, AgentEvent.thought(sessionId,
                         "【分析】模型判定无需拆分/子代理，单 Agent 直接执行。"));
-                EngineRunResult direct = actScheduler.execute(ctx, new Plan(goal, List.of(), false)).block();
+                // 直连执行同样走 suppressStop：编排期内引擎不发 stop，收尾由会话层统一发布
+                EngineRunResult direct = actScheduler.execute(
+                        withSuppress(ctx, Phase.ACT, goal), new Plan(goal, List.of(), false)).block();
                 if (direct != null) {
                     budget.addTokens(direct.tokenUsed());
                 }
@@ -179,6 +183,14 @@ public class Orchestrator implements AgentOrchestrator {
                     return EngineRunResult.of(sessionId, Phase.ACT, v.summary(),
                             direct.tokenUsed(), direct.model(), "success");
                 }
+                // 循环守卫：连续两轮未达成结论一致 → 模型在重复/反复询问，提前结束避免死循环
+                if (stuckLoop(iter, lastSummaryNorm, v.summary())) {
+                    publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                            "【安全阀】连续两轮结论一致，模型在重复/反复询问，提前结束本轮。"));
+                    return EngineRunResult.of(sessionId, Phase.ACT, v.summary(),
+                            direct.tokenUsed(), direct.model(), "stuck");
+                }
+                lastSummaryNorm = normalize(v.summary());
                 publisher.publish(sessionId, AgentEvent.thought(sessionId,
                         "【复查】单步执行未完全达成，进入下一轮分析。"));
                 loopMemoryManager.manage(ctx, stateManager.session(ref),
@@ -279,6 +291,15 @@ public class Orchestrator implements AgentOrchestrator {
                         roundTokens, null, "success");
             }
 
+            // 循环守卫：连续两轮未达成结论一致 → 模型在重复/反复询问，提前结束避免死循环
+            if (stuckLoop(iter, lastSummaryNorm, verdict.summary())) {
+                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                        "【安全阀】连续两轮结论一致，模型在重复/反复询问，提前结束本轮。"));
+                return EngineRunResult.of(sessionId, Phase.ACT, verdict.summary(),
+                        roundTokens, null, "stuck");
+            }
+            lastSummaryNorm = normalize(verdict.summary());
+
             double confidence = evidenceConfidence(verdict);
             if (earlyStopPolicy.shouldStop(confidence)) {
                 String reason = "多次执行后仍无法客观验证达成，需你明确指示后续方向。";
@@ -307,6 +328,28 @@ public class Orchestrator implements AgentOrchestrator {
         }
         long passed = evidence.stream().filter(r -> r.objective() && r.passed() && !r.skipped()).count();
         return (double) passed / objective;
+    }
+
+    /**
+     * 循环守卫：连续两轮未达成结论（归一化文本）一致 → 判定模型陷入重复/死循环。
+     *
+     * <p>典型场景：模型反复输出「请告诉我你的项目路径」这类索取信息型结论，客观验证又判定
+     * 未达成，若不拦截会一直重跑直到安全阀；此处第二轮结论与第一轮一致即提前终止。</p>
+     */
+    private boolean stuckLoop(int iter, String lastSummaryNorm, String summary) {
+        if (iter <= 1 || summary == null || summary.isBlank()) {
+            return false;
+        }
+        String norm = normalize(summary);
+        return !norm.isEmpty() && norm.equals(lastSummaryNorm);
+    }
+
+    /** 归一化结论文本：小写 + 压缩空白 + 去首尾空白，用于检测连续两轮是否重复同一结论。 */
+    private String normalize(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.trim().toLowerCase().replaceAll("\\s+", " ").strip();
     }
 
     /**
@@ -357,7 +400,7 @@ public class Orchestrator implements AgentOrchestrator {
             return new Analysis(plan, subagents);
         }
         // 非法计划：重规划一次（R3 闭环），仍失败返回空降级为「无需拆分」
-        EngineRunResult replanResult = replanner.replan(ctx, goal,
+        EngineRunResult replanResult = replanner.replan(withSuppress(ctx, Phase.PLAN, goal), goal,
                 plan == null ? "无法解析计划" : String.join(";", planValidator.validate(plan))).block();
         if (replanResult != null && replanResult.error() == null) {
             String replanRaw = replanResult.finalText() == null ? "" : replanResult.finalText();

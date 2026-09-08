@@ -61,6 +61,24 @@ export function renderMarkdown(text: string): Block[] {
       continue
     }
 
+    // 引用：收集连续 `>` 行
+    if (line.trim().startsWith('>')) {
+      const quote: string[] = []
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quote.push(lines[i].trim().replace(/^>\s?/, ''))
+        i++
+      }
+      blocks.push({ type: 'text', content: `<blockquote>${inline(quote.join('<br/>'))}</blockquote>` })
+      continue
+    }
+
+    // 分隔线：单独成行的 --- / *** / ___
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      blocks.push({ type: 'text', content: '<hr/>' })
+      i++
+      continue
+    }
+
     // 标题
     const heading = line.match(/^(#{1,3})\s+(.+)$/)
     if (heading) {

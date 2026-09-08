@@ -20,7 +20,7 @@ const toast = useToastStore()
 
 const tabs = [
   { key: 'general', label: '通用设置', icon: 'sliders' },
-  { key: 'model', label: '模型', icon: 'cpu' },
+  { key: 'model', label: '模型', icon: 'sparkles' },
   { key: 'preset', label: 'Agent 预设', icon: 'command' },
 ] as const
 const tab = ref<(typeof tabs)[number]['key']>('general')
@@ -101,21 +101,66 @@ const editing = ref<ModelConfig>({ name: '', endpointUrl: '', modelName: '', api
 const modelMsg = ref('')
 /** 当前正在测试连接的端点 id（列表行内图标联动）。 */
 const probingId = ref('')
-const testing = ref(false)
 /** 按端点 id 记录的探活结果（设置面板内展示）。 */
 const probeResults = ref<Record<string, ProbeResult>>({})
+/** Key 显示态：true=明文，false=掩码（默认，仅显示首尾、中间星号）。 */
+const keyVisible = ref(false)
+/** 用户是否手动改过 Key（未改动时保存传空字符串，由后端保留原 Key）。 */
+const keyTouched = ref(false)
+const keyLoading = ref(false)
+/** 拉取 Key 的请求序号：防止连续打开多个端点时明文串值。 */
+let keyReqId = 0
+
+/** Key 掩码：保留前 6 位与后 4 位，中间星号（默认展示态，避免整串泄露）。 */
+function maskKey(key: string): string {
+  if (!key) return ''
+  if (key.length <= 10) return '********'
+  return `${key.slice(0, 6)}********${key.slice(-4)}`
+}
 
 async function openEdit(cfg?: ModelConfig) {
+  keyReqId++
+  const reqId = keyReqId
+  keyVisible.value = false
+  keyTouched.value = false
+  keyLoading.value = false
   editing.value = cfg
     ? { ...cfg, apiKey: '' }
     : { name: '', endpointUrl: '', modelName: '', apiKey: '', role: 'main' }
   modelMsg.value = ''
   editOpen.value = true
+  // 已配置 Key 的端点：单独拉取明文用于回显（列表接口不携带 Key，避免列表泄露）
+  if (cfg?.id && cfg.keyConfigured) {
+    keyLoading.value = true
+    try {
+      const r = await modelApi.key(cfg.id)
+      if (reqId === keyReqId && r?.apiKey) {
+        editing.value.apiKey = r.apiKey
+      }
+    } catch {
+      // 拉取失败：保持空值，保存时留空即保留原 Key，不影响使用
+    } finally {
+      if (reqId === keyReqId) keyLoading.value = false
+    }
+  }
+}
+
+/** 用户输入 Key：视为已修改；未改动时保存传空、由后端保留原 Key。 */
+function onKeyInput(e: Event) {
+  keyTouched.value = true
+  editing.value.apiKey = (e.target as HTMLInputElement).value
+}
+
+/** 小眼睛切换 Key 掩码/明文显示。 */
+function toggleKey() {
+  keyVisible.value = !keyVisible.value
 }
 
 async function saveModel() {
+  // Key 未改动时传空字符串，后端「留空保留原 Key」；已改动则提交当前值
+  const payload: ModelConfig = { ...editing.value, apiKey: keyTouched.value ? editing.value.apiKey : '' }
   try {
-    await modelStore.save(editing.value)
+    await modelStore.save(payload)
     editOpen.value = false
     modelMsg.value = ''
     toast.success('模型端点已保存')
@@ -140,8 +185,8 @@ async function testModel(cfg: ModelConfig) {
     const r = res.results?.[0]
     if (r) probeResults.value = { ...probeResults.value, [r.id ?? cfg.id]: r }
     if (r) {
-      if (r.healthy) toast.success(`连接成功：${r.message}`)
-      else toast.error(`连接失败：${r.message}`)
+      if (r.healthy) toast.success('连接成功')
+      else toast.error('连接失败')
     }
   } catch (e) {
     toast.error((e as Error).message)
@@ -150,29 +195,11 @@ async function testModel(cfg: ModelConfig) {
   }
 }
 
-/** 测试未保存的表单配置（编辑弹窗内）。 */
-async function testConnection() {
-  testing.value = true
-  try {
-    const res = await modelApi.probe(editing.value)
-    const r = res.results?.[0]
-    if (r) {
-      probeResults.value = { ...probeResults.value, [r.id ?? 'form']: r }
-      if (r.healthy) toast.success(`连接成功：${r.message}`)
-      else toast.error(`连接失败：${r.message}`)
-    } else {
-      toast.info('无返回结果')
-    }
-  } catch (e) {
-    toast.error((e as Error).message)
-  } finally {
-    testing.value = false
-  }
-}
-
+/** 健康圆点提示文案：仅显示成功/失败，不展示 HTTP 状态码等技术细节。 */
 function healthText(id?: string): string {
   const r = id ? probeResults.value[id] : undefined
-  return r ? r.message : ''
+  if (!r) return ''
+  return r.healthy ? '连接正常' : '连接失败'
 }
 
 function healthClass(id?: string): string {
@@ -240,6 +267,17 @@ async function openConfigFile() {
     const res = await systemApi.openSettingsFile()
     if (res.opened) toast.success('已在系统中打开配置文件')
     else toast.error('打开失败，请手动访问本机目录')
+  } catch (e) {
+    toast.error((e as Error).message)
+  }
+}
+
+/** 打开规则文件（两级 LUCKY.md）：无参打开全局规则，传 workspaceId 打开对应项目规则。 */
+async function openRules(workspaceId?: string) {
+  try {
+    const res = await systemApi.openRulesFile(workspaceId)
+    if (res.opened) toast.success('已在系统中打开规则文件')
+    else toast.info(res.message || '规则文件尚不存在')
   } catch (e) {
     toast.error((e as Error).message)
   }
@@ -366,6 +404,31 @@ onMounted(async () => {
                 </div>
 
                 <div class="sg__row">
+                  <div class="sg__head">规则（两级 LUCKY.md）</div>
+                </div>
+                <div class="rules-files">
+                  <div class="rules-file">
+                    <span class="rules-file__icon"><Icon name="book" :size="13" /></span>
+                    <div class="rules-file__main">
+                      <span class="rules-file__name">全局规则</span>
+                      <span class="rules-file__path mono ellipsis">框架根 LUCKY.md（对所有项目生效）</span>
+                    </div>
+                    <button class="btn btn--ghost btn--sm" @click="openRules()">打开</button>
+                  </div>
+                  <div v-if="workspace.current" class="rules-file">
+                    <span class="rules-file__icon"><Icon name="book" :size="13" /></span>
+                    <div class="rules-file__main">
+                      <span class="rules-file__name">项目规则（{{ workspace.current.name }}）</span>
+                      <span class="rules-file__path mono ellipsis">{{ workspace.current.path }} 下的 LUCKY.md</span>
+                    </div>
+                    <button class="btn btn--ghost btn--sm" @click="openRules(workspace.current.workspaceId)">打开</button>
+                  </div>
+                </div>
+                <p class="pane-hint text-3">
+                  规则文件每次模型调用前读取、保存即生效；项目规则优先于全局规则。
+                </p>
+
+                <div class="sg__row">
                   <div class="sg__head">权限规则</div>
                   <div class="sg__acts">
                     <button class="btn btn--ghost btn--sm" @click="openRuleNew"><Icon name="plus" :size="12" /> 加规则</button>
@@ -396,18 +459,32 @@ onMounted(async () => {
                 </div>
 
                 <p v-if="modelMsg" class="spane__msg text-2">{{ modelMsg }}</p>
+                <!-- 记忆管理 Agent 提示：显示当前实际生效的记忆总结模型（未配置时回退主力模型） -->
+                <p v-if="modelStore.configs.length > 0" class="memory-hint">
+                  <template v-if="modelStore.memoryModel">
+                    会话记忆总结使用记忆管理 Agent：<span class="mono">{{ modelStore.memoryModel.modelName }}</span>
+                    （仅用于记忆整理，不参与对话推理）
+                  </template>
+                  <template v-else>
+                    当前未配置「记忆管理 Agent」：会话记忆总结将调用主力模型
+                    <span class="mono">{{ modelStore.primary?.modelName || '主端点' }}</span>。
+                    可在端点编辑中把某个端点角色设为「记忆管理 Agent」（推荐用低成本模型）。
+                  </template>
+                </p>
                 <div v-if="modelStore.configs.length === 0" class="empty">尚未配置模型端点</div>
                 <div v-else class="model-list">
                   <div v-for="cfg in modelStore.configs" :key="cfg.id" class="model model--clickable" @click="openEdit(cfg)">
                     <span class="model__dot" :class="healthClass(cfg.id)" :title="healthText(cfg.id)" />
-                    <div class="model__icon"><Icon name="cpu" :size="14" /></div>
+                    <div class="model__icon"><Icon name="sparkles" :size="14" /></div>
                     <div class="model__main">
                       <div class="model__top">
                         <span class="model__name">{{ cfg.name || cfg.modelName || '未命名端点' }}</span>
-                        <Badge :tone="cfg.role === 'main' ? 'accent' : 'neutral'">{{ cfg.role === 'main' ? '主端点' : '备用' }}</Badge>
+                        <Badge v-if="cfg.role === 'main'" tone="accent">主端点</Badge>
+                        <Badge v-else-if="cfg.role === 'memory'" tone="teal">记忆管理 Agent</Badge>
+                        <Badge v-else tone="neutral">备用</Badge>
                         <Badge :tone="cfg.enabled ? 'teal' : 'neutral'">{{ cfg.enabled ? '启用' : '停用' }}</Badge>
                       </div>
-                      <div class="model__meta mono">{{ cfg.modelName }} · {{ cfg.endpointUrl }}</div>
+                      <div class="model__meta mono">{{ cfg.modelName }} · {{ cfg.endpointUrl }}<span v-if="cfg.role === 'memory'"> · 仅用于记忆总结</span></div>
                     </div>
                     <div class="model__actions" @click.stop>
                       <button
@@ -491,7 +568,7 @@ onMounted(async () => {
         <div class="mini" role="dialog" aria-label="模型端点">
           <header class="head">
             <div class="head__title">
-              <span class="head__icon"><Icon name="cpu" :size="15" /></span>
+              <span class="head__icon"><Icon name="sparkles" :size="15" /></span>
               <span>模型端点</span>
             </div>
             <button class="head__close" aria-label="关闭" @click="editOpen = false"><Icon name="x" :size="15" /></button>
@@ -520,21 +597,40 @@ onMounted(async () => {
               </label>
               <label class="field">
                 <span class="field__label">API Key（明文存于本机 settings.json）</span>
-                <input
-                  v-model="editing.apiKey"
-                  type="password"
-                  class="input mono"
-                  :placeholder="editing.keyConfigured ? '已配置，留空则保持不变' : 'sk-…'"
-                  autocomplete="off"
-                />
+                <div class="key-field">
+                  <input
+                    :value="keyVisible ? editing.apiKey : maskKey(editing.apiKey ?? '')"
+                    :readonly="!keyVisible"
+                    class="input mono key-field__input"
+                    :placeholder="editing.keyConfigured ? '已配置，留空则保持不变' : 'sk-…'"
+                    autocomplete="off"
+                    @input="onKeyInput"
+                  />
+                  <button
+                    type="button"
+                    class="key-field__eye"
+                    :disabled="keyLoading || !editing.apiKey"
+                    :title="keyVisible ? '隐藏 Key（掩码显示）' : '显示 Key 明文'"
+                    @click="toggleKey"
+                  >
+                    <Icon :name="keyVisible ? 'eyeOff' : 'eye'" :size="15" />
+                  </button>
+                </div>
+                <p class="pane-hint text-3">
+                  默认仅显示首尾部分（中间掩码），点击小眼睛可查看完整明文，仅本机可见。
+                </p>
               </label>
               <label class="field">
                 <span class="field__label">角色</span>
                 <select v-model="editing.role" class="input input--select">
                   <option value="main">主端点</option>
                   <option value="fallback">备用端点</option>
+                  <option value="memory">记忆管理 Agent</option>
                 </select>
               </label>
+              <p v-if="editing.role === 'memory'" class="pane-hint text-3">
+                记忆管理 Agent 仅用于会话记忆总结，不参与主链路推理；未配置时总结回退主力模型。建议使用低成本/快模型。
+              </p>
               <div class="field-row">
                 <label class="field">
                   <span class="field__label">上下文窗口（参考，可留空）</span>
@@ -547,10 +643,6 @@ onMounted(async () => {
               </div>
               <p v-if="modelMsg" class="form__error">{{ modelMsg }}</p>
               <div class="form__actions">
-                <button class="btn btn--ghost" :disabled="testing" @click="testConnection">
-                  <Icon name="refresh" :size="12" :class="{ spin: testing }" />
-                  {{ testing ? '测试中…' : '测试连接' }}
-                </button>
                 <span class="form__spacer" />
                 <button class="btn btn--ghost" @click="editOpen = false">取消</button>
                 <button class="btn btn--primary" @click="saveModel">保存</button>
@@ -1186,6 +1278,61 @@ onMounted(async () => {
 .pane-hint {
   font-size: var(--fs-12);
 }
+/* 记忆管理 Agent 未配置提示（浅色强调，提醒回退主力模型） */
+.memory-hint {
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: var(--r-8);
+}
+
+/* 规则文件（两级 LUCKY.md） */
+.rules-files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rules-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-8);
+  padding: 9px 12px;
+}
+.rules-file__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-6);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  color: var(--accent-text);
+  flex-shrink: 0;
+}
+.rules-file__main {
+  flex: 1;
+  min-width: 0;
+}
+.rules-file__name {
+  display: block;
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-0);
+}
+.rules-file__path {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-3);
+}
 
 /* 规则 */
 .rules {
@@ -1366,6 +1513,35 @@ onMounted(async () => {
   background-repeat: no-repeat;
   padding-right: 28px;
   cursor: pointer;
+}
+/* API Key 输入：掩码/明文切换，小眼睛按钮内嵌右侧 */
+.key-field {
+  position: relative;
+}
+.key-field__input {
+  width: 100%;
+  padding-right: 36px;
+}
+.key-field__eye {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  padding: 4px;
+  background: none;
+  border: none;
+  color: var(--text-3);
+  border-radius: var(--r-4);
+  cursor: pointer;
+}
+.key-field__eye:hover {
+  color: var(--text-1);
+  background: var(--bg-2);
+}
+.key-field__eye:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .form__error {
   color: var(--danger-text);

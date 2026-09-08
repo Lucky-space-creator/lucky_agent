@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import Icon from '@/components/common/Icon.vue'
 import SettingsDrawer from './SettingsDrawer.vue'
-import { useChatStore } from '@/stores/chat'
+import WorkspaceCreateModal from './WorkspaceCreateModal.vue'
+import { useChatStore, type ChatSession } from '@/stores/chat'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useModelStore } from '@/stores/model'
 
@@ -13,6 +14,8 @@ const workspace = useWorkspaceStore()
 const model = useModelStore()
 
 const settingsOpen = ref(false)
+/** 新建工作空间小窗（项目分组「＋」直接弹出，含目录选择）。 */
+const wsCreateOpen = ref(false)
 const collapsed = ref(localStorage.getItem('lucky-sidebar-collapsed') === '1')
 const searchOpen = ref(false)
 const searchQuery = ref('')
@@ -25,6 +28,67 @@ const filteredSessions = computed(() => {
   if (!q) return chat.sessions
   return chat.sessions.filter((s) => s.title.toLowerCase().includes(q))
 })
+
+/* ---------- 历史会话按日期分组（今天 / 昨天 / 7天内 / 更早） ---------- */
+
+interface SessionGroup {
+  label: string
+  items: ChatSession[]
+}
+
+const DAY = 86_400_000
+
+/** 会话创建时间 → 分组标签。 */
+function dateLabel(ts: number): string {
+  const now = new Date()
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  if (ts >= startToday) return '今天'
+  if (ts >= startToday - DAY) return '昨天'
+  if (ts >= startToday - 7 * DAY) return '7天内'
+  return '更早'
+}
+
+/** 按日期分组（保持原顺序：最新在前）。 */
+const groupedSessions = computed<SessionGroup[]>(() => {
+  const groups: SessionGroup[] = []
+  const map = new Map<string, SessionGroup>()
+  for (const s of filteredSessions.value) {
+    const label = dateLabel(s.createdAt)
+    let g = map.get(label)
+    if (!g) {
+      g = { label, items: [] }
+      map.set(label, g)
+      groups.push(g)
+    }
+    g.items.push(s)
+  }
+  return groups
+})
+
+/* ---------- 会话重命名（双击标题进入内联编辑） ---------- */
+
+const renamingId = ref<string | null>(null)
+const renameText = ref('')
+const renameInputs = ref<HTMLInputElement[]>([])
+
+async function startRename(s: ChatSession) {
+  renamingId.value = s.id
+  renameText.value = s.title
+  await nextTick()
+  renameInputs.value[0]?.focus()
+  renameInputs.value[0]?.select()
+}
+
+async function commitRename() {
+  if (renamingId.value) {
+    await chat.renameSession(renamingId.value, renameText.value.trim())
+  }
+  renamingId.value = null
+}
+
+function cancelRename() {
+  renamingId.value = null
+}
 
 /** 本机单人使用，无账号概念：底部展示固定的本机标识（与记忆/会话分片用的 userId 对齐）。 */
 const displayName = '本地用户'
@@ -41,9 +105,35 @@ function newChat() {
   router.push('/')
 }
 
-function pickWorkspace(id: string) {
-  workspace.setCurrent(id)
+/* ---------- 项目分组内嵌会话（需求：在项目下新建/查看会话） ---------- */
+
+/** 展开显示其会话子列表的工作空间（key=workspaceId）。 */
+const expandedWs = ref<Record<string, boolean>>({})
+
+/** 点击项目：展开/收起其会话子列表，并同步切换当前工作空间。 */
+function toggleWs(workspaceId: string) {
+  expandedWs.value[workspaceId] = !expandedWs.value[workspaceId]
+  workspace.setCurrent(workspaceId)
+}
+
+/** 某工作空间下的会话（按会话绑定的 workspaceId 过滤）。 */
+function wsSessions(workspaceId: string): ChatSession[] {
+  return chat.sessions.filter((s) => s.workspaceId === workspaceId)
+}
+
+/** 在指定项目下新建会话：绑定该工作空间并进入对话。 */
+async function newWsChat(w: { workspaceId: string; name: string }) {
+  expandedWs.value[w.workspaceId] = true
+  workspace.setCurrent(w.workspaceId)
+  await chat.newSession(w.workspaceId)
   router.push('/')
+}
+
+/** 打开项目下某个会话：同步切换工作空间上下文再加载历史。 */
+function pickWsSession(s: ChatSession) {
+  workspace.setCurrent(s.workspaceId)
+  router.push('/')
+  chat.selectSession(s.id)
 }
 
 /** 点击会话：先切路由再加载历史，保证在 /files 等非对话页也能跳回对话界面。 */
@@ -125,20 +215,64 @@ onUnmounted(() => mq.removeEventListener('change', onMq))
           </button>
           <div class="tree-head__acts">
             <button class="tree-head__act" title="浏览文件" @click="router.push('/files')"><Icon name="file" :size="13" /></button>
-            <button class="tree-head__act" title="新建工作空间" @click="settingsOpen = true"><Icon name="plus" :size="13" /></button>
+            <button class="tree-head__act" title="新建工作空间" @click="wsCreateOpen = true"><Icon name="plus" :size="13" /></button>
           </div>
         </div>
         <div v-show="openProjects" class="tree-list">
-          <button
+          <!-- 每个项目（工作空间）节点：可展开显示其会话子列表，项内提供「新建会话」 -->
+          <div
             v-for="w in workspace.visible"
             :key="w.workspaceId"
-            class="tree-item"
-            :class="{ 'tree-item--active': w.workspaceId === workspace.currentId }"
-            @click="pickWorkspace(w.workspaceId)"
+            class="ws-node"
+            :class="{ 'ws-node--active': w.workspaceId === workspace.currentId }"
           >
-            <Icon name="folder" :size="13" />
-            <span class="ellipsis">{{ w.name }}</span>
-          </button>
+            <div class="ws-node__head">
+              <button class="tree-item ws-node__main" :title="w.name" @click="toggleWs(w.workspaceId)">
+                <Icon
+                  name="chevronRight"
+                  :size="12"
+                  class="ws-node__chev"
+                  :class="{ 'ws-node__chev--open': expandedWs[w.workspaceId] }"
+                />
+                <Icon name="folder" :size="13" />
+                <span class="ellipsis">{{ w.name }}</span>
+                <span class="ws-node__count mono">{{ wsSessions(w.workspaceId).length }}</span>
+              </button>
+              <div class="ws-node__acts">
+                <button class="tree-head__act" :title="`在「${w.name}」下新建会话`" @click="newWsChat(w)">
+                  <Icon name="plus" :size="13" />
+                </button>
+              </div>
+            </div>
+            <div v-show="expandedWs[w.workspaceId]" class="ws-node__sessions">
+              <button
+                v-for="s in wsSessions(w.workspaceId)"
+                :key="s.id"
+                class="tree-item ws-node__session"
+                :class="{ 'tree-item--active': s.id === chat.currentSessionId }"
+                @click="renamingId !== s.id && pickWsSession(s)"
+                @dblclick="startRename(s)"
+              >
+                <Icon name="chat" :size="12" />
+                <input
+                  v-if="renamingId === s.id"
+                  v-model="renameText"
+                  ref="renameInputs"
+                  class="tree-item__input"
+                  :placeholder="s.title"
+                  @click.stop
+                  @keydown.enter.prevent="commitRename"
+                  @keydown.esc.prevent="cancelRename"
+                  @blur="commitRename"
+                />
+                <span v-else class="ellipsis tree-item__title" :title="'双击重命名'">{{ s.title }}</span>
+                <span class="tree-item__del" title="删除会话" @click.stop="chat.removeSession(s.id)"><Icon name="x" :size="11" /></span>
+              </button>
+              <div v-if="wsSessions(w.workspaceId).length === 0" class="ws-node__empty text-3">
+                暂无会话，点击右侧「＋」新建
+              </div>
+            </div>
+          </div>
           <div v-if="workspace.visible.length === 0" class="tree-empty">
             尚无自建工作空间，<span class="tree-empty__link" @click="settingsOpen = true">去设置新建</span>
           </div>
@@ -155,17 +289,35 @@ onUnmounted(() => mq.removeEventListener('change', onMq))
           <button class="tree-head__act" title="新建会话" @click="newChat"><Icon name="plus" :size="13" /></button>
         </div>
         <div v-show="openRecent" class="tree-list">
-          <button
-            v-for="s in filteredSessions"
-            :key="s.id"
-            class="tree-item"
-            :class="{ 'tree-item--active': s.id === chat.currentSessionId }"
-            @click="pickSession(s.id)"
-          >
-            <Icon name="chat" :size="13" />
-            <span class="ellipsis tree-item__title">{{ s.title }}</span>
-            <span class="tree-item__del" @click.stop="chat.removeSession(s.id)"><Icon name="x" :size="11" /></span>
-          </button>
+          <template v-for="g in groupedSessions" :key="g.label">
+            <div v-if="g.items.length" class="tree-date">
+              <span class="tree-date__text">{{ g.label }}</span>
+              <span class="tree-date__count">{{ g.items.length }}</span>
+            </div>
+            <button
+              v-for="s in g.items"
+              :key="s.id"
+              class="tree-item"
+              :class="{ 'tree-item--active': s.id === chat.currentSessionId }"
+              @click="renamingId !== s.id && pickSession(s.id)"
+              @dblclick="startRename(s)"
+            >
+              <Icon name="chat" :size="13" />
+              <input
+                v-if="renamingId === s.id"
+                v-model="renameText"
+                ref="renameInputs"
+                class="tree-item__input"
+                :placeholder="s.title"
+                @click.stop
+                @keydown.enter.prevent="commitRename"
+                @keydown.esc.prevent="cancelRename"
+                @blur="commitRename"
+              />
+              <span v-else class="ellipsis tree-item__title" :title="'双击重命名'">{{ s.title }}</span>
+              <span class="tree-item__del" title="删除会话" @click.stop="chat.removeSession(s.id)"><Icon name="x" :size="11" /></span>
+            </button>
+          </template>
           <div v-if="filteredSessions.length === 0" class="tree-empty">暂无会话</div>
         </div>
       </div>
@@ -191,13 +343,14 @@ onUnmounted(() => mq.removeEventListener('change', onMq))
     <Transition name="pop">
       <div v-if="helpOpen" class="pop">
         <div class="pop__row"><Icon name="spark" :size="13" /><span>Lucky Agent · 本地智能体工作台</span></div>
-        <div class="pop__row"><Icon name="cpu" :size="13" /><span>{{ modelSub }}</span></div>
+        <div class="pop__row"><Icon name="sparkles" :size="13" /><span>{{ modelSub }}</span></div>
         <div class="pop__row"><Icon name="history" :size="13" /><span>{{ chat.sessions.length }} 个会话</span></div>
       </div>
     </Transition>
   </aside>
 
   <SettingsDrawer :open="settingsOpen" @close="settingsOpen = false" />
+  <WorkspaceCreateModal v-if="wsCreateOpen" @close="wsCreateOpen = false" />
 </template>
 
 <style scoped>
@@ -462,6 +615,94 @@ onUnmounted(() => mq.removeEventListener('change', onMq))
   flex-direction: column;
   gap: 1px;
   padding: 2px 0 4px;
+}
+
+/* 项目分组内嵌会话：工作空间节点（可展开其会话子列表） */
+.ws-node {
+  display: flex;
+  flex-direction: column;
+}
+.ws-node__head {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.ws-node__main {
+  flex: 1;
+  min-width: 0;
+}
+.ws-node__main .ws-node__chev {
+  color: var(--text-3);
+  transition: transform var(--dur-med) var(--ease);
+  flex-shrink: 0;
+}
+.ws-node__main .ws-node__chev--open {
+  transform: rotate(90deg);
+}
+.ws-node__count {
+  font-size: 10px;
+  color: var(--text-3);
+  background: var(--bg-2);
+  border-radius: var(--r-pill);
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+.ws-node__acts {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.ws-node__sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-left: 12px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border-faint);
+}
+.ws-node__session {
+  padding-left: 8px;
+}
+.ws-node__empty {
+  font-size: 11px;
+  padding: 4px 8px 6px;
+}
+.tree-date {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 9px 3px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.tree-date__text {
+  text-transform: uppercase;
+}
+.tree-date__count {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-4);
+  background: var(--bg-2);
+  border-radius: var(--r-6);
+  padding: 1px 5px;
+}
+.tree-item__input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 4px;
+  background: var(--bg-0);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r-4);
+  color: var(--text-0);
+  font-size: var(--fs-12);
+  outline: none;
+}
+.tree-item__input:focus {
+  border-color: var(--accent);
 }
 .tree-item {
   display: flex;

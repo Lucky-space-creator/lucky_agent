@@ -7,6 +7,7 @@ import com.lucky.agent.model.api.dto.ModelConfig;
 import com.lucky.agent.model.api.dto.ModelRouterStatus;
 import com.lucky.agent.model.endpoint.EndpointAccessCenter;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
@@ -19,7 +20,9 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 public class ModelRouterImpl implements ModelRouter {
 
-    
+    /** 记忆专用端点角色码（与会话对话模型隔离，防止记忆端点被误选为对话模型）。 */
+    private static final String MEMORY_ROLE = "memory";
+
     private final EndpointAccessCenter accessCenter;
 
     public ModelRouterImpl(EndpointAccessCenter accessCenter) {
@@ -63,6 +66,15 @@ public class ModelRouterImpl implements ModelRouter {
     }
 
     @Override
+    public StreamingChatModel resolveStreaming(String modelId) {
+        ModelConfig target = configOf(modelId);
+        if (target == null) {
+            return null;
+        }
+        return accessCenter.toEndpoint(target).toStreamingModel();
+    }
+
+    @Override
     public int contextWindow(String modelId) {
         ModelConfig target = configOf(modelId);
         return target == null ? 0 : target.contextWindow();
@@ -71,6 +83,9 @@ public class ModelRouterImpl implements ModelRouter {
     /**
      * 定位端点配置：{@code modelId} 为空或已不存在（端点被删除/禁用）时回退主端点，
      * 避免界面上选中了一个已失效的端点导致整轮对话失败。
+     *
+     * <p>记忆专用端点（role=memory）不作为会话对话模型：即便前端把它的 id 传来
+     * （如选择器误选、旧状态残留），也一律回退主端点，杜绝「选了 A 实际在调 B」。</p>
      */
     private ModelConfig configOf(String modelId) {
         if (modelId == null || modelId.isBlank()) {
@@ -78,6 +93,7 @@ public class ModelRouterImpl implements ModelRouter {
         }
         return accessCenter.list().stream()
                 .filter(c -> modelId.equals(c.id()))
+                .filter(c -> !MEMORY_ROLE.equals(c.role()))
                 .findFirst()
                 .orElseGet(accessCenter::primary);
     }
@@ -86,6 +102,11 @@ public class ModelRouterImpl implements ModelRouter {
     public Optional<ChatModel> resolveFallback() {
         return accessCenter.fallback()
                 .map(cfg -> accessCenter.toEndpoint(cfg).toModel());
+    }
+
+    @Override
+    public Optional<String> memoryModelId() {
+        return accessCenter.memory().map(ModelConfig::id);
     }
 
     @Override

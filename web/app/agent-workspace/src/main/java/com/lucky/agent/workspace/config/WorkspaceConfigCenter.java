@@ -33,6 +33,19 @@ public class WorkspaceConfigCenter implements WorkspaceManager, WorkspaceConfig 
     
     private static final String FILE_NAME = "workspaces.json";
 
+    /** 项目规则文件名（位于工作空间根，与 skills/mcp/memory/config 并列，用户可直接编辑）。 */
+    public static final String WS_RULES_FILE = "LUCKY.md";
+
+    /** 项目规则默认模板（首次创建工作空间时写入，用户可直接编辑）。 */
+    private static final String WS_RULES_TEMPLATE = """
+            <!-- LUCKY Agent 项目规则（当前工作空间专属）
+                 每次模型调用前读取，保存后即时生效，无需重启。
+                 写本项目相关的约定、约束、技术栈、注意事项；全局规则见 <frameworkRoot>/LUCKY.md。 -->
+
+            # 项目规则
+            （在此编写本项目的专属规则…）
+            """;
+
     private final Path storeFile;
     private final WorkspaceDirs dirs;
     private final ObjectMapper objectMapper;
@@ -102,8 +115,24 @@ public class WorkspaceConfigCenter implements WorkspaceManager, WorkspaceConfig 
         } catch (Exception e) {
             log.warn("初始化工作空间可见子目录失败（可忽略）：{}", path, e);
         }
+        // 项目规则文件（工作空间根 LUCKY.md）：不存在则写入模板，用户可直接编辑
+        try {
+            ensureWorkspaceRules(path);
+        } catch (Exception e) {
+            log.warn("生成项目规则文件失败（可忽略）：{}", path, e);
+        }
         log.info("创建工作空间：{} -> {}", name, workspace.path());
         return workspace;
+    }
+
+    /** 若工作空间根下没有 LUCKY.md 规则文件，则写入默认模板（幂等，不覆盖用户已有内容）。 */
+    private void ensureWorkspaceRules(Path workspacePath) throws IOException {
+        Path rulesFile = workspacePath.toAbsolutePath().normalize().resolve(WS_RULES_FILE);
+        if (Files.exists(rulesFile)) {
+            return;
+        }
+        Files.writeString(rulesFile, WS_RULES_TEMPLATE, StandardCharsets.UTF_8);
+        log.info("已生成项目规则文件：{}", rulesFile);
     }
 
     @Override

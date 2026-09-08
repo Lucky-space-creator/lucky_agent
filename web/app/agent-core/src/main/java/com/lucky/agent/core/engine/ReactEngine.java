@@ -21,10 +21,13 @@ import com.lucky.agent.core.runtime.AgentEventPublisher;
 import com.lucky.agent.core.runtime.ConversationStateManager;
 import com.lucky.agent.memory.api.MemoryRetriever;
 import com.lucky.agent.memory.api.dto.RecallResult;
+import com.lucky.agent.memory.md.HierarchyMemoryRetriever;
 import com.lucky.agent.model.api.ModelRouter;
 import com.lucky.agent.model.prompt.BasePromptStore;
 import com.lucky.agent.model.prompt.SystemPromptAssembler;
 import com.lucky.agent.persona.api.PersonaService;
+import com.lucky.agent.workspace.api.WorkspaceConfig;
+import com.lucky.agent.workspace.api.dto.Workspace;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -33,7 +36,14 @@ import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.PartialResponse;
+import dev.langchain4j.model.chat.response.PartialResponseContext;
+import dev.langchain4j.model.chat.response.PartialThinking;
+import dev.langchain4j.model.chat.response.PartialThinkingContext;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -43,6 +53,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -58,10 +75,15 @@ public class ReactEngine implements Engine {
     /** 工具参数解析复用同一实例（ObjectMapper 线程安全，避免每轮调用重复构造）。 */
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    /** 流式最终回复超时上限（秒）：超过则放弃流式、回退伪流式，避免界面长时间空转。 */
+    private static final long CALL_TIMEOUT_SECONDS = 180;
+
     private final ModelRouter modelRouter;
     private final ToolGateway toolGateway;
     private final PersonaService personaService;
+    private final WorkspaceConfig workspaceConfig;
     private final MemoryRetriever memoryRetriever;
+    private final HierarchyMemoryRetriever hierarchyMemoryRetriever;
     private final ConversationStateManager stateManager;
     private final CoreProperties properties;
     private final CompactionPipeline compactionPipeline;
@@ -73,7 +95,9 @@ public class ReactEngine implements Engine {
     private final double contextThreshold;
 
     public ReactEngine(ModelRouter modelRouter, ToolGateway toolGateway, PersonaService personaService,
-                       MemoryRetriever memoryRetriever, ConversationStateManager stateManager,
+                       WorkspaceConfig workspaceConfig,
+                       MemoryRetriever memoryRetriever, HierarchyMemoryRetriever hierarchyMemoryRetriever,
+                       ConversationStateManager stateManager,
                        CoreProperties properties,
                        CompactionPipeline compactionPipeline,
                        TokenMeter tokenMeter,
@@ -85,7 +109,9 @@ public class ReactEngine implements Engine {
         this.modelRouter = modelRouter;
         this.toolGateway = toolGateway;
         this.personaService = personaService;
+        this.workspaceConfig = workspaceConfig;
         this.memoryRetriever = memoryRetriever;
+        this.hierarchyMemoryRetriever = hierarchyMemoryRetriever;
         this.stateManager = stateManager;
         this.properties = properties;
         this.compactionPipeline = compactionPipeline;
@@ -111,7 +137,6 @@ public class ReactEngine implements Engine {
         // 用户在界面选定的模型端点（未指定时由路由回退主端点）
         String modelId = modelIdOf(ctx);
         try {
-            ChatModel model = modelRouter.resolve(modelId);
             String sysPrompt = assembleSystemPrompt(ctx, phase);
             List<ToolSpecification> tools = toolGateway.buildToolSpecifications(ctx.workspaceId(), ctx.goal());
 
@@ -131,6 +156,10 @@ public class ReactEngine implements Engine {
 
             publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(), "开始" + phase.name() + "阶段"));
 
+            // 流式主路径 + 同步回退：同一路由解析，流式不可用/失败时逐轮降级同步，保证任何端点都能跑通
+            StreamingChatModel streaming = modelRouter.resolveStreaming(modelId);
+            ChatModel sync = modelRouter.resolve(modelId);
+
             int step = 0;
             String finalText = null;
             long tokenUsed = 0;
@@ -139,12 +168,17 @@ public class ReactEngine implements Engine {
             while (step < maxSteps) {
                 step++;
                 AiMessage ai;
+                TurnOutcome outcome;
                 try {
                     ChatRequest request = ChatRequest.builder()
                             .messages(messages)
                             .toolSpecifications(tools)
                             .build();
-                    ai = model.chat(request).aiMessage();
+                    // 流式：整轮实时推送正文增量，工具请求在完成回调中返回；同步：整段返回后伪流式补齐
+                    outcome = streaming != null
+                            ? streamTurn(ctx, request, publisher, streaming, sync)
+                            : syncTurn(ctx, request, publisher, sync, "", true);
+                    ai = outcome.ai();
                 } catch (Exception e) {
                     throw new IllegalStateException("模型调用失败：" + e.getMessage(), e);
                 }
@@ -162,28 +196,17 @@ public class ReactEngine implements Engine {
                 messages.add(ai);
                 lastAi = ai;
 
-                // 无工具调用 → 最终回复（思考在前，正文流式输出在后）
+                // 思考（reasoning/thinking）已按段落实时推送（流式）或随同步轮发布（syncTurn），
+                // 这里不再整段补发，避免与分段思考块重复。
+
+                // 无工具调用 → 最终回复（正文已在生成时实时推送，这里仅取文本收尾）
                 if (ai.toolExecutionRequests() == null || ai.toolExecutionRequests().isEmpty()) {
-                    // 思考内容（reasoning/thinking）作为 thought 事件推送，前端渲染在正文之前
-                    String thinking = thinkingOf(ai);
-                    if (thinking != null && !thinking.isBlank()) {
-                        publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(), thinking));
-                    }
-                    finalText = ai.text();
-                    if (finalText != null && !finalText.isBlank()) {
-                        finalText = streamFinalReply(ctx, finalText, publisher);
-                    }
+                    finalText = outcome.text();
                     break;
                 }
 
-                // 有工具调用：把模型本轮的过程叙述（ai.text）推送到思考区，
-                // 让用户在工具执行前后能看到 Agent 的推理与进展，而不只看到最终流式结果
-                String narrate = ai.text();
-                if (narrate != null && !narrate.isBlank()) {
-                    publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(), narrate));
-                }
-
-                // 有工具调用 → 批量分发（只读并行、写串行），按输入顺序回灌结果
+                // 有工具调用 → 批量分发（只读并行、写串行），按输入顺序回灌结果。
+                // 模型本轮的过程叙述已实时流入正文（ChatGPT 式：可见文本统一进消息体），不再单独进思考区。
                 List<dev.langchain4j.agent.tool.ToolExecutionRequest> reqs = ai.toolExecutionRequests();
                 List<ToolGateway.ToolCall> calls = new ArrayList<>();
                 for (ToolExecutionRequest req : reqs) {
@@ -281,12 +304,42 @@ public class ReactEngine implements Engine {
         assembler.persona(personaService.renderPersonaLayer(personaId(ctx)));
         assembler.phase(phaseInstruction(phase));
         assembler.permission(permissionInstruction(ctx.permissionLevel()));
-        RecallResult recall = memoryRetriever.recall(ctx.userId(), ctx.goal() == null ? "" : ctx.goal(), 5);
-        if (recall != null && recall.entries() != null && !recall.entries().isEmpty()) {
-            StringBuilder memory = new StringBuilder("【已知记忆】");
-            recall.entries().forEach(e -> memory.append('\n').append("- [").append(e.track().code())
-                    .append("] ").append(e.content()));
-            assembler.memory(memory.toString());
+        // 当前工作空间上下文（核心）：告诉 Agent 它到底在哪个工作区、根目录在哪，
+        // 避免「以为工作在默认目录/不知道项目在哪」而反复向用户索要路径（用户说“项目”即指此目录）。
+        Optional<Workspace> ws = ctx == null ? Optional.empty() : workspaceConfig.getWorkspace(ctx.workspaceId());
+        if (ws.isPresent() && ws.get().path() != null && !ws.get().path().isBlank()) {
+            assembler.memory("【当前工作空间】\n"
+                    + "名称：" + (ws.get().name() == null ? ctx.workspaceId() : ws.get().name()) + "\n"
+                    + "根目录：" + ws.get().path() + "\n"
+                    + "用户所说的“项目”“工作目录”“这里”等，若未特别说明，均指这个根目录；"
+                    + "所有文件操作（列目录/读/写）应基于此根目录进行，不要向用户索要路径，"
+                    + "也不要访问根目录之外的路径。");
+            // 项目规则（两级 LUCKY.md 的第二级）：工作空间根下的 LUCKY.md，
+            // 与全局规则（框架根 LUCKY.md，已作为基座层注入）叠加生效，项目规则优先级更高。
+            Path ruleFile = Path.of(ws.get().path()).resolve("LUCKY.md");
+            try {
+                if (Files.isRegularFile(ruleFile)) {
+                    String rules = Files.readString(ruleFile, StandardCharsets.UTF_8);
+                    if (rules != null && !rules.isBlank()) {
+                        assembler.memory("【项目规则】\n" + rules.trim());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("读取项目规则失败（忽略）：{}", ruleFile, e);
+            }
+        }
+        // 记忆召回：优先按层读已总结的 md（整体→项目→会话）；md 为空/关闭时回退旧 JSONL 双轨召回
+        String mdMemory = hierarchyMemoryRetriever.recallText(ctx.workspaceId(), ctx.sessionRef().sessionId());
+        if (mdMemory != null && !mdMemory.isBlank()) {
+            assembler.memory("【已知记忆】\n" + mdMemory);
+        } else {
+            RecallResult recall = memoryRetriever.recall(ctx.userId(), ctx.goal() == null ? "" : ctx.goal(), 5);
+            if (recall != null && recall.entries() != null && !recall.entries().isEmpty()) {
+                StringBuilder memory = new StringBuilder("【已知记忆】");
+                recall.entries().forEach(e -> memory.append('\n').append("- [").append(e.track().code())
+                        .append("] ").append(e.content()));
+                assembler.memory(memory.toString());
+            }
         }
         return assembler.assemble();
     }
@@ -299,7 +352,9 @@ public class ReactEngine implements Engine {
     private String phaseInstruction(Phase phase) {
         return switch (phase) {
             case PLAN -> """
-                    【阶段指令】当前为规划阶段：先产出结构化计划 JSON（goal/steps/canAutoExecute），不要执行任何操作。
+                    【阶段指令】当前为规划阶段：先判断任务复杂度，产出结构化计划。
+                    - 若为简单任务（无需工具拆分、一次问答即可完成）：不要产出步骤列表，直接输出结构化总结（结论 + 关键信息），一步到位。
+                    - 若为复杂任务：产出结构化计划 JSON（goal/steps/canAutoExecute），不要执行任何操作。
                     每个步骤尽可能声明 verify 字段，说明「如何客观证明这一步做成了」：
                     - 产物类步骤用 {"type":"file","path":"产物相对路径","contains":"关键内容片段"}；
                     - 可校验步骤用 {"type":"command","command":"校验命令","contains":"期望输出"}，\
@@ -312,9 +367,19 @@ public class ReactEngine implements Engine {
                        框架会为每项启动一个隔离子代理执行并回传摘要；不要把本可由主链路步骤完成的普通拆解放进 subagents。
                     当拆分与子代理并存时，subagents 优先执行（先并行解决独立子问题），随后再用 steps 完成串行收尾。
                     子代理不可提升权限、只回摘要；不要在 subagents.task 里要求它去做需要整库上下文才能决策的事。""";
-            case ACT -> "【阶段指令】当前为执行阶段：按计划逐步执行，工具调用过程中不要长篇输出过程细节；"
-                    + "全部完成后，必须输出一段【简明总结】：概括本次完成的操作、修改/新增的文件路径、"
-                    + "以及最终结论或建议，让用户一眼看懂结果，避免罗列中间过程。";
+            case ACT -> """
+                    【阶段指令】当前为执行阶段。严格遵守：
+                    1. 只做用户明确要求的事：不执行用户未要求的操作，不擅自修改/删除/生成目标之外的文件，不自行扩大任务范围；
+                       需要额外操作时先停下来询问用户，得到同意后再做。
+                    2. 先判断任务复杂度：
+                       - 简单任务（无需工具或一次即可完成）：直接输出【结构化总结】（结论 + 做了什么 + 关键路径），
+                         不要拆步骤、不要反复复评、不要冗余过程。
+                       - 复杂任务：按步骤执行，每完成一步先用简短的 Markdown 段落向用户阶段性汇报该步结果
+                         （做了什么、结果如何），不要一次把所有过程写完；全部步骤完成后，输出【总结】概括完成的操作、
+                         修改/新增的文件路径与最终结论。
+                    3. 阶段性汇报要简短，总结要完整；工具调用过程中不要长篇输出过程细节。
+                    4. 任务完成后立即停止：不要继续追加无关内容、不要重复确认已经完成的事项。
+                    总结必须使用 Markdown 格式输出（可用标题、无序/有序列表、加粗、行内代码、代码块、引用等标准 Markdown 语法）。""";
             case ASK -> "【阶段指令】当前为确认阶段：仅就高风险点向用户确认，不要继续执行。";
         };
     }
@@ -457,16 +522,139 @@ public class ReactEngine implements Engine {
         }
     }
 
+    /** 单轮模型调用结果：{@code streamed=true} 表示正文已由流式实时推送（同步回退为 false）。 */
+    private record TurnOutcome(String text, String thinking, AiMessage ai, boolean streamed) {
+    }
+
     /**
-     * 最终回复流式输出：将已生成好的最终回复按小块切分，逐块发布 {@code CONTENT_DELTA} 事件，
-     * 前端逐字渲染出打字机效果；返回完整文本作为最终答复。
+     * 流式单轮调用（真实流式核心）：经 {@link StreamingChatModel} 把模型产出的每个文本增量
+     * 实时发布 {@code CONTENT_DELTA} 事件，前端逐字渲染（真正边生成边显示）；工具请求在
+     * {@code onCompleteResponse} 中随 {@code AiMessage} 返回。
      *
-     * <p>当前 LangChain4j 1.19 的官方 {@code OpenAiChatModel} 未暴露流式 API，故采用
-     * 文本分块 + 轻量延时实现视觉流式，不引入额外的模型流式请求，也不增加模型调用成本。</p>
+     * <p>思考增量（reasoning/thinking）在轮内缓冲，轮末随 {@code TurnOutcome} 返回，由调用方
+     * 以 {@code thought} 事件整段收进思考区——思考区默认收起，逐字渲染对用户感知无增益，避免
+     * 思考列表被碎片刷屏。</p>
+     *
+     * <p>流式不可用、超时或出错时降级 {@link #syncTurn}（同轮重试同步调用），保证任何端点都能跑通；
+     * 已实时展示的部分增量不会重复推送（{@code alreadyShown} 前缀判定），避免正文拼接错乱。</p>
+     *
+     * @param request 本轮请求（含当前上下文与工具集）
+     * @param sync    同步回退模型（流式失败时同轮重试）
+     * @return 单轮结果（文本 + 思考 + AiMessage + 是否已流式）
      */
-    private String streamFinalReply(ConversationCtx ctx, String fallback, AgentEventPublisher publisher) {
-        String text = fallback == null ? "" : fallback;
-        if (text.isEmpty()) {
+    private TurnOutcome streamTurn(ConversationCtx ctx, ChatRequest request,
+                                   AgentEventPublisher publisher,
+                                   StreamingChatModel streaming, ChatModel sync) {
+        StringBuilder textBuf = new StringBuilder();
+        StringBuilder thinkBuf = new StringBuilder();
+        AtomicReference<AiMessage> aiRef = new AtomicReference<>();
+        AtomicReference<Throwable> errorRef = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        try {
+            streaming.chat(request, new StreamingChatResponseHandler() {
+                @Override
+                public void onPartialResponse(PartialResponse partial, PartialResponseContext context) {
+                    if (partial == null || partial.text() == null || partial.text().isEmpty()) {
+                        return;
+                    }
+                    textBuf.append(partial.text());
+                    publisher.publish(ctx.sessionId(), AgentEvent.contentDelta(ctx.sessionId(), partial.text()));
+                }
+
+                @Override
+                public void onPartialThinking(PartialThinking thinking, PartialThinkingContext context) {
+                    if (thinking == null || thinking.text() == null || thinking.text().isEmpty()) {
+                        return;
+                    }
+                    thinkBuf.append(thinking.text());
+                    // 思考分段推送：按完整段落（换行）实时发布独立 thought 事件，前端逐条折叠展示，
+                    // 配合正文阶段性汇报形成「思考 → 阶段性回答 → 再思考」的交替体验，而不是整段塞成一条。
+                    int nl;
+                    while ((nl = thinkBuf.indexOf("\n")) >= 0) {
+                        String seg = thinkBuf.substring(0, nl).trim();
+                        thinkBuf.delete(0, nl + 1);
+                        if (!seg.isBlank()) {
+                            publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(), seg));
+                        }
+                    }
+                }
+
+                @Override
+                public void onCompleteResponse(ChatResponse response) {
+                    aiRef.set(response.aiMessage());
+                    latch.countDown();
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                    errorRef.set(error);
+                    latch.countDown();
+                }
+            });
+            if (!latch.await(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("流式调用超时（>" + CALL_TIMEOUT_SECONDS + "s）");
+            }
+        } catch (Exception e) {
+            errorRef.set(e);
+        }
+        if (errorRef.get() != null) {
+            log.warn("流式调用失败，降级同步：session={} error={}", ctx.sessionId(), errorRef.get().getMessage());
+            // 已实时展示的思考/正文不重复推送（降级路径不再发布 thinking）
+            return syncTurn(ctx, request, publisher, sync, textBuf.toString(), false);
+        }
+        AiMessage ai = aiRef.get();
+        if (ai == null) {
+            log.warn("流式调用无响应，降级同步：session={}", ctx.sessionId());
+            return syncTurn(ctx, request, publisher, sync, textBuf.toString(), false);
+        }
+        // 收尾：把未到换行结尾的思考残量作为最后一个段落发布
+        String thinkTail = thinkBuf.toString().trim();
+        if (!thinkTail.isBlank()) {
+            publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(), thinkTail));
+        }
+        String text = textBuf.length() > 0 ? textBuf.toString() : (ai.text() == null ? "" : ai.text());
+        if (textBuf.isEmpty() && !text.isBlank()) {
+            // 端点未下发增量（整段返回）：伪流式补齐，保证界面仍有逐字输出效果
+            streamChunked(ctx, text, publisher);
+        }
+        String thinking = thinkBuf.length() > 0 ? thinkBuf.toString() : thinkingOf(ai);
+        return new TurnOutcome(text, thinking, ai, !textBuf.isEmpty());
+    }
+
+    /**
+     * 同步单轮调用（流式不可用/失败时的回退）：整段返回后伪流式推送到正文，保证界面始终有
+     * 逐字输出效果；已实时展示的部分（{@code alreadyShown}）不重复推送，避免正文拼接错乱。
+     *
+     * @param publishThinking 是否发布思考块：直接同步调用时为 true；流式降级路径为 false
+     *                        （思考已在降级前按段落实时推送过，避免重复）
+     */
+    private TurnOutcome syncTurn(ConversationCtx ctx, ChatRequest request,
+                                 AgentEventPublisher publisher, ChatModel sync, String alreadyShown,
+                                 boolean publishThinking) {
+        ChatResponse response = sync.chat(request);
+        AiMessage ai = response.aiMessage();
+        String full = ai.text() == null ? "" : ai.text();
+        if (full.startsWith(alreadyShown) && full.length() > alreadyShown.length()) {
+            // 已展示增量是同步文本前缀：仅补齐剩余，保证完整答案不被截断
+            streamChunked(ctx, full.substring(alreadyShown.length()), publisher);
+        } else if (alreadyShown.isEmpty() && !full.isBlank()) {
+            streamChunked(ctx, full, publisher);
+        }
+        if (publishThinking) {
+            String thinking = thinkingOf(ai);
+            if (thinking != null && !thinking.isBlank()) {
+                publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(), thinking));
+            }
+        }
+        return new TurnOutcome(full, thinkingOf(ai), ai, false);
+    }
+
+    /**
+     * 伪流式补齐：将已生成的文本按小块切分，逐块发布 {@code CONTENT_DELTA} 事件，前端渲染出
+     * 打字机效果。仅当端点不支持下发流式增量时使用（真实流式见 {@link #streamTurn}）。
+     */
+    private String streamChunked(ConversationCtx ctx, String text, AgentEventPublisher publisher) {
+        if (text == null || text.isEmpty()) {
             return text;
         }
         int chunk = 6;

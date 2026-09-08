@@ -4,6 +4,7 @@ import com.lucky.agent.model.api.ModelEndpoint;
 import com.lucky.agent.model.api.dto.InferenceDepth;
 import com.lucky.agent.model.api.dto.ModelConfig;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 
 /**
  * 端点接入适配（ModelEndpoint 实现）：本地配置直连 → LangChain4j 官方 ChatModel。
@@ -31,6 +32,12 @@ public class ModelEndpointImpl implements ModelEndpoint {
         return EndpointFormat.fromUrl(config.endpointUrl()) == EndpointFormat.ANTHROPIC
                 ? new AnthropicCompatibleModel(config, inferenceDepth)
                 : new OpenAiCompatibleModel(config, inferenceDepth);
+    }
+
+    @Override
+    public StreamingChatModel toStreamingModel() {
+        // 兼容模型类同时实现 ChatModel + StreamingChatModel，复用同一实例即可
+        return (StreamingChatModel) toModel();
     }
 
     @Override

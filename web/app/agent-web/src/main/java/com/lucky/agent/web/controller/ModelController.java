@@ -55,6 +55,18 @@ public class ModelController {
         return accessCenter.save(config);
     }
 
+    /**
+     * 读取指定端点明文 API Key（仅编辑场景调用）。
+     *
+     * <p>列表接口保持脱敏（apiKey 恒为空），此处按 id 单独返回明文，供编辑弹窗回显。
+     * 本机单人应用、Key 明文落盘于本机 settings.json（零托管），前端仅在用户主动编辑时拉取。</p>
+     */
+    @GetMapping("/{id}/key")
+    public Map<String, String> key(@PathVariable String id) {
+        String raw = accessCenter.require(id).apiKey();
+        return Map.of("id", id, "apiKey", raw == null ? "" : raw);
+    }
+
     /** 删除端点配置。 */
     @DeleteMapping("/{id}")
     public Map<String, Boolean> delete(@PathVariable String id) {

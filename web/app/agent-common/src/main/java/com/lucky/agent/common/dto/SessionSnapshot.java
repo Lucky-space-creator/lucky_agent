@@ -41,10 +41,15 @@ public class SessionSnapshot {
     /**
      * 会话消息记录。
      *
-     * @param role    角色：user / assistant / system / observation
-     * @param content 内容
-     * @param ts      时间戳
+     * @param role          角色：user / assistant / system / observation
+     * @param content       内容
+     * @param ts            时间戳
+     * @param checkpointIds 该消息执行期间创建的文件检查点 ID（按创建顺序），用于消息级回溯
      */
-    public record MessageRecord(String role, String content, String ts) {
+    public record MessageRecord(String role, String content, String ts, java.util.List<String> checkpointIds) {
+
+        public MessageRecord(String role, String content, String ts) {
+            this(role, content, ts, null);
+        }
     }
 }

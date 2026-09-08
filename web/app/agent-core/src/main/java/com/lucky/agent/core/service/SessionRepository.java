@@ -58,18 +58,30 @@ public class SessionRepository {
         }
     }
 
-    /** 追加一条消息到会话�?*/
-    public synchronized void appendMessage(String sessionId, String role, String content, String ts) {
+    /** 追加一条消息到会话（checkpointIds 为该消息执行期间产生的检查点，可空）。 */
+    public synchronized void appendMessage(String sessionId, String role, String content, String ts,
+                                           List<String> checkpointIds) {
         try {
             Files.createDirectories(sessionsDir);
-            Map<String, Object> record = Map.of("role", role, "content", content == null ? "" : content, "ts", ts);
+            Map<String, Object> record = new java.util.LinkedHashMap<>();
+            record.put("role", role);
+            record.put("content", content == null ? "" : content);
+            record.put("ts", ts);
+            if (checkpointIds != null && !checkpointIds.isEmpty()) {
+                record.put("checkpointIds", checkpointIds);
+            }
             JsonlUtil.append(messageFile(sessionId), record);
         } catch (Exception e) {
             log.warn("追加会话消息失败：{}", sessionId, e);
         }
     }
 
-    /** 加载会话历史�?*/
+    /** 兼容旧调用（无检查点）。 */
+    public void appendMessage(String sessionId, String role, String content, String ts) {
+        appendMessage(sessionId, role, content, ts, null);
+    }
+
+    /** 加载会话历史。 */
     public List<SessionSnapshot.MessageRecord> loadMessages(String sessionId) {
         Path file = messageFile(sessionId);
         if (!Files.exists(file)) {
@@ -77,11 +89,65 @@ public class SessionRepository {
         }
         return JsonlUtil.readAll(file, line -> {
             Map<String, Object> m = JsonlUtil.parseLine(line, Map.class);
+            Object ck = m.get("checkpointIds");
+            List<String> checkpointIds = ck instanceof List<?> l
+                    ? l.stream().map(String::valueOf).toList()
+                    : null;
             return new SessionSnapshot.MessageRecord(
                     String.valueOf(m.getOrDefault("role", "unknown")),
                     String.valueOf(m.getOrDefault("content", "")),
-                    String.valueOf(m.getOrDefault("ts", "")));
+                    String.valueOf(m.getOrDefault("ts", "")),
+                    checkpointIds);
         });
+    }
+
+    /**
+     * 移除某条消息已成功回溯的检查点引用（回退后不再重复展示撤销入口）。
+     *
+     * @param sessionId     会话 ID
+     * @param ts            消息时间戳（消息定位键）
+     * @param checkpointIds 已回溯的检查点 ID
+     */
+    public synchronized void removeCheckpoints(String sessionId, String ts, List<String> checkpointIds) {
+        Path file = messageFile(sessionId);
+        if (!Files.exists(file) || checkpointIds == null || checkpointIds.isEmpty()) {
+            return;
+        }
+        java.util.Set<String> removed = new java.util.HashSet<>(checkpointIds);
+        List<String> lines = JsonlUtil.readLines(file);
+        List<String> rewritten = new ArrayList<>();
+        boolean changed = false;
+        for (String line : lines) {
+            if (line.isBlank()) {
+                rewritten.add(line);
+                continue;
+            }
+            Map<String, Object> m = JsonlUtil.parseLine(line, Map.class);
+            if (ts != null && ts.equals(String.valueOf(m.getOrDefault("ts", "")))) {
+                Object ck = m.get("checkpointIds");
+                if (ck instanceof List<?> l) {
+                    List<String> kept = l.stream().map(String::valueOf)
+                            .filter(id -> !removed.contains(id)).toList();
+                    if (kept.size() != l.size()) {
+                        if (kept.isEmpty()) {
+                            m.remove("checkpointIds");
+                        } else {
+                            m.put("checkpointIds", kept);
+                        }
+                        try {
+                            line = objectMapper.writeValueAsString(m);
+                        } catch (IOException e) {
+                            log.warn("序列化会话消息失败：{}", sessionId, e);
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            rewritten.add(line);
+        }
+        if (changed) {
+            JsonlUtil.rewrite(file, rewritten);
+        }
     }
 
     /** 加载会话元数据�?*/

@@ -41,6 +41,10 @@ export interface ChatItem {
   ask?: AskView
   tokenUsed?: number
   model?: string
+  /** 该消息执行期间产生的文件检查点 ID（可消息级回溯）。 */
+  checkpointIds?: string[]
+  /** 已执行过回溯（撤销入口置灰）。 */
+  rolledBack?: boolean
 }
 
 export interface ChatSession {
@@ -91,6 +95,44 @@ export const useChatStore = defineStore('chat', () => {
       clearInterval(metricsTimer)
       metricsTimer = null
     }
+  }
+
+  /**
+   * 收尾后从后端历史补齐各消息的文件检查点 ID。
+   * SSE 不携带检查点信息，靠 content 对齐历史记录补齐（含确认续跑导致的历史多一条的场景）。
+   */
+  async function syncCheckpointIds(sessionId: string) {
+    const ws = useWorkspaceStore()
+    const workspaceId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
+    try {
+      const snap = await chatApi.history({ sessionId, userId: userId(), workspaceId })
+      const histAssist = (snap.messages ?? []).filter((m) => m.role === 'assistant' && m.checkpointIds?.length)
+      if (!histAssist.length) return
+      const memAssist = messages.value.filter((m) => m.role === 'assistant' && !m.checkpointIds?.length)
+      for (let i = memAssist.length - 1; i >= 0; i--) {
+        const m = memAssist[i]
+        if (!m.content) continue
+        const rec = [...histAssist].reverse().find((h) => h.content === m.content)
+        if (rec?.checkpointIds?.length) m.checkpointIds = rec.checkpointIds
+      }
+    } catch {
+      // 同步失败静默：下次进入会话时会从历史补齐
+    }
+  }
+
+  /** 消息级回溯：撤销该消息执行期间修改过的文件（成功后撤销入口置灰）。 */
+  async function rollbackMessage(item: ChatItem) {
+    const sessionId = currentSessionId.value
+    if (!sessionId || !item.ts) return 0
+    const ws = useWorkspaceStore()
+    const session = sessions.value.find((s) => s.id === sessionId)
+    const workspaceId = session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || ''
+    const res = await chatApi.rollbackMessage({ sessionId, workspaceId, messageTs: item.ts })
+    if (res.restored > 0) {
+      item.rolledBack = true
+      item.checkpointIds = []
+    }
+    return res.restored
   }
 
   /** 拉取一次会话指标（供立即刷新与收尾补拉）。 */
@@ -150,6 +192,7 @@ export const useChatStore = defineStore('chat', () => {
         thoughts: [],
         toolCalls: [],
         plan: null,
+        checkpointIds: m.checkpointIds?.length ? m.checkpointIds : undefined,
       }))
     } catch {
       messages.value = []
@@ -161,7 +204,17 @@ export const useChatStore = defineStore('chat', () => {
     if (currentSessionId.value && sessionExists(currentSessionId.value)) {
       return currentSessionId.value
     }
-    const session: ChatSession = { id: uid(), title: '新会话', workspaceId: '', createdAt: Date.now() }
+    // 复用已有的未使用新会话（与 newSession 的「只存留一个新会话」约束一致）
+    const pending = sessions.value.find((s) => s.title === '新会话')
+    if (pending) {
+      currentSessionId.value = pending.id
+      messages.value = []
+      error.value = null
+      return pending.id
+    }
+    const ws = useWorkspaceStore()
+    const workspaceId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
+    const session: ChatSession = { id: uid(), title: '新会话', workspaceId, createdAt: Date.now() }
     sessions.value.unshift(session)
     currentSessionId.value = session.id
     messages.value = []
@@ -169,13 +222,85 @@ export const useChatStore = defineStore('chat', () => {
     return session.id
   }
 
-  async function newSession() {
+  /**
+   * 新建会话：
+   * - 不传 workspaceId（顶部「新对话」）→ 创建不绑定任何工作空间的空白会话，由用户稍后选择/绑定；
+   * - 传 workspaceId（项目节点「＋」）→ 创建绑定该项目的会话。
+   * 只允许存留一个「同一绑定」下未使用的新会话。
+   */
+  async function newSession(workspaceId?: string) {
     closeActiveStream()
-    const session: ChatSession = { id: uid(), title: '新会话', workspaceId: '', createdAt: Date.now() }
+    const effWs = workspaceId ?? ''
+    // 只能存留一个同绑定下未使用的新会话：复用它而不是继续新建
+    const pending = sessions.value.find((s) => s.title === '新会话' && (s.workspaceId ?? '') === effWs)
+    if (pending) {
+      currentSessionId.value = pending.id
+      messages.value = []
+      error.value = null
+      return
+    }
+    let session: ChatSession
+    try {
+      const meta = await chatApi.createSession({ userId: userId(), workspaceId: effWs, title: '新会话' })
+      session = {
+        id: meta.sessionId,
+        title: meta.title || '新会话',
+        workspaceId: meta.workspaceId || effWs,
+        createdAt: meta.createdAt || Date.now(),
+      }
+    } catch {
+      session = { id: uid(), title: '新会话', workspaceId: effWs, createdAt: Date.now() }
+    }
     sessions.value.unshift(session)
     currentSessionId.value = session.id
     messages.value = []
     error.value = null
+  }
+
+  /** 重命名会话。 */
+  async function renameSession(id: string, title: string) {
+    const s = sessions.value.find((x) => x.id === id)
+    if (!s || !title.trim()) return
+    const prev = s.title
+    s.title = title.trim()
+    try {
+      const meta = await chatApi.updateSession({ sessionId: id, userId: userId(), title: s.title })
+      if (meta.title) s.title = meta.title
+    } catch {
+      s.title = prev
+    }
+  }
+
+  /**
+   * 切换当前会话绑定的工作空间（同步工作空间 store 与后端元数据）。
+   *
+   * <p>已有对话记录的会话被后端锁定：切换被拒时回滚并返回 false（调用方提示用户）。</p>
+   *
+   * @returns 是否切换成功（false 表示该会话已有对话记录，工作空间被锁定）
+   */
+  async function setSessionWorkspace(workspaceId: string): Promise<boolean> {
+    const ws = useWorkspaceStore()
+    ws.setCurrent(workspaceId)
+    const session = currentSession.value
+    if (!session || session.workspaceId === workspaceId) {
+      return true
+    }
+    const prev = session.workspaceId
+    session.workspaceId = workspaceId
+    try {
+      const meta = await chatApi.updateSession({ sessionId: session.id, userId: userId(), workspaceId })
+      if (meta.workspaceId && meta.workspaceId !== workspaceId) {
+        // 后端拒绝（会话已有对话记录）：回滚并提示
+        session.workspaceId = prev
+        ws.setCurrent(prev)
+        return false
+      }
+      return true
+    } catch {
+      session.workspaceId = prev
+      ws.setCurrent(prev)
+      return false
+    }
   }
 
   async function selectSession(id: string) {
@@ -227,10 +352,11 @@ export const useChatStore = defineStore('chat', () => {
   /** 提交用户输入（异步：POST 立即返回，事件经 SSE 驱动收尾）。 */
   async function submit(content: string, extra?: Record<string, any>) {
     const ws = useWorkspaceStore()
-    // 普通对话无需强制选择工作空间：有当前工作空间用当前，否则用默认（第一个）或空串
-    const workspaceId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
     const sessionId = ensureSession()
     const session = sessions.value.find((s) => s.id === sessionId)
+    // 会话绑定的工作空间优先（Composer 切换后即绑定），否则回退当前工作空间/默认
+    const workspaceId =
+      session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || ''
     if (session && (session.title === '新会话' || session.title === '对话')) {
       session.title = content.slice(0, 24)
     }
@@ -302,6 +428,8 @@ export const useChatStore = defineStore('chat', () => {
           // 收尾补拉一次最终指标（轮次/步骤/消耗），保证面板停留在真实终态
           refreshMetrics(sessionId)
           stopMetrics()
+          // 从后端历史补齐本轮产生的文件检查点，使刚完成的回复立即可回溯
+          syncCheckpointIds(sessionId)
           if (activeClose) {
             activeClose()
             activeClose = null
@@ -451,6 +579,7 @@ export const useChatStore = defineStore('chat', () => {
           running.value = false
           refreshMetrics(sessionId)
           stopMetrics()
+          syncCheckpointIds(sessionId)
           if (activeClose) {
             activeClose()
             activeClose = null
@@ -611,10 +740,13 @@ export const useChatStore = defineStore('chat', () => {
     loadHistory,
     ensureSession,
     newSession,
+    renameSession,
+    setSessionWorkspace,
     selectSession,
     removeSession,
     submit,
     cancel,
     confirmAsk,
+    rollbackMessage,
   }
 })

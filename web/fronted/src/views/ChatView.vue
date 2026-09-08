@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { useWorkspaceStore } from '@/stores/workspace'
+import { useToastStore } from '@/stores/toast'
 import { useUiStore } from '@/stores/ui'
+import { fileApi } from '@/api'
+import type { ExecResult } from '@/api/types'
 import MessageItem from '@/components/chat/MessageItem.vue'
 import Composer from '@/components/chat/Composer.vue'
 import TransparencyPanel from '@/components/chat/TransparencyPanel.vue'
@@ -12,6 +16,8 @@ import Icon from '@/components/common/Icon.vue'
 
 const chat = useChatStore()
 const ui = useUiStore()
+const workspace = useWorkspaceStore()
+const toast = useToastStore()
 
 /** 右侧工具类型。 */
 type ToolKey = 'metrics' | 'files'
@@ -161,6 +167,86 @@ function welcomeKeydown(e: KeyboardEvent) {
     welcomeSend()
   }
 }
+
+/* ---------- 欢迎页输入框：工作空间选择 + 文件上传（与对话态 Composer 一致） ---------- */
+
+/** 当前会话绑定的工作空间（未绑定返回 null）。 */
+const sessionWs = computed(() => {
+  const wid = chat.currentSession?.workspaceId
+  if (!wid) return null
+  return workspace.workspaces.find((w) => w.workspaceId === wid) ?? null
+})
+const wsLabel = computed(() => sessionWs.value?.name ?? '选择工作空间')
+const wsOpen = ref(false)
+const wsRoot = ref<HTMLElement | null>(null)
+
+/** 点击选择器外部时关闭工作空间下拉列表。 */
+function onWsDoc(e: MouseEvent) {
+  if (wsRoot.value && !wsRoot.value.contains(e.target as Node)) wsOpen.value = false
+}
+onMounted(() => document.addEventListener('mousedown', onWsDoc))
+onUnmounted(() => document.removeEventListener('mousedown', onWsDoc))
+
+async function pickWs(workspaceId: string) {
+  wsOpen.value = false
+  if (workspaceId === sessionWs.value?.workspaceId) return
+  const ok = await chat.setSessionWorkspace(workspaceId)
+  if (!ok) toast.info('该会话已有对话记录，不能切换工作空间')
+}
+
+/** 上传文件到当前工作空间（成功后把附件清单注入待发送内容）。 */
+const fileInput = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
+
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => {
+      const result = r.result as string
+      resolve(result.split(',')[1] ?? '')
+    }
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(file)
+  })
+}
+
+async function welcomeFiles(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length) return
+  if (!workspace.current) {
+    toast.info('请先选择或创建工作空间，再上传文件')
+    return
+  }
+  uploading.value = true
+  const uploaded: string[] = []
+  let fail = ''
+  for (const f of files) {
+    try {
+      const b64 = await readAsBase64(f)
+      const target = `.uploads/${f.name}`
+      const res = (await fileApi.op({
+        opType: 'WRITE',
+        workspaceId: workspace.current.workspaceId,
+        path: target,
+        content: b64,
+        args: { encoding: 'base64' },
+      })) as ExecResult
+      if (res.ok) uploaded.push(`- ${f.name}（${target}）`)
+      else fail = res.error || '上传失败'
+    } catch (err) {
+      fail = (err as Error).message
+    }
+  }
+  uploading.value = false
+  if (uploaded.length) {
+    const note = `【已上传附件，已写入工作区】\n${uploaded.join('\n')}`
+    welcomeText.value = (welcomeText.value ? welcomeText.value + '\n\n' : '') + note
+    toast.success(`已上传 ${uploaded.length} 个文件到工作区`)
+  }
+  if (fail) toast.error(fail)
+}
 </script>
 
 <template>
@@ -278,10 +364,43 @@ function welcomeKeydown(e: KeyboardEvent) {
             @keydown="welcomeKeydown"
           />
           <div class="glass__foot">
-            <button class="glass__custom">
-              <Icon name="wand" :size="13" />
-              <span>自定义</span>
+            <!-- 工作空间选择（绑定当前会话；未绑定显示占位） -->
+            <div ref="wsRoot" class="glass__ws">
+              <button
+                class="glass__custom"
+                :class="{ 'glass__custom--unbound': !sessionWs, 'glass__custom--open': wsOpen }"
+                :title="sessionWs ? '切换工作空间（绑定到当前会话）' : '当前会话未绑定工作空间，点击选择'"
+                @click="wsOpen = !wsOpen"
+              >
+                <Icon name="folder" :size="13" />
+                <span class="ellipsis glass__ws-name">{{ wsLabel }}</span>
+                <Icon name="chevronDown" :size="11" />
+              </button>
+              <Transition name="drop">
+                <div v-if="wsOpen" class="glass__ws-menu">
+                  <button
+                    v-for="w in workspace.visible"
+                    :key="w.workspaceId"
+                    class="glass__ws-opt"
+                    :class="{ 'glass__ws-opt--on': w.workspaceId === sessionWs?.workspaceId }"
+                    @click="pickWs(w.workspaceId)"
+                  >
+                    <Icon name="folder" :size="11" />
+                    <span class="ellipsis">{{ w.name }}</span>
+                    <Icon v-if="w.workspaceId === sessionWs?.workspaceId" name="check" :size="10" />
+                  </button>
+                  <button v-if="!workspace.visible.length" class="glass__ws-opt" disabled>
+                    暂无工作空间，请先在设置中新建
+                  </button>
+                </div>
+              </Transition>
+            </div>
+            <!-- 上传文件到当前工作空间 -->
+            <button class="glass__custom" title="上传文件到当前工作空间" :disabled="uploading" @click="fileInput?.click()">
+              <Icon :name="uploading ? 'refresh' : 'paperclip'" :size="13" :class="{ spin: uploading }" />
+              <span>{{ uploading ? '上传中' : '上传文件' }}</span>
             </button>
+            <input ref="fileInput" type="file" multiple class="glass__file" @change="welcomeFiles" />
             <span class="glass__spacer" />
             <DepthPicker />
             <ModelPicker />
@@ -610,9 +729,91 @@ function welcomeKeydown(e: KeyboardEvent) {
   font-size: var(--fs-12);
   transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
-.glass__custom:hover {
+.glass__custom:hover:not(:disabled) {
   color: var(--accent-text);
   background: var(--accent-dim);
+}
+.glass__custom:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+/* 工作空间选择器（欢迎页输入框内，绑定当前会话） */
+.glass__ws {
+  position: relative;
+}
+.glass__custom--unbound {
+  border: 1px dashed var(--accent-border);
+  color: var(--accent-text);
+}
+.glass__custom--open {
+  color: var(--accent-text);
+  background: var(--accent-dim);
+}
+.glass__ws-name {
+  max-width: 120px;
+  min-width: 0;
+}
+.glass__ws-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 80;
+  min-width: 190px;
+  max-width: 260px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--bg-0);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-10);
+  box-shadow: var(--shadow-2);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.glass__ws-opt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: none;
+  background: none;
+  border-radius: var(--r-6);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  text-align: left;
+  cursor: pointer;
+}
+.glass__ws-opt svg:first-child {
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.glass__ws-opt:hover {
+  background: var(--bg-2);
+  color: var(--text-1);
+}
+.glass__ws-opt--on {
+  color: var(--accent-text);
+  font-weight: 500;
+  background: var(--accent-dim);
+}
+.glass__ws-opt:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.glass__file {
+  display: none;
+}
+.drop-enter-active,
+.drop-leave-active {
+  transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.drop-enter-from,
+.drop-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
 }
 .glass__spacer {
   flex: 1;

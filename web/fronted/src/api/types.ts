@@ -129,6 +129,8 @@ export interface SessionMessage {
   role: string
   content: string
   ts?: string
+  /** 该消息执行期间创建的文件检查点 ID（可空；非空表示可消息级回溯）。 */
+  checkpointIds?: string[]
 }
 
 export interface SessionSnapshot {
@@ -210,5 +212,7 @@ export interface SkillDef {
 export interface SystemOpenResult {
   opened: boolean
   path: string
+  /** 打开失败时的原因说明（可选）。 */
+  message?: string
 }
 

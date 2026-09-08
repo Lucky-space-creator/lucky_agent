@@ -39,6 +39,25 @@ export const chatApi = {
   sessions(userId: string) {
     return http.get<SessionMeta[]>(`/api/chat/sessions?userId=${encodeURIComponent(userId)}`)
   },
+  /** 新建空白会话（元数据落盘，支持多个新会话共存）。 */
+  createSession(input: { userId: string; workspaceId: string; title?: string }) {
+    return http.post<SessionMeta>('/api/chat/sessions', input)
+  },
+  /** 更新会话元数据（重命名 / 切换工作空间；缺省字段保持原值）。 */
+  updateSession(input: { sessionId: string; userId: string; workspaceId?: string; title?: string }) {
+    return http.put<SessionMeta>(`/api/chat/${input.sessionId}`, {
+      userId: input.userId,
+      workspaceId: input.workspaceId,
+      title: input.title,
+    })
+  },
+  /** 消息级回溯：撤销某条助手消息执行期间修改过的文件。 */
+  rollbackMessage(input: { sessionId: string; workspaceId: string; messageTs: string }) {
+    return http.post<{ restored: number }>(`/api/chat/${input.sessionId}/rollback`, {
+      workspaceId: input.workspaceId,
+      messageTs: input.messageTs,
+    })
+  },
   destroy(session: { sessionId: string; userId: string }) {
     const q = new URLSearchParams({ userId: session.userId }).toString()
     return http.del<{ removed: boolean }>(`/api/chat/${session.sessionId}?${q}`)
@@ -86,6 +105,8 @@ export const modelApi = {
   list: () => http.get<ModelConfig[]>('/api/models'),
   save: (config: ModelConfig) => http.post<ModelConfig>('/api/models', config),
   remove: (id: string) => http.del<{ removed: boolean }>(`/api/models/${id}`),
+  /** 读取指定端点明文 API Key（仅编辑弹窗回显用，列表接口不携带 Key）。 */
+  key: (id: string) => http.get<{ id: string; apiKey: string }>(`/api/models/${id}/key`),
   /** 探活：空参探活全部启用端点；{id} 探活指定端点；完整配置测试未保存的表单。 */
   probe: (body?: ModelConfig | { id: string } | null) =>
     http.post<{ ok: boolean; results: ProbeResult[] }>('/api/models/probe', body ?? undefined),
@@ -143,6 +164,9 @@ export const skillApi = {
 /** 系统本地接口 */
 export const systemApi = {
   openSettingsFile: () => http.post<SystemOpenResult>('/api/system/open-settings-file', undefined),
+  /** 打开规则文件：不传 workspaceId 打开全局规则（框架根 LUCKY.md），传入则打开该工作空间的项目规则。 */
+  openRulesFile: (workspaceId?: string) =>
+    http.post<SystemOpenResult>('/api/system/open-rules-file', workspaceId ? { workspaceId } : undefined),
   /** 唤起本机原生目录选择框（后端代选），用户取消返回 cancelled=true。 */
   pickDirectory: (startPath?: string, title?: string) =>
     http.post<{ path: string; cancelled: boolean; message?: string }>('/api/system/pick-directory', {

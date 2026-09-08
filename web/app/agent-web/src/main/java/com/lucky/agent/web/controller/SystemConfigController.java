@@ -1,8 +1,10 @@
 package com.lucky.agent.web.controller;
 
+import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.model.api.dto.AgentSettings;
 import com.lucky.agent.model.config.ModelConfigStore;
 import com.lucky.agent.web.local.NativeDirectoryChooser;
+import com.lucky.agent.workspace.api.WorkspaceConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -35,9 +37,14 @@ public class SystemConfigController {
     private static final Duration PICK_TIMEOUT = Duration.ofMinutes(10);
 
     private final ModelConfigStore settingsStore;
+    private final WorkspaceDirs dirs;
+    private final WorkspaceConfig workspaceConfig;
 
-    public SystemConfigController(ModelConfigStore settingsStore) {
+    public SystemConfigController(ModelConfigStore settingsStore, WorkspaceDirs dirs,
+                                  WorkspaceConfig workspaceConfig) {
         this.settingsStore = settingsStore;
+        this.dirs = dirs;
+        this.workspaceConfig = workspaceConfig;
     }
 
     /** 打开框架配置文件（{@code <frameworkRoot>/settings.json}），返回真实路径。 */
@@ -46,6 +53,31 @@ public class SystemConfigController {
         Path target = settingsStore.storeFile();
         if (!Files.isRegularFile(target)) {
             settingsStore.save(AgentSettings.empty());
+        }
+        boolean opened = openInOs(target);
+        return Map.of("opened", opened, "path", target.toString());
+    }
+
+    /**
+     * 打开规则文件（两级 LUCKY.md）：无 {@code workspaceId} 打开全局规则
+     * （{@code <frameworkRoot>/LUCKY.md}），有则打开该工作空间的项目规则
+     * （{@code <workspacePath>/LUCKY.md}）。文件不存在时提示用户保存后自动生成。
+     */
+    @PostMapping("/open-rules-file")
+    public Map<String, Object> openRulesFile(@RequestBody(required = false) Map<String, String> body) {
+        String workspaceId = body == null ? null : body.get("workspaceId");
+        Path target;
+        if (workspaceId == null || workspaceId.isBlank()) {
+            target = dirs.frameworkRoot().resolve("LUCKY.md");
+        } else {
+            Optional<String> path = workspaceConfig.physicalPathOf(workspaceId);
+            if (path.isEmpty()) {
+                return Map.of("opened", false, "path", "", "message", "工作空间不存在");
+            }
+            target = Path.of(path.get()).resolve("LUCKY.md");
+        }
+        if (!Files.isRegularFile(target)) {
+            return Map.of("opened", false, "path", target.toString(), "message", "规则文件尚不存在（保存后自动生成）");
         }
         boolean opened = openInOs(target);
         return Map.of("opened", opened, "path", target.toString());

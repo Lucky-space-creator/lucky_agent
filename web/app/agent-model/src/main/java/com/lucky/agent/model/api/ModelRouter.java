@@ -3,6 +3,7 @@ package com.lucky.agent.model.api;
 import com.lucky.agent.common.contract.Remote;
 import com.lucky.agent.model.api.dto.ModelRouterStatus;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 
 import java.util.Optional;
 
@@ -19,11 +20,19 @@ public interface ModelRouter {
     ChatModel resolve();
 
     /**
-     * 解析指定端点（用户在界面上选择）的模型。
+     * 解析指定端点的模型。
      * {@code modelId} 为空或端点不存在时回退到默认路由，保证老调用方行为不变。
      */
     default ChatModel resolve(String modelId) {
         return resolve();
+    }
+
+    /**
+     * 解析指定端点的流式模型；端点或模型不支持流式时返回 {@code null}（调用方回退非流式）。
+     * {@code modelId} 为空或端点不存在时回退主端点。
+     */
+    default StreamingChatModel resolveStreaming(String modelId) {
+        return null;
     }
 
     /** 指定端点的模型名；{@code modelId} 为空或不存在时回退主端点。 */
@@ -38,6 +47,14 @@ public interface ModelRouter {
 
     /** 解析备用模型（无备用返回空）。 */
     Optional<ChatModel> resolveFallback();
+
+    /**
+     * 记忆管理 Agent 端点 id（role=memory，会话记忆总结专用）。
+     * 未配置时返回空，调用方应回退主力模型（{@link #resolve()} / {@code resolve(null)}）。
+     */
+    default Optional<String> memoryModelId() {
+        return Optional.empty();
+    }
 
     /** 主端点是否健康。 */
     boolean primaryHealthy();

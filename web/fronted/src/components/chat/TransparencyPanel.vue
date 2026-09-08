@@ -2,8 +2,14 @@
 import { computed } from 'vue'
 import type { SessionMetrics } from '@/api/types'
 import Icon from '@/components/common/Icon.vue'
+import { useModelStore } from '@/stores/model'
 
 const props = defineProps<{ metrics: SessionMetrics | null; running: boolean }>()
+
+const model = useModelStore()
+
+/** 模型名：无会话指标时回退当前主端点，保证未开对话也有内容。 */
+const modelName = computed(() => props.metrics?.lastModel ?? model.primary?.modelName ?? '')
 
 const tokenText = computed(() => {
   const m = props.metrics
@@ -68,8 +74,6 @@ const subAgentEntries = computed(() => {
     pct: v.total > 0 ? Math.round((v.done / v.total) * 100) : 0,
   }))
 })
-
-const hasData = computed(() => props.metrics != null)
 </script>
 
 <template>
@@ -80,83 +84,79 @@ const hasData = computed(() => props.metrics != null)
       <span v-if="running" class="tp__live mono">实时</span>
     </div>
 
-    <div v-if="!hasData" class="tp__empty text-3 mono">暂无数据</div>
+    <!-- 会话级核心指标（未开对话时显示 0 / — 基础框架，不空屏） -->
+    <div class="tp__grid">
+      <div class="tp__cell">
+        <span class="tp__num mono">{{ tokenText }}</span>
+        <span class="tp__lbl mono">TOKENS 总量</span>
+      </div>
+      <div class="tp__cell">
+        <span class="tp__num mono">{{ metrics?.modelCalls ?? 0 }}</span>
+        <span class="tp__lbl mono">推理轮次</span>
+      </div>
+      <div class="tp__cell">
+        <span class="tp__num mono">{{ elapsedText }}</span>
+        <span class="tp__lbl mono">运行时长</span>
+      </div>
+      <div class="tp__cell">
+        <span class="tp__num mono">{{ cacheText }}</span>
+        <span class="tp__lbl mono">缓存命中</span>
+      </div>
+    </div>
 
-    <template v-else>
-      <!-- 会话级核心指标 -->
-      <div class="tp__grid">
-        <div class="tp__cell">
-          <span class="tp__num mono">{{ tokenText }}</span>
-          <span class="tp__lbl mono">TOKENS 总量</span>
+    <!-- 输入 / 输出 token 与上下文占用 -->
+    <div class="tp__mini-grid">
+      <div class="tp__mini">
+        <span class="tp__mini-num mono">{{ metrics?.inputTokens?.toLocaleString('en-US') ?? 0 }}</span>
+        <span class="tp__lbl mono">输入</span>
+      </div>
+      <div class="tp__mini">
+        <span class="tp__mini-num mono">{{ metrics?.outputTokens?.toLocaleString('en-US') ?? 0 }}</span>
+        <span class="tp__lbl mono">输出</span>
+      </div>
+      <div class="tp__mini">
+        <span class="tp__mini-num mono">{{ windowText }}</span>
+        <span class="tp__lbl mono">上下文</span>
+      </div>
+      <div class="tp__mini" :class="{ 'tp__mini--warn': (metrics?.errors ?? 0) > 0 }">
+        <span class="tp__mini-num mono">{{ metrics?.errors ?? 0 }}</span>
+        <span class="tp__lbl mono">错误</span>
+      </div>
+    </div>
+
+    <!-- 模型名：无会话指标时显示当前主端点 -->
+    <div v-if="modelName" class="tp__model mono">
+      <Icon name="sparkles" :size="11" /> {{ modelName }}
+    </div>
+
+    <!-- 工具 / Skill / MCP / 成功率 -->
+    <div class="tp__row">
+      <span class="tp__tag mono">工具 {{ toolEntries.reduce((s, [, n]) => s + (n as number), 0) }}</span>
+      <span class="tp__tag mono">Skill {{ metrics?.skillInvokes ?? 0 }}</span>
+      <span class="tp__tag mono">MCP {{ metrics?.mcpInvokes ?? 0 }}</span>
+      <span class="tp__tag mono">成功率 {{ toolSuccessText }}</span>
+    </div>
+
+    <!-- 工具明细 -->
+    <div v-if="toolEntries.length" class="tp__tools">
+      <div v-for="[tool, count] in toolEntries" :key="tool" class="tp__tool">
+        <span class="tp__tool-name mono">{{ tool }}</span>
+        <span class="tp__tool-count mono">{{ count }}</span>
+      </div>
+    </div>
+
+    <!-- 子代理进度 -->
+    <div v-if="subAgentEntries.length" class="tp__subs">
+      <div v-for="s in subAgentEntries" :key="s.id" class="tp__sub">
+        <div class="tp__sub-top">
+          <span class="tp__sub-id mono">{{ s.id }}</span>
+          <span class="tp__sub-pct mono">{{ s.done }}/{{ s.total }}</span>
         </div>
-        <div class="tp__cell">
-          <span class="tp__num mono">{{ metrics?.modelCalls ?? 0 }}</span>
-          <span class="tp__lbl mono">推理轮次</span>
-        </div>
-        <div class="tp__cell">
-          <span class="tp__num mono">{{ elapsedText }}</span>
-          <span class="tp__lbl mono">运行时长</span>
-        </div>
-        <div class="tp__cell">
-          <span class="tp__num mono">{{ cacheText }}</span>
-          <span class="tp__lbl mono">缓存命中</span>
+        <div class="tp__bar">
+          <div class="tp__bar-fill" :style="{ width: s.pct + '%' }" />
         </div>
       </div>
-
-      <!-- 输入 / 输出 token 与上下文占用 -->
-      <div class="tp__mini-grid">
-        <div class="tp__mini">
-          <span class="tp__mini-num mono">{{ metrics?.inputTokens?.toLocaleString('en-US') ?? 0 }}</span>
-          <span class="tp__lbl mono">输入</span>
-        </div>
-        <div class="tp__mini">
-          <span class="tp__mini-num mono">{{ metrics?.outputTokens?.toLocaleString('en-US') ?? 0 }}</span>
-          <span class="tp__lbl mono">输出</span>
-        </div>
-        <div class="tp__mini">
-          <span class="tp__mini-num mono">{{ windowText }}</span>
-          <span class="tp__lbl mono">上下文</span>
-        </div>
-        <div class="tp__mini" :class="{ 'tp__mini--warn': (metrics?.errors ?? 0) > 0 }">
-          <span class="tp__mini-num mono">{{ metrics?.errors ?? 0 }}</span>
-          <span class="tp__lbl mono">错误</span>
-        </div>
-      </div>
-
-      <!-- 模型名 -->
-      <div v-if="metrics?.lastModel" class="tp__model mono">
-        <Icon name="cpu" :size="11" /> {{ metrics.lastModel }}
-      </div>
-
-      <!-- 工具 / Skill / MCP / 成功率 -->
-      <div class="tp__row">
-        <span class="tp__tag mono">工具 {{ toolEntries.reduce((s, [, n]) => s + (n as number), 0) }}</span>
-        <span class="tp__tag mono">Skill {{ metrics?.skillInvokes ?? 0 }}</span>
-        <span class="tp__tag mono">MCP {{ metrics?.mcpInvokes ?? 0 }}</span>
-        <span class="tp__tag mono">成功率 {{ toolSuccessText }}</span>
-      </div>
-
-      <!-- 工具明细 -->
-      <div v-if="toolEntries.length" class="tp__tools">
-        <div v-for="[tool, count] in toolEntries" :key="tool" class="tp__tool">
-          <span class="tp__tool-name mono">{{ tool }}</span>
-          <span class="tp__tool-count mono">{{ count }}</span>
-        </div>
-      </div>
-
-      <!-- 子代理进度 -->
-      <div v-if="subAgentEntries.length" class="tp__subs">
-        <div v-for="s in subAgentEntries" :key="s.id" class="tp__sub">
-          <div class="tp__sub-top">
-            <span class="tp__sub-id mono">{{ s.id }}</span>
-            <span class="tp__sub-pct mono">{{ s.done }}/{{ s.total }}</span>
-          </div>
-          <div class="tp__bar">
-            <div class="tp__bar-fill" :style="{ width: s.pct + '%' }" />
-          </div>
-        </div>
-      </div>
-    </template>
+    </div>
   </div>
 </template>
 
@@ -201,10 +201,6 @@ const hasData = computed(() => props.metrics != null)
   font-size: 10px;
   letter-spacing: 0.1em;
   color: var(--accent-text);
-}
-.tp__empty {
-  font-size: var(--fs-12);
-  padding: 4px 0;
 }
 .tp__grid {
   display: grid;

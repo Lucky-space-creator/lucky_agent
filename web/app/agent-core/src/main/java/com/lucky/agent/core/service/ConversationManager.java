@@ -18,9 +18,13 @@ import com.lucky.agent.core.metrics.MetricsCollector;
 import com.lucky.agent.core.runtime.AgentEventPublisher;
 import com.lucky.agent.core.runtime.ConversationStateManager;
 import com.lucky.agent.core.subagent.TaskDecomposer;
+import com.lucky.agent.executor.api.RollbackService;
+import com.lucky.agent.executor.api.dto.Snapshot;
 import com.lucky.agent.memory.api.MemoryStore;
+import com.lucky.agent.memory.md.MarkdownMemoryWriter;
 import com.lucky.agent.permission.api.PermissionService;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
+import com.lucky.agent.workspace.api.dto.Workspace;
 import dev.langchain4j.data.message.UserMessage;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -54,6 +58,8 @@ public class ConversationManager {
     private final SessionRepository sessionRepository;
     private final PermissionService permissionService;
     private final MetricsCollector metricsCollector;
+    private final MarkdownMemoryWriter markdownMemoryWriter;
+    private final RollbackService rollbackService;
     private final ConcurrentMap<String, Boolean> sessionStarted = new ConcurrentHashMap<>();
 
     public ConversationManager(ConversationStateManager stateManager,
@@ -63,7 +69,9 @@ public class ConversationManager {
                                LifecycleHookDispatcher hookDispatcher,
                                SessionRepository sessionRepository,
                                PermissionService permissionService,
-                               MetricsCollector metricsCollector) {
+                               MetricsCollector metricsCollector,
+                               MarkdownMemoryWriter markdownMemoryWriter,
+                               RollbackService rollbackService) {
         this.stateManager = stateManager;
         this.memoryStore = memoryStore;
         this.workspaceConfig = workspaceConfig;
@@ -72,6 +80,8 @@ public class ConversationManager {
         this.sessionRepository = sessionRepository;
         this.permissionService = permissionService;
         this.metricsCollector = metricsCollector;
+        this.markdownMemoryWriter = markdownMemoryWriter;
+        this.rollbackService = rollbackService;
     }
 
     /**
@@ -98,17 +108,108 @@ public class ConversationManager {
     /** 会话列表。*/
     public Mono<List<Map<String, Object>>> listSessions(String userId) {
         return Mono.fromCallable(() -> sessionRepository.listByUser(userId).stream()
-                .map(m -> {
-                    Map<String, Object> entry = new java.util.LinkedHashMap<>();
-                    entry.put("sessionId", m.sessionId());
-                    entry.put("userId", m.userId());
-                    entry.put("workspaceId", m.workspaceId() == null ? "" : m.workspaceId());
-                    entry.put("title", m.title() == null ? "对话" : m.title());
-                    entry.put("createdAt", m.createdAt());
-                    entry.put("updatedAt", m.updatedAt());
-                    return entry;
-                })
+                .map(this::metaToMap)
                 .toList());
+    }
+
+    /** 新建空白会话（元数据落盘：前端「新对话」立即持久化，支持多个新会话共存）。 */
+    public Mono<Map<String, Object>> createSession(String userId, String workspaceId, String title) {
+        return Mono.fromCallable(() -> {
+            String sessionId = UUID.randomUUID().toString();
+            SessionRef ref = new SessionRef(sessionId, userId, workspaceId);
+            sessionRepository.upsertMeta(ref, title == null || title.isBlank() ? "新会话" : title);
+            return metaToMap(sessionRepository.loadMeta(sessionId));
+        });
+    }
+
+    /**
+     * 更新会话元数据（重命名 / 切换工作空间）；未提供的字段保持原值。
+     *
+     * <p>工作空间锁定：已有对话记录的会话不允许切换工作空间（切换会让历史与目录归属错乱），
+     * 变更被拒绝并保持原工作空间；空白会话不受限。</p>
+     */
+    public Mono<Map<String, Object>> updateMeta(SessionRef ref, String title, String workspaceId) {
+        return Mono.fromCallable(() -> {
+            SessionRepository.SessionMeta existing = sessionRepository.loadMeta(ref.sessionId());
+            String effTitle = (title == null || title.isBlank())
+                    ? (existing != null && existing.title() != null ? existing.title() : "对话")
+                    : title;
+            String existingWs = (existing != null && existing.workspaceId() != null && !existing.workspaceId().isBlank())
+                    ? existing.workspaceId() : ref.workspaceId();
+            String effWs = (workspaceId == null || workspaceId.isBlank()) ? existingWs : workspaceId;
+            if (!effWs.equals(existingWs)
+                    && !sessionRepository.loadMessages(ref.sessionId()).isEmpty()) {
+                // 已有对话记录：拒绝切换工作空间，保持原绑定
+                log.warn("拒绝切换工作空间（会话已有对话记录）：session={} oldWs={} newWs={}",
+                        ref.sessionId(), existingWs, effWs);
+                effWs = existingWs;
+            }
+            sessionRepository.upsertMeta(new SessionRef(ref.sessionId(), ref.userId(), effWs), effTitle);
+            return metaToMap(sessionRepository.loadMeta(ref.sessionId()));
+        });
+    }
+
+    /**
+     * 消息级回溯：还原该消息执行期间创建的全部文件检查点（逆序），
+     * 成功后清除消息上的检查点引用（撤销入口随之消失）。
+     *
+     * @return 成功还原的检查点数量（0 表示无可回溯内容）
+     */
+    public Mono<Integer> rollbackMessage(String sessionId, String workspaceId, String messageTs) {
+        return Mono.fromCallable(() -> {
+            if (workspaceId == null || workspaceId.isBlank() || messageTs == null || messageTs.isBlank()) {
+                return 0;
+            }
+            List<SessionSnapshot.MessageRecord> records = sessionRepository.loadMessages(sessionId);
+            for (SessionSnapshot.MessageRecord r : records) {
+                if (!messageTs.equals(r.ts()) || r.checkpointIds() == null || r.checkpointIds().isEmpty()) {
+                    continue;
+                }
+                int restored = 0;
+                List<String> ids = new ArrayList<>(r.checkpointIds());
+                for (int i = ids.size() - 1; i >= 0; i--) {
+                    Boolean ok = rollbackService.rollback(workspaceId, ids.get(i)).block();
+                    if (Boolean.TRUE.equals(ok)) {
+                        restored++;
+                    }
+                }
+                if (restored > 0) {
+                    sessionRepository.removeCheckpoints(sessionId, messageTs, ids);
+                }
+                return restored;
+            }
+            return 0;
+        });
+    }
+
+    /** 会话元数据 → 列表条目（与 listSessions 共用同一结构）。 */
+    private Map<String, Object> metaToMap(SessionRepository.SessionMeta m) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        if (m == null) {
+            return entry;
+        }
+        entry.put("sessionId", m.sessionId());
+        entry.put("userId", m.userId());
+        entry.put("workspaceId", m.workspaceId() == null ? "" : m.workspaceId());
+        entry.put("title", m.title() == null ? "对话" : m.title());
+        entry.put("createdAt", m.createdAt());
+        entry.put("updatedAt", m.updatedAt());
+        return entry;
+    }
+
+    /** 当前工作空间已创建的检查点 ID 集合（供消息级回溯计算增量）。 */
+    private Set<String> checkpointIds(String workspaceId) {
+        if (workspaceId == null || workspaceId.isBlank()) {
+            return Set.of();
+        }
+        try {
+            return rollbackService.listCheckpoints(workspaceId).stream()
+                    .map(Snapshot::checkpointId)
+                    .collect(java.util.stream.Collectors.toSet());
+        } catch (Exception e) {
+            log.warn("读取检查点索引失败：wid={} err={}", workspaceId, e.getMessage());
+            return Set.of();
+        }
     }
 
     /** 销毁会话（内存 + 持久化 + 事件流 + 指标）。*/
@@ -121,6 +222,9 @@ public class ConversationManager {
 
     private RunResult execute(SessionRef ref, UserInput input) {
         String content = input.content() == null ? "" : input.content();
+        // 会话绑定的工作空间失效/为空时自动修复为有效工作空间（优先自建，其次内置默认），
+        // 并持久化回会话元数据，避免 Agent 实际工作在错误/默认目录而“看不到用户的项目”。
+        ref = repairWorkspace(ref);
         ConversationStateManager.SessionState state = stateManager.session(ref);
         if (state.running()) {
             return RunResult.of(ref.sessionId()).status(RunResult.RunStatus.ERROR)
@@ -128,6 +232,8 @@ public class ConversationManager {
         }
         state.running(true);
         AgentEventPublisher publisher = stateManager.publisher();
+        // 每轮运行前清空上一轮未消费的暂存事件，避免把上一轮的 stop/error 回放到新一轮（跨轮污染）
+        publisher.reset(ref.sessionId());
         try {
             // 指标收集：会话运行期聚合（透明面板数据源）
             metricsCollector.start(ref.sessionId());
@@ -158,6 +264,7 @@ public class ConversationManager {
 
             // 统一走编排器：是否拆子任务由 PLAN 阶段模型判断（P2-1，不在代码层做强分流）。
             // 编排模式下引擎不逐次发 stop（suppressStop），由会话层统一收尾发布。
+            Set<String> beforeCheckpoints = checkpointIds(ref.workspaceId());
             EngineRunResult result = orchestrator.run(ref, ctx, publisher);
             if (result != null) {
                 String reason = result.error() != null ? "error"
@@ -170,7 +277,12 @@ public class ConversationManager {
                 return RunResult.of(ref.sessionId()).status(RunResult.RunStatus.ERROR).error("引擎无返回结果");
             }
             if (result.finalText() != null && !result.finalText().isBlank()) {
-                sessionRepository.appendMessage(ref.sessionId(), "assistant", result.finalText(), Instant.now().toString());
+                // 本轮执行期间新产生的文件检查点挂到该条消息上，供消息级回溯（撤销修改过的文件）
+                List<String> newCheckpoints = checkpointIds(ref.workspaceId()).stream()
+                        .filter(id -> !beforeCheckpoints.contains(id))
+                        .toList();
+                sessionRepository.appendMessage(ref.sessionId(), "assistant", result.finalText(),
+                        Instant.now().toString(), newCheckpoints);
                 memoryStore.appendUser(ref.userId(), result.finalText(), 0.7, "observation");
             }
             if (result.error() != null) {
@@ -190,9 +302,28 @@ public class ConversationManager {
         } finally {
             state.running(false);
             hookDispatcher.fire(new HookEvent(HookEventName.STOP, ref.sessionId()));
+            // 会话收尾：分层 Markdown 记忆总结（会话→项目→整体），失败由 writer 内部降级，不阻断主流程
+            try {
+                markdownMemoryWriter.updateForSession(ref, transcriptOf(ref));
+            } catch (Exception e) {
+                log.warn("分层记忆总结异常：session={} err={}", ref.sessionId(), e.getMessage());
+            }
             // 本轮事件流收尾：SSE 正常结束（不再靠心跳悬挂），并销毁 sink 供下一轮重建
             publisher.complete(ref.sessionId());
         }
+    }
+
+    /** 组装会话完整记录文本（供记忆总结使用，user/assistant 交替）。 */
+    private String transcriptOf(SessionRef ref) {
+        List<SessionSnapshot.MessageRecord> records = sessionRepository.loadMessages(ref.sessionId());
+        if (records == null || records.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (SessionSnapshot.MessageRecord r : records) {
+            sb.append(r.role()).append(": ").append(r.content()).append('\n');
+        }
+        return sb.toString();
     }
 
     /** 是否确认续跑请求（extra.confirm 为非空操作描述）。 */
@@ -261,6 +392,39 @@ public class ConversationManager {
                 .goal(content)
                 .extra(extra)
                 .build();
+    }
+
+    /**
+     * 修复会话绑定的失效/为空工作空间：返回带有效 workspaceId 的会话引用；
+     * 必要时把修复结果持久化到会话元数据。优先自建工作空间，其次内置默认。
+     */
+    private SessionRef repairWorkspace(SessionRef ref) {
+        if (ref == null) {
+            return null;
+        }
+        String wsId = ref.workspaceId();
+        if (wsId != null && !wsId.isBlank() && workspaceConfig.getWorkspace(wsId).isPresent()) {
+            return ref;
+        }
+        String repaired = workspaceConfig.listWorkspaces().stream()
+                .filter(w -> !w.builtin())
+                .findFirst()
+                .or(() -> workspaceConfig.listWorkspaces().stream().findFirst())
+                .map(Workspace::workspaceId)
+                .orElse(null);
+        if (repaired == null || repaired.equals(wsId)) {
+            return ref;
+        }
+        log.warn("会话工作空间失效/为空，自动修复：session={} oldWs={} newWs={}",
+                ref.sessionId(), wsId == null ? "(空)" : wsId, repaired);
+        SessionRef fixed = new SessionRef(ref.sessionId(), ref.userId(), repaired);
+        try {
+            // 保留原标题，仅更新工作空间绑定
+            sessionRepository.upsertMeta(fixed, titleFor(ref, ""));
+        } catch (Exception e) {
+            log.warn("持久化工作空间修复失败：{}", ref.sessionId(), e);
+        }
+        return fixed;
     }
 
     /** 取出用户在界面选定的模型端点（未指定返回 null，由模型路由回退主端点）。 */
