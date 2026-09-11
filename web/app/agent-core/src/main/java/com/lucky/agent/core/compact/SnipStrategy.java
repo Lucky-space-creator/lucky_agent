@@ -35,19 +35,15 @@ public class SnipStrategy implements CompactStrategy {
         if (head instanceof SystemMessage) {
             result.add(head);
         }
-        // 中间被 snip 的部分：仅保留被视为关键的 ToolExecutionResultMessage（保全关键结果）
+        // 中间被 snip 的部分：保留全部工具结果（读/写结果是判定关键上下文，长度由
+        // Microcompact 裁剪兜底；按长度丢弃会导致模型下一轮看不到结果而重新查询）
         List<ChatMessage> middle = tail.subList(0, from);
         for (ChatMessage m : middle) {
-            if (m instanceof ToolExecutionResultMessage tm && isKeyResult(tm)) {
+            if (m instanceof ToolExecutionResultMessage) {
                 result.add(m);
             }
         }
         result.addAll(recent);
         return result;
-    }
-
-    private boolean isKeyResult(ToolExecutionResultMessage tm) {
-        String text = tm.text();
-        return text != null && (text.contains("KEY_RESULT") || text.length() < 200);
     }
 }

@@ -91,11 +91,24 @@ function onConfirm(allow: boolean) {
   chat.confirmAsk(props.item, allow)
 }
 
-/* ---------- 文件操作：回复末尾「变动的文件」总览（列出指令，点击定位） ---------- */
+/* ---------- 文件操作：查看类（read/list/stat）与变动类（write/delete/mkdir/rename）分流 ---------- */
 
-/** 文件类工具（write/mkdir/rename/delete 等）：不再逐条展示卡片，收敛为搜索图标轮跳。 */
+/** 查看类文件工具（读取/列出/状态）：不属变动，展示在回复开头的「查看的文件」。 */
+const QUERY_TOOLS = new Set(['file.read', 'file.list', 'file.stat'])
+/** 变动类文件工具（写入/删除/创建/重命名）：展示在回复末尾的「变动的文件」。 */
+const WRITE_TOOLS = new Set(['file.write', 'file.delete', 'file.mkdir', 'file.rename'])
+
+/** 文件类工具（file.* 前缀）。 */
 function isFileTool(c: ToolCallView): boolean {
   return (c.tool || '').startsWith('file.')
+}
+/** 查看类工具。 */
+function isQueryTool(c: ToolCallView): boolean {
+  return QUERY_TOOLS.has(c.tool || '')
+}
+/** 变动类工具。 */
+function isWriteTool(c: ToolCallView): boolean {
+  return WRITE_TOOLS.has(c.tool || '')
 }
 
 /** 从工具调用入参中解析目标文件路径（兼容 path 顶层 / args.path 嵌套两种结构）。 */
@@ -104,48 +117,57 @@ function filePathOf(c: ToolCallView): string {
   return String(args?.path || args?.args?.path || '')
 }
 
-/** 本消息内的文件操作调用。 */
-const fileCalls = computed(() => props.item.toolCalls.filter(isFileTool))
+/** 本消息内的查看类文件调用。 */
+const queryCalls = computed(() => props.item.toolCalls.filter(isQueryTool))
+/** 本消息内的变动类文件调用。 */
+const fileCalls = computed(() => props.item.toolCalls.filter(isWriteTool))
 /** 其余工具调用（Skill/MCP/命令等），保持独立工具卡片展示。 */
 const otherCalls = computed(() => props.item.toolCalls.filter((c) => !isFileTool(c)))
 
-/** 工具名 → 中文操作指令（文件操作清单展示用）。 */
-function opLabelOf(tool: string): string {
-  return (
-    {
-      'file.write': '写入',
-      'file.mkdir': '创建目录',
-      'file.rename': '重命名',
-      'file.delete': '删除',
-      'file.read': '读取',
-      'file.list': '列出',
-      'file.stat': '状态',
-    }[tool] ?? tool.replace(/^file\./, '') ?? '操作'
-  )
-}
-
-/** 变动的文件总览：按路径聚合本消息的文件操作，列出指令与状态。 */
-const fileSummary = computed(() => {
-  const map = new Map<string, { ops: string[]; hasFail: boolean }>()
-  for (const c of fileCalls.value) {
+/** 按路径聚合文件调用为「路径 + 是否含失败」列表。 */
+function summarize(calls: ToolCallView[]): { path: string; hasFail: boolean }[] {
+  const map = new Map<string, boolean>()
+  for (const c of calls) {
     const p = filePathOf(c)
     if (!p) continue
-    const e = map.get(p) ?? { ops: [], hasFail: false }
-    e.ops.push(opLabelOf(c.tool || ''))
-    if (c.status === 'done' && !c.ok) e.hasFail = true
-    map.set(p, e)
+    if (c.status === 'done' && !c.ok) map.set(p, true)
+    else map.set(p, map.get(p) ?? false)
   }
-  return [...map.entries()].map(([path, v]) => ({
-    path,
-    opLabel: [...new Set(v.ops)].join('、'),
-    hasFail: v.hasFail,
-  }))
-})
+  return [...map.entries()].map(([path, hasFail]) => ({ path, hasFail }))
+}
+
+/** 查看的文件（回复开头）。 */
+const querySummary = computed(() => summarize(queryCalls.value))
+/** 变动的文件（回复末尾，仅修改/删除类）。 */
+const fileSummary = computed(() => summarize(fileCalls.value))
 
 /** 点击总览项：在右侧「项目文件」面板定位该文件。 */
 function openFile(path: string) {
   if (path) ui.openFilePanel(path)
 }
+
+/* ---------- 文件总览下拉展示（默认前 8 个，超出的收进「展开全部」） ---------- */
+
+/** 默认直接展示的胶囊数量。 */
+const FILE_PREVIEW_LIMIT = 8
+/** 文件总览下拉是否展开（查看/变动两类共用同一展开状态）。 */
+const filesExpanded = ref(false)
+/** 直接展示的「查看的文件」（未展开时截断）。 */
+const visibleQueries = computed(() =>
+  filesExpanded.value ? querySummary.value : querySummary.value.slice(0, FILE_PREVIEW_LIMIT),
+)
+/** 被收起的「查看的文件」数量。 */
+const hiddenQueryCount = computed(() =>
+  filesExpanded.value ? 0 : Math.max(0, querySummary.value.length - FILE_PREVIEW_LIMIT),
+)
+/** 直接展示的「变动的文件」（未展开时截断）。 */
+const visibleFiles = computed(() =>
+  filesExpanded.value ? fileSummary.value : fileSummary.value.slice(0, FILE_PREVIEW_LIMIT),
+)
+/** 被收起的「变动的文件」数量。 */
+const hiddenCount = computed(() =>
+  filesExpanded.value ? 0 : Math.max(0, fileSummary.value.length - FILE_PREVIEW_LIMIT),
+)
 </script>
 
 <template>
@@ -181,20 +203,39 @@ function openFile(path: string) {
           <span>思考中…</span>
         </div>
 
-        <!-- 正文内容（流式增量实时渲染） -->
-        <div class="msg__blocks">
-          <template v-for="(b, i) in blocks" :key="i">
-            <CodeBlock v-if="b.type === 'code'" :code="b.content" :lang="b.lang" />
-            <div v-else class="msg__text" v-html="b.content" />
-          </template>
+        <!-- 回复开头：查看的文件（read/list/stat，放大镜胶囊，点击在右侧文件面板定位） -->
+        <div v-if="querySummary.length" class="msg__files msg__files--head">
+          <div class="msg__files-head">
+            <Icon name="search" :size="12" />
+            <span class="msg__files-title mono">查看的文件（{{ querySummary.length }}）</span>
+            <span class="msg__files-sub text-3">点击定位</span>
+          </div>
+          <div class="msg__files-list">
+            <button
+              v-for="f in visibleQueries"
+              :key="f.path"
+              class="msg__file"
+              :class="{ 'msg__file--err': f.hasFail }"
+              :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
+              @click="openFile(f.path)"
+            >
+              <Icon name="search" :size="11" />
+              <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
+            </button>
+          </div>
+          <!-- 超出预览数量：下拉展开全部 / 收起 -->
+          <button v-if="hiddenQueryCount > 0" class="msg__files-more" @click="filesExpanded = true">
+            <Icon name="chevronDown" :size="11" />
+            <span class="mono">展开全部（{{ hiddenQueryCount }}）</span>
+          </button>
+          <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
+            <Icon name="chevronUp" :size="11" />
+            <span class="mono">收起</span>
+          </button>
         </div>
 
-        <AskCard v-if="item.ask" :ask="item.ask" @confirm="onConfirm" />
-
-        <PlanCard v-if="item.plan && item.plan.length > 0" :plan="item.plan" />
-
+        <!-- 回复开头：工具调用（Skill/MCP/命令等），折叠窗口，点击展开/收起 -->
         <div v-if="item.toolCalls.length > 0" class="msg__tools">
-          <!-- 工具调用（Skill/MCP/命令等）：折叠窗口，点击展开/收起 -->
           <button
             v-if="otherCalls.length"
             class="msg__toolops"
@@ -213,24 +254,46 @@ function openFile(path: string) {
           </div>
         </div>
 
-        <!-- 回复末尾：变动的文件总览（列出操作指令，点击在右侧文件面板定位） -->
+        <!-- 正文内容（流式增量实时渲染） -->
+        <div class="msg__blocks">
+          <template v-for="(b, i) in blocks" :key="i">
+            <CodeBlock v-if="b.type === 'code'" :code="b.content" :lang="b.lang" />
+            <div v-else class="msg__text" v-html="b.content" />
+          </template>
+        </div>
+
+        <AskCard v-if="item.ask" :ask="item.ask" @confirm="onConfirm" />
+
+        <PlanCard v-if="item.plan && item.plan.length > 0" :plan="item.plan" />
+
+        <!-- 回复末尾：变动的文件（仅修改/删除类，放大镜胶囊，点击在右侧文件面板定位） -->
         <div v-if="fileSummary.length" class="msg__files">
           <div class="msg__files-head">
             <Icon name="file" :size="12" />
             <span class="msg__files-title mono">变动的文件（{{ fileSummary.length }}）</span>
             <span class="msg__files-sub text-3">点击定位</span>
           </div>
-          <button
-            v-for="f in fileSummary"
-            :key="f.path"
-            class="msg__file"
-            :class="{ 'msg__file--err': f.hasFail }"
-            :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
-            @click="openFile(f.path)"
-          >
-            <span class="msg__file-ops mono">{{ f.opLabel }}</span>
-            <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
-            <span class="msg__file-go"><Icon name="external" :size="10" /></span>
+          <div class="msg__files-list">
+            <button
+              v-for="f in visibleFiles"
+              :key="f.path"
+              class="msg__file"
+              :class="{ 'msg__file--err': f.hasFail }"
+              :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
+              @click="openFile(f.path)"
+            >
+              <Icon name="search" :size="11" />
+              <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
+            </button>
+          </div>
+          <!-- 超出预览数量：下拉展开全部 / 收起 -->
+          <button v-if="hiddenCount > 0" class="msg__files-more" @click="filesExpanded = true">
+            <Icon name="chevronDown" :size="11" />
+            <span class="mono">展开全部（{{ hiddenCount }}）</span>
+          </button>
+          <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
+            <Icon name="chevronUp" :size="11" />
+            <span class="mono">收起</span>
           </button>
         </div>
 
@@ -377,12 +440,18 @@ function openFile(path: string) {
 .msg__tools {
   margin-top: 6px;
 }
-/* 回复末尾「变动的文件」总览 */
+/* 回复末尾「变动的文件」总览：横向收缩胶囊 */
 .msg__files {
   margin-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+}
+/* 回复开头的「查看的文件」：与正文间加轻分隔 */
+.msg__files--head {
+  margin-top: 2px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+}
+.msg__files--head .msg__files-more {
+  margin-bottom: 0;
 }
 .msg__files-head {
   display: flex;
@@ -401,56 +470,60 @@ function openFile(path: string) {
   font-size: 10px;
   margin-left: auto;
 }
-.msg__file {
+.msg__files-list {
   display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.msg__file {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 10px;
+  gap: 5px;
+  max-width: 260px;
+  padding: 3px 10px;
   background: var(--bg-1);
   border: 1px solid var(--border);
-  border-radius: var(--r-6);
-  color: var(--text-1);
+  border-radius: var(--r-pill);
+  color: var(--text-2);
   font-size: var(--fs-12);
   text-align: left;
   cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
 .msg__file:hover {
   border-color: var(--accent-border);
   background: var(--accent-dim);
+  color: var(--accent-text);
 }
 .msg__file--err {
   border-color: rgba(224, 84, 84, 0.4);
 }
-.msg__file-ops {
-  font-size: 10px;
-  color: var(--accent-text);
-  background: var(--accent-dim);
-  border-radius: var(--r-pill);
-  padding: 1px 7px;
-  flex-shrink: 0;
-  letter-spacing: 0.04em;
-}
-.msg__file--err .msg__file-ops {
+.msg__file--err:hover {
   color: var(--danger-text);
-  background: var(--danger-dim);
 }
 .msg__file-path {
-  flex: 1;
   min-width: 0;
-  color: var(--text-2);
+  color: inherit;
 }
-.msg__file:hover .msg__file-path {
-  color: var(--accent-text);
-}
-.msg__file-go {
+.msg__files-more {
   display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 3px 10px;
+  background: none;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-pill);
   color: var(--text-3);
-  flex-shrink: 0;
+  font-size: var(--fs-12);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
-.msg__file:hover .msg__file-go {
+.msg__files-more:hover {
   color: var(--accent-text);
+  border-color: var(--accent-border);
 }
 .msg__toolops {
   display: inline-flex;

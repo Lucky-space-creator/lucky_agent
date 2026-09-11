@@ -105,7 +105,21 @@ public class LlmJudgeVerifier implements ObjectiveVerifier {
                 + (objectiveFailures.isBlank() ? "" : "\n【客观验证未通过项（必须修复）】" + objectiveFailures);
 
         ConversationStateManager.SessionState state = stateManager.session(ctx.sessionRef());
+        int beforeSize = state.messages().size();
         state.appendMessage(UserMessage.from(judgeGoal));
+        try {
+            return judgeOnce(ctx, goal, execLog, evidence, publisher, judgeGoal, objectiveFailures);
+        } finally {
+            // 判定轮上下文不写回会话状态：judgeGoal 与其 AI 输出只在本轮使用，
+            // 避免含全部执行日志的合成消息永驻导致上下文膨胀与 token 虚高
+            state.truncateTo(beforeSize);
+        }
+    }
+
+    /** 执行一次判定轮：追加合成消息 → 调引擎 → 解析结论（供 judge 的 try-finally 包裹清理）。 */
+    private VerificationVerdict judgeOnce(ConversationCtx ctx, String goal, String execLog,
+                                          List<VerificationResult> evidence, AgentEventPublisher publisher,
+                                          String judgeGoal, String objectiveFailures) {
         EngineRunResult r = engine.run(withSuppress(ctx, judgeGoal), Phase.ACT, judgeGoal).block();
         String text = r == null || r.finalText() == null ? "" : r.finalText();
 
@@ -130,7 +144,7 @@ public class LlmJudgeVerifier implements ObjectiveVerifier {
             done = UNDONE_KEYWORDS.stream().noneMatch(text::contains);
             missing = done ? "" : "\n- 模型未输出结构化结论，按文本关键词判定为未达成";
             summary = stripJson(text);
-            log.debug("达成度判定降级为关键词判定：session={}", sessionId);
+            log.debug("达成度判定降级为关键词判定：session={}", ctx.sessionId());
         }
 
         List<VerificationResult> all = new ArrayList<>(evidence);

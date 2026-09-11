@@ -1,5 +1,7 @@
 package com.lucky.agent.core.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.common.constant.PermissionLevel;
 import com.lucky.agent.common.constant.Phase;
 import com.lucky.agent.common.dto.AgentEvent;
@@ -11,7 +13,6 @@ import com.lucky.agent.common.dto.RunResult;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.dto.UserInput;
-import com.lucky.agent.core.models.Engine;
 import com.lucky.agent.core.models.dto.EngineRunResult;
 import com.lucky.agent.core.hook.LifecycleHookDispatcher;
 import com.lucky.agent.core.metrics.MetricsCollector;
@@ -22,10 +23,15 @@ import com.lucky.agent.executor.api.RollbackService;
 import com.lucky.agent.executor.api.dto.Snapshot;
 import com.lucky.agent.memory.api.MemoryStore;
 import com.lucky.agent.memory.md.MarkdownMemoryWriter;
+import com.lucky.agent.model.api.ModelRouter;
 import com.lucky.agent.permission.api.PermissionService;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
+import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -50,10 +56,14 @@ public class ConversationManager {
     /** 用户选定模型端点在 ctx.extra / UserInput.extra 中的键（与 ChatController 约定一致）。 */
     private static final String MODEL_ID_KEY = "modelId";
 
+    /** 意图解析 JSON 解析复用（ObjectMapper 线程安全）。 */
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     private final ConversationStateManager stateManager;
     private final MemoryStore memoryStore;
     private final WorkspaceConfig workspaceConfig;
     private final AgentOrchestrator orchestrator;
+    private final ModelRouter modelRouter;
     private final LifecycleHookDispatcher hookDispatcher;
     private final SessionRepository sessionRepository;
     private final PermissionService permissionService;
@@ -66,6 +76,7 @@ public class ConversationManager {
                                @Qualifier("userMemoryStore") MemoryStore memoryStore,
                                WorkspaceConfig workspaceConfig,
                                AgentOrchestrator orchestrator,
+                               ModelRouter modelRouter,
                                LifecycleHookDispatcher hookDispatcher,
                                SessionRepository sessionRepository,
                                PermissionService permissionService,
@@ -76,6 +87,7 @@ public class ConversationManager {
         this.memoryStore = memoryStore;
         this.workspaceConfig = workspaceConfig;
         this.orchestrator = orchestrator;
+        this.modelRouter = modelRouter;
         this.hookDispatcher = hookDispatcher;
         this.sessionRepository = sessionRepository;
         this.permissionService = permissionService;
@@ -254,6 +266,26 @@ public class ConversationManager {
                 sessionRepository.upsertMeta(ref, titleFor(ref, content));
                 sessionRepository.appendMessage(ref.sessionId(), "user", content, Instant.now().toString());
                 memoryStore.appendUser(ref.userId(), content, 0.8, "user");
+
+                // 意图解析（轻量模型调用）：直接同步调用模型解析意图，不经引擎轮，不产生
+                // 事件流/stop/会话状态污染（避免解析轮提前发 stop 导致前端截断正文）。
+                // 若输入引用了历史上下文（选项/待办/之前的对话）且涉及文件变动 → 先构建询问确认，不直接执行；
+                // 若与历史无关 → 以用户当前输入为准，正常执行。
+                IntentParse intent = parseIntent(ref, content, modelIdOf(input));
+                if (intent != null && !intent.independent() && intent.fileRelated()) {
+                    String question = (intent.confirmQuestion() == null || intent.confirmQuestion().isBlank())
+                            ? "你刚才的输入似乎引用了之前的上下文，先确认一下：你希望我执行的是「"
+                            + (intent.summary() == null || intent.summary().isBlank() ? content : intent.summary())
+                            + "」，对吗？"
+                            : intent.confirmQuestion();
+                    publisher.publish(ref.sessionId(), AgentEvent.thought(ref.sessionId(),
+                            "输入引用了历史上下文，先向你确认…"));
+                    publisher.publish(ref.sessionId(), AgentEvent.contentDelta(ref.sessionId(), question));
+                    sessionRepository.appendMessage(ref.sessionId(), "assistant", question,
+                            Instant.now().toString(), null);
+                    publisher.publish(ref.sessionId(), AgentEvent.stop(ref.sessionId(), "success", question));
+                    return RunResult.of(ref.sessionId()).status(RunResult.RunStatus.SUCCESS).summary(question);
+                }
             }
 
             // 确认续跑时以最近用户目标作为执行目标，避免以空文本重跑
@@ -330,6 +362,57 @@ public class ConversationManager {
     private boolean isConfirmRequest(UserInput input) {
         Object confirm = input == null || input.extra() == null ? null : input.extra().get("confirm");
         return confirm instanceof Map<?, ?> m && !m.isEmpty();
+    }
+
+    /**
+     * 意图解析（轻量模型调用）：解析用户最新输入，产出简单意图总结，并判断该输入是否
+     * 引用了历史上下文（选项/待办/之前的对话）以及是否涉及文件变动。
+     *
+     * <p>用于「与历史无关则以用户为主；引用历史且涉及文件变动则先询问确认」的控制逻辑。
+     * 直接同步调用模型（不经引擎轮），不写会话状态、不推事件流、不发 stop，
+     * 避免解析轮污染正文/提前收尾；JSON 解析失败时返回 {@code null}，调用方回退为直接执行。</p>
+     */
+    private IntentParse parseIntent(SessionRef ref, String content, String modelId) {
+        String goal = "请解析用户最新输入「" + content + "」，仅输出如下 JSON（不要输出其他任何内容）：\n"
+                + "{\"independent\":true,\"summary\":\"一句话总结用户意图\",\"fileRelated\":false,\"confirmQuestion\":\"\"}\n"
+                + "判定规则：\n"
+                + "1. independent：该输入是否是一个全新的独立请求。若明显是在回应之前的选项编号/待办/问题"
+                + "（如单个数字、'继续'、'对，选1'、'写那个报告'等），为 false；否则为 true。\n"
+                + "2. summary：用一句话概括用户真正想做的事。\n"
+                + "3. fileRelated：该意图是否涉及文件变动（写入/修改/删除/重命名文件等）。\n"
+                + "4. confirmQuestion：若该输入引用了历史且需要先向用户确认才能执行，给出一个简短自然的确认问题"
+                + "（如'您是想选择第 1 项（……）吗？'）；若不需要确认则为空字符串。\n"
+                + "注意：若 independent 为 true，说明与历史无关，以用户输入为准，confirmQuestion 必须为空字符串。";
+        try {
+            ChatModel model = modelRouter.resolve(modelId);
+            ChatRequest request = ChatRequest.builder()
+                    .messages(List.of(SystemMessage.from(goal), UserMessage.from(content)))
+                    .build();
+            ChatResponse resp = model.chat(request);
+            String text = resp == null || resp.aiMessage() == null ? null : resp.aiMessage().text();
+            if (text == null || text.isBlank()) {
+                log.warn("意图解析无返回，回退直接执行：session={}", ref.sessionId());
+                return null;
+            }
+            int start = text.indexOf('{');
+            int end = text.lastIndexOf('}');
+            if (start < 0 || end <= start) {
+                return null;
+            }
+            JsonNode node = OBJECT_MAPPER.readTree(text.substring(start, end + 1));
+            boolean independent = node.path("independent").asBoolean(true);
+            boolean fileRelated = node.path("fileRelated").asBoolean(false);
+            String summary = node.path("summary").asText("");
+            String confirm = node.path("confirmQuestion").asText("");
+            return new IntentParse(independent, summary, fileRelated, confirm);
+        } catch (Exception e) {
+            log.warn("意图解析失败，回退直接执行：session={} err={}", ref.sessionId(), e.getMessage());
+            return null;
+        }
+    }
+
+    /** 意图解析结果。 */
+    private record IntentParse(boolean independent, String summary, boolean fileRelated, String confirmQuestion) {
     }
 
     /** 取会话状态中最近一条用户消息作为续跑目标；无则返回空。 */

@@ -98,9 +98,12 @@ class OrchestratorTest {
         when(engine.run(any(), any(), anyString())).thenReturn(Mono.just(
                 EngineRunResult.of(SESSION, Phase.PLAN, planJson(), 0, "m", "success")));
         VerificationChain chain = mock(VerificationChain.class);
-        // 验证始终判定未达成，制造循环
+        // 验证始终判定未达成，但每轮结论不同（模拟每轮有进展），避免触发「重复结论」循环守卫，
+        // 从而验证纯粹的迭代次数安全阀（max_iterations）。
+        java.util.concurrent.atomic.AtomicInteger round = new java.util.concurrent.atomic.AtomicInteger();
         when(chain.verify(any(), any(), anyString(), anyString(), any()))
-                .thenReturn(new VerificationVerdict(false, "进度", "继续", List.of()));
+                .thenAnswer(inv -> new VerificationVerdict(false,
+                        "进度-" + round.incrementAndGet(), "继续", List.of()));
         CoreProperties props = props(2, 0);
         AskSuspender suspender = mock(AskSuspender.class);
         Orchestrator orch = orchestrator(engine, chain, props, suspender);

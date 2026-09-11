@@ -34,6 +34,7 @@ const paths: Record<string, string> = {
   x: 'M18 6 6 18M6 6l12 12',
   trash: 'M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z',
   chevronDown: 'M6 9l6 6 6-6',
+  chevronUp: 'M18 15l-6-6-6 6',
   chevronRight: 'M9 18l6-6-6-6',
   chevronLeft: 'M15 18l-6-6 6-6',
   chevronsLeft: 'M11 17l-5-5 5-5M18 17l-5-5 5-5',

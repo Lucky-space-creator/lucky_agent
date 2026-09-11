@@ -78,6 +78,9 @@ public class ReactEngine implements Engine {
     /** 流式最终回复超时上限（秒）：超过则放弃流式、回退伪流式，避免界面长时间空转。 */
     private static final long CALL_TIMEOUT_SECONDS = 180;
 
+    /** 工具结果回灌模型的最大字符数：300 过小导致模型看不到文件完整内容而反复查询；提高到 20k 并标注截断。 */
+    private static final int MAX_TOOL_RESULT_TEXT = 20000;
+
     private final ModelRouter modelRouter;
     private final ToolGateway toolGateway;
     private final PersonaService personaService;
@@ -163,6 +166,8 @@ public class ReactEngine implements Engine {
             int step = 0;
             String finalText = null;
             long tokenUsed = 0;
+            // 上一轮输入侧 token（增量统计：每轮只计新增消息，避免全量历史平方级虚高）
+            long lastInput = 0;
             // 末次模型响应：落库时需保留 thinking（推理模型要求下一轮原样回传 reasoning_content）
             AiMessage lastAi = null;
             while (step < maxSteps) {
@@ -182,12 +187,13 @@ public class ReactEngine implements Engine {
                 } catch (Exception e) {
                     throw new IllegalStateException("模型调用失败：" + e.getMessage(), e);
                 }
-                // 真实指标：每次模型调用计 1；token 用量按本次调用增量上报（输入+输出），
-                // 由指标收集器累加得到会话级总量，避免重复累计导致虚高
+                // 真实指标：每次模型调用计 1；token 用量按本次调用增量上报（输入侧只计新增消息），
+                // 由指标收集器累加得到会话级总量，避免全量历史逐轮重复累计导致虚高
                 metricsCollector.reportModelCall(ctx.sessionId());
                 long inputTokens = tokenMeter.count(messages);
                 long outputTokens = tokenMeter.count(ai);
-                long callTokens = inputTokens + outputTokens;
+                long callTokens = Math.max(0, inputTokens - lastInput) + outputTokens;
+                lastInput = inputTokens;
                 tokenUsed += callTokens;
                 publisher.publish(ctx.sessionId(), AgentEvent.token(
                         ctx.sessionId(), callTokens, inputTokens, outputTokens,
@@ -240,7 +246,7 @@ public class ReactEngine implements Engine {
                     }
                     publisher.publish(ctx.sessionId(), AgentEvent.toolResult(
                             ctx.sessionId(), req.id(), req.name(), true,
-                            resultText == null || resultText.isBlank() ? "ok" : truncate(resultText, 300),
+                            resultText == null || resultText.isBlank() ? "ok" : truncate(resultText, MAX_TOOL_RESULT_TEXT),
                             null, null));
                     messages.add(ToolExecutionResultMessage.from(req.id(), req.name(), resultText == null ? "" : resultText));
                 }
@@ -379,6 +385,9 @@ public class ReactEngine implements Engine {
                          修改/新增的文件路径与最终结论。
                     3. 阶段性汇报要简短，总结要完整；工具调用过程中不要长篇输出过程细节。
                     4. 任务完成后立即停止：不要继续追加无关内容、不要重复确认已经完成的事项。
+                    5. 模糊输入必须确认：当用户消息是单个字、单个数字或极短内容且可能对应多个解释
+                       （如选项编号、历史待办等）时，禁止自行猜测为一个选项并开始执行，必须先用一句话确认用户意图，
+                       得到用户明确回复后再执行。
                     总结必须使用 Markdown 格式输出（可用标题、无序/有序列表、加粗、行内代码、代码块、引用等标准 Markdown 语法）。""";
             case ASK -> "【阶段指令】当前为确认阶段：仅就高风险点向用户确认，不要继续执行。";
         };
