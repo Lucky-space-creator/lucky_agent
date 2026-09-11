@@ -6,7 +6,7 @@ import com.lucky.agent.common.dto.RunResult;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.dto.UserInput;
-import com.lucky.agent.core.runtime.ConversationStateManager;
+import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import com.lucky.agent.core.service.ConversationManager;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;

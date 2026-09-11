@@ -56,6 +56,21 @@ public interface ModelRouter {
         return Optional.empty();
     }
 
+    /**
+     * 解析记忆管理端点模型（role=memory，会话记忆总结专用）。
+     * <p>与 {@link #resolve(String)} 不同：路由层会把 memory 角色从对话模型选择中过滤
+     * （防止记忆端点被误选为对话模型），本方法走专用通道，保证配置的记忆端点真正生效
+     * （P1-5）；未配置 memory 端点时回退主力模型。</p>
+     */
+    default ChatModel resolveMemory() {
+        return resolve();
+    }
+
+    /** 记忆端点模型名（未配置时回退主端点名，供日志/指标展示）。 */
+    default String memoryModelName() {
+        return modelName();
+    }
+
     /** 主端点是否健康。 */
     boolean primaryHealthy();
 

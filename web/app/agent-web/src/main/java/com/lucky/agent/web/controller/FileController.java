@@ -2,7 +2,7 @@ package com.lucky.agent.web.controller;
 
 import com.lucky.agent.common.dto.ExecResult;
 import com.lucky.agent.common.dto.FileOp;
-import com.lucky.agent.permission.api.FileOpForwarder;
+import com.lucky.agent.permission.service.FileOpForwarder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;

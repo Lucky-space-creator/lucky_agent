@@ -2,7 +2,7 @@ package com.lucky.agent.web.controller;
 
 import com.lucky.agent.common.constant.PermissionLevel;
 import com.lucky.agent.common.contract.PermissionRule;
-import com.lucky.agent.permission.api.PermissionService;
+import com.lucky.agent.permission.service.PermissionService;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;

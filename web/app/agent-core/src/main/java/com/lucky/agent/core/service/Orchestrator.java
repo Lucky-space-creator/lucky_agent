@@ -6,27 +6,27 @@ import com.lucky.agent.common.dto.AgentEvent;
 import com.lucky.agent.common.dto.ConversationCtx;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.core.config.CoreProperties;
-import com.lucky.agent.core.engine.EarlyStopPolicy;
-import com.lucky.agent.core.engine.StepLimitGuard;
+import com.lucky.agent.core.util.engine.EarlyStopPolicy;
+import com.lucky.agent.core.util.engine.StepLimitGuard;
 import com.lucky.agent.core.models.Engine;
 import com.lucky.agent.core.models.Plan;
 import com.lucky.agent.core.models.PlanValidator;
 import com.lucky.agent.core.models.dto.EngineRunResult;
-import com.lucky.agent.core.planactask.ActScheduler;
-import com.lucky.agent.core.planactask.AskSuspender;
-import com.lucky.agent.core.planactask.PlanGenerator;
-import com.lucky.agent.core.planactask.Replanner;
+import com.lucky.agent.core.util.planactask.ActScheduler;
+import com.lucky.agent.core.util.planactask.AskSuspender;
+import com.lucky.agent.core.util.planactask.PlanGenerator;
+import com.lucky.agent.core.util.planactask.Replanner;
 import com.lucky.agent.common.contract.SubAgentSpec;
-import com.lucky.agent.core.runtime.AgentEventPublisher;
-import com.lucky.agent.core.runtime.ConversationStateManager;
-import com.lucky.agent.core.runtime.RunBudget;
-import com.lucky.agent.core.subagent.SubAgentIntent;
-import com.lucky.agent.core.subagent.SubAgentResult;
-import com.lucky.agent.core.subagent.TaskProgressTracker;
-import com.lucky.agent.core.subagent.TaskScheduler;
-import com.lucky.agent.core.verify.VerificationChain;
-import com.lucky.agent.core.verify.VerificationResult;
-import com.lucky.agent.core.verify.VerificationVerdict;
+import com.lucky.agent.core.util.runtime.AgentEventPublisher;
+import com.lucky.agent.core.util.runtime.ConversationStateManager;
+import com.lucky.agent.core.util.runtime.RunBudget;
+import com.lucky.agent.core.util.subagent.SubAgentIntent;
+import com.lucky.agent.core.util.subagent.SubAgentResult;
+import com.lucky.agent.core.util.subagent.TaskProgressTracker;
+import com.lucky.agent.core.util.subagent.TaskScheduler;
+import com.lucky.agent.core.util.verify.VerificationChain;
+import com.lucky.agent.core.util.verify.VerificationResult;
+import com.lucky.agent.core.util.verify.VerificationVerdict;
 import dev.langchain4j.data.message.UserMessage;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -344,12 +344,13 @@ public class Orchestrator implements AgentOrchestrator {
         return !norm.isEmpty() && norm.equals(lastSummaryNorm);
     }
 
-    /** 归一化结论文本：小写 + 压缩空白 + 去首尾空白，用于检测连续两轮是否重复同一结论。 */
+    /** 归一化结论文本：小写 + 去标点/空白（P2-3，对标点不敏感：'请告诉我项目路径。' 与
+     *  '请告诉我项目路径？' 视为同一结论），用于检测连续两轮是否重复同一结论。 */
     private String normalize(String text) {
         if (text == null) {
             return "";
         }
-        return text.trim().toLowerCase().replaceAll("\\s+", " ").strip();
+        return text.toLowerCase().replaceAll("[\\p{P}\\p{Z}\\p{C}]+", " ").trim();
     }
 
     /**

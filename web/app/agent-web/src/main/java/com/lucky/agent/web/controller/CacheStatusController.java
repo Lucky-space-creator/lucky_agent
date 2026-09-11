@@ -1,8 +1,8 @@
 package com.lucky.agent.web.controller;
 
 import com.lucky.agent.cache.config.CacheProperties;
-import com.lucky.agent.cache.session.SessionMessageCache;
-import com.lucky.agent.cache.toolresult.FingerprintCache;
+import com.lucky.agent.cache.support.session.SessionMessageCache;
+import com.lucky.agent.cache.support.toolresult.FingerprintCache;
 import com.lucky.agent.common.cache.CacheProvider;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;

@@ -2,10 +2,10 @@ package com.lucky.agent.web.controller;
 
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.exception.AgentException;
-import com.lucky.agent.skill.api.SkillMatcher;
-import com.lucky.agent.skill.api.SkillRegistry;
-import com.lucky.agent.skill.api.dto.SkillDef;
-import com.lucky.agent.skill.api.dto.SkillMatch;
+import com.lucky.agent.skill.service.SkillMatcher;
+import com.lucky.agent.skill.service.SkillRegistry;
+import com.lucky.agent.skill.repository.dto.SkillDef;
+import com.lucky.agent.skill.repository.dto.SkillMatch;
 import com.lucky.agent.web.util.PackageImporter;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.RequestBody;

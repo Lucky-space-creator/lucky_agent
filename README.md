@@ -67,7 +67,7 @@ lucky_agent/
 
 | 层 | 选型 |
 |----|------|
-| 语言 / 框架 | Java 17+ · Spring Boot 3.x · Maven 多模块 |
+| 语言 / 框架 | Java 21+ · Spring Boot 3.x · Maven 多模块 |
 | AI 编排核心 | LangChain4j（Agent/工具/记忆/RAG）+ LangGraph4j（工作流/多 Agent 图，可选模式） |
 | 辅助接入 | Spring AI（模型/嵌入/向量/可观测性桥接） |
 | 前端 | Vue 3 · TypeScript · Vite · Pinia · Vue Router |

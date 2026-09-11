@@ -1,7 +1,7 @@
 package com.lucky.agent.web.controller;
 
-import com.lucky.agent.core.hook.ExternalHookConfig;
-import com.lucky.agent.core.hook.ExternalHookManager;
+import com.lucky.agent.core.util.hook.ExternalHookConfig;
+import com.lucky.agent.core.util.hook.ExternalHookManager;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;

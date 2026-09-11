@@ -4,14 +4,13 @@ import com.lucky.agent.common.constant.PermissionLevel;
 import com.lucky.agent.common.dto.AgentEvent;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.UserInput;
-import com.lucky.agent.core.runtime.ConversationStateManager;
+import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import com.lucky.agent.core.service.ConversationManager;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;

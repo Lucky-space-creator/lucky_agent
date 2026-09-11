@@ -1,10 +1,12 @@
 package com.lucky.agent.cache.config;
 
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
  * 缓存配置项（§4.6）。
  */
+@Setter
 @ConfigurationProperties(prefix = "cache")
 public class CacheProperties {
 
@@ -27,15 +29,4 @@ public class CacheProperties {
         return sweepHours;
     }
 
-    public void setSessionTtlDays(int v) {
-        this.sessionTtlDays = v;
-    }
-
-    public void setToolTtlDays(int v) {
-        this.toolTtlDays = v;
-    }
-
-    public void setSweepHours(int v) {
-        this.sweepHours = v;
-    }
 }

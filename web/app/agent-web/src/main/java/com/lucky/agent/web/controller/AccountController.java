@@ -1,6 +1,6 @@
 package com.lucky.agent.web.controller;
 
-import com.lucky.agent.web.account.LocalAccountService;
+import com.lucky.agent.web.service.LocalAccountService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;

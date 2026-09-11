@@ -3,7 +3,7 @@ package com.lucky.agent.web.controller;
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.model.api.dto.AgentSettings;
 import com.lucky.agent.model.config.ModelConfigStore;
-import com.lucky.agent.web.local.NativeDirectoryChooser;
+import com.lucky.agent.web.util.NativeDirectoryChooser;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;

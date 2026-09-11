@@ -2,12 +2,12 @@ package com.lucky.agent.mcp;
 
 import com.lucky.agent.common.api.Tool;
 import com.lucky.agent.common.api.ToolSource;
-import com.lucky.agent.mcp.adapter.McpToolAdapter;
+import com.lucky.agent.mcp.support.gateway.McpToolAdapter;
 import com.lucky.agent.mcp.api.McpConnector;
 import com.lucky.agent.mcp.api.McpRegistry;
 import com.lucky.agent.mcp.api.dto.McpServerDef;
 import com.lucky.agent.mcp.api.dto.McpTool;
-import com.lucky.agent.mcp.auth.UserAuthIsolator;
+import com.lucky.agent.mcp.support.auth.UserAuthIsolator;
 
 import java.util.ArrayList;
 import java.util.List;

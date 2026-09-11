@@ -1,14 +1,14 @@
 package com.lucky.agent.cache;
 
+import com.lucky.agent.cache.support.protect.CachePenetrationGuard;
 import com.lucky.agent.cache.config.CacheConfig;
-import com.lucky.agent.cache.session.SessionMessageCache;
-import com.lucky.agent.cache.toolresult.FingerprintCache;
+import com.lucky.agent.cache.support.session.SessionMessageCache;
+import com.lucky.agent.cache.support.toolresult.FingerprintCache;
 import com.lucky.agent.cache.api.dto.SessionMessageVal;
 import com.lucky.agent.common.cache.InMemoryCacheProvider;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 
 import java.util.List;
 import java.util.Map;
@@ -62,8 +62,8 @@ class AgentCacheTest {
 
     @Test
     void penetrationGuard_degradeOnException() {
-        com.lucky.agent.cache.protect.CachePenetrationGuard guard =
-                new com.lucky.agent.cache.protect.CachePenetrationGuard();
+        CachePenetrationGuard guard =
+                new CachePenetrationGuard();
         // 计算正常返回
         assertEquals("ok", guard.withFallback(() -> "ok"));
         // 异常降级：第一次抛错，第二次成功

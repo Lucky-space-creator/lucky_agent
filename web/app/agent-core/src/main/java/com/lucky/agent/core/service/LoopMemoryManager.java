@@ -4,11 +4,11 @@ import com.lucky.agent.common.dto.AgentEvent;
 import com.lucky.agent.common.dto.ConversationCtx;
 import com.lucky.agent.common.dto.HookEvent;
 import com.lucky.agent.common.dto.HookEventName;
-import com.lucky.agent.core.compact.CompactionPipeline;
-import com.lucky.agent.core.compact.TokenMeter;
-import com.lucky.agent.core.hook.LifecycleHookDispatcher;
-import com.lucky.agent.core.runtime.AgentEventPublisher;
-import com.lucky.agent.core.runtime.ConversationStateManager;
+import com.lucky.agent.core.util.compact.CompactionPipeline;
+import com.lucky.agent.core.util.compact.TokenMeter;
+import com.lucky.agent.core.util.hook.LifecycleHookDispatcher;
+import com.lucky.agent.core.util.runtime.AgentEventPublisher;
+import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import com.lucky.agent.memory.api.MemoryStore;
 import com.lucky.agent.model.api.ModelRouter;
 import dev.langchain4j.data.message.ChatMessage;
@@ -73,10 +73,11 @@ public class LoopMemoryManager {
                        String roundLog, AgentEventPublisher publisher) {
         String sessionId = ctx.sessionId();
 
-        // ① 长期记忆：本轮结论沉淀（置信度低于用户原话，避免过程噪音污染记忆）
+        // ① 长期记忆：本轮结论沉淀（置信度低于用户原话，按工作空间分组，避免跨项目串扰）
         if (roundLog != null && !roundLog.isBlank()) {
             try {
-                memoryStore.appendUser(ctx.userId(), truncate(roundLog, MEMORY_MAX_LENGTH), 0.6, "round");
+                memoryStore.appendUser(ctx.userId(), ctx.workspaceId(),
+                        truncate(roundLog, MEMORY_MAX_LENGTH), 0.6, "round");
             } catch (Exception e) {
                 log.warn("长期记忆沉淀失败：session={}", sessionId, e);
             }

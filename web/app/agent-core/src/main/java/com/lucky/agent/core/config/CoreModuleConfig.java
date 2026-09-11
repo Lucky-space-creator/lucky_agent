@@ -5,33 +5,36 @@ import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.contract.LifecycleHook;
 import com.lucky.agent.core.models.Engine;
 import com.lucky.agent.core.models.PlanValidator;
-import com.lucky.agent.core.compact.CompactionPipeline;
-import com.lucky.agent.core.compact.FiveLevelCompactionPipeline;
-import com.lucky.agent.core.compact.TokenMeter;
-import com.lucky.agent.core.engine.EarlyStopPolicy;
-import com.lucky.agent.core.engine.StepLimitGuard;
-import com.lucky.agent.core.gateway.ObservationNormalizer;
-import com.lucky.agent.core.gateway.ToolGateway;
-import com.lucky.agent.core.hook.ExternalHookManager;
-import com.lucky.agent.core.hook.LifecycleHookDispatcher;
-import com.lucky.agent.core.planactask.ActScheduler;
-import com.lucky.agent.core.planactask.AskSuspender;
-import com.lucky.agent.core.planactask.PlanGenerator;
-import com.lucky.agent.core.planactask.Replanner;
-import com.lucky.agent.core.runtime.ConversationStateManager;
-import com.lucky.agent.core.subagent.ResultAggregator;
-import com.lucky.agent.core.subagent.SubAgentExecutor;
-import com.lucky.agent.core.subagent.SubAgentFactory;
-import com.lucky.agent.core.subagent.TaskDecomposer;
-import com.lucky.agent.core.subagent.TaskProgressTracker;
-import com.lucky.agent.core.subagent.TaskScheduler;
-import com.lucky.agent.core.verify.CommandVerifier;
-import com.lucky.agent.core.verify.FileVerifier;
-import com.lucky.agent.core.verify.LlmJudgeVerifier;
-import com.lucky.agent.core.verify.ObjectiveVerifier;
-import com.lucky.agent.core.verify.VerificationChain;
+import com.lucky.agent.core.util.compact.CompactionPipeline;
+import com.lucky.agent.core.util.compact.FiveLevelCompactionPipeline;
+import com.lucky.agent.core.util.compact.TokenMeter;
+import com.lucky.agent.core.util.engine.EarlyStopPolicy;
+import com.lucky.agent.core.util.engine.StepLimitGuard;
+import com.lucky.agent.core.util.gateway.ObservationNormalizer;
+import com.lucky.agent.core.util.gateway.ToolGateway;
+import com.lucky.agent.core.util.hook.ExternalHookManager;
+import com.lucky.agent.core.util.hook.LifecycleHookDispatcher;
+import com.lucky.agent.core.util.planactask.ActScheduler;
+import com.lucky.agent.core.util.planactask.AskSuspender;
+import com.lucky.agent.core.util.planactask.PlanGenerator;
+import com.lucky.agent.core.util.planactask.Replanner;
+import com.lucky.agent.core.util.subagent.ResultAggregator;
+import com.lucky.agent.core.util.subagent.SubAgentExecutor;
+import com.lucky.agent.core.util.subagent.SubAgentFactory;
+import com.lucky.agent.core.util.subagent.TaskDecomposer;
+import com.lucky.agent.core.util.subagent.TaskProgressTracker;
+import com.lucky.agent.core.util.subagent.TaskScheduler;
+import com.lucky.agent.core.util.memory.MemoryPrefetcher;
+import com.lucky.agent.core.util.verify.CommandVerifier;
+import com.lucky.agent.core.util.verify.FileVerifier;
+import com.lucky.agent.core.util.verify.LlmJudgeVerifier;
+import com.lucky.agent.core.util.verify.ObjectiveVerifier;
+import com.lucky.agent.core.util.verify.VerificationChain;
 import com.lucky.agent.executor.api.FileService;
+import com.lucky.agent.memory.config.MemoryMdProperties;
+import com.lucky.agent.memory.support.md.HierarchyMemoryRetriever;
 import com.lucky.agent.model.api.ModelRouter;
+import com.lucky.agent.workspace.api.WorkspaceConfig;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -91,10 +94,10 @@ public class CoreModuleConfig {
         return new CommandVerifier(fileService, coreProperties.verificationTimeoutSec());
     }
 
-    /** 主观判定器：客观信号缺失时的兜底整体判定。 */
+    /** 主观判定器：客观信号缺失时的兜底整体判定（轻量直连模型，不经引擎，见 P0-3）。 */
     @Bean
-    public LlmJudgeVerifier llmJudgeVerifier(Engine engine, ConversationStateManager stateManager) {
-        return new LlmJudgeVerifier(engine, stateManager);
+    public LlmJudgeVerifier llmJudgeVerifier(ModelRouter modelRouter) {
+        return new LlmJudgeVerifier(modelRouter);
     }
 
     /** 客观验证责任链：客观优先，客观未通过覆盖主观「已达成」结论。 */
@@ -167,12 +170,15 @@ public class CoreModuleConfig {
         return new SubAgentFactory(modelRouter, toolGateway);
     }
 
-    /** 子代理执行器。 */
+    /** 子代理执行器（P2-2：注入工作空间配置用于权限级别继承 + 核心配置用于任务超时）。 */
     @Bean
     public SubAgentExecutor subAgentExecutor(SubAgentFactory subAgentFactory,
                                              LifecycleHookDispatcher lifecycleHookDispatcher,
-                                             ToolGateway toolGateway) {
-        return new SubAgentExecutor(subAgentFactory, lifecycleHookDispatcher, toolGateway);
+                                             ToolGateway toolGateway,
+                                             WorkspaceConfig workspaceConfig,
+                                             CoreProperties coreProperties) {
+        return new SubAgentExecutor(subAgentFactory, lifecycleHookDispatcher, toolGateway,
+                workspaceConfig, coreProperties);
     }
 
     /** 子代理调度器（串行 + 并行 fan-out/fan-in）。 */
@@ -181,5 +187,13 @@ public class CoreModuleConfig {
                                                ResultAggregator resultAggregator,
                                                CoreProperties coreProperties) {
         return new TaskScheduler(subAgentExecutor, resultAggregator, coreProperties);
+    }
+
+    /** 记忆预取选择器（Claude 记忆预取等价物：索引 → TopN 条目，会话内去重）。 */
+    @Bean
+    public MemoryPrefetcher memoryPrefetcher(ModelRouter modelRouter,
+                                             HierarchyMemoryRetriever hierarchyMemoryRetriever,
+                                             MemoryMdProperties props) {
+        return new MemoryPrefetcher(modelRouter, hierarchyMemoryRetriever, props);
     }
 }

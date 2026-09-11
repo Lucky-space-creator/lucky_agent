@@ -1,7 +1,7 @@
 package com.lucky.agent.web.controller;
 
-import com.lucky.agent.model.prompt.PromptCacheService;
-import com.lucky.agent.model.prompt.PromptCacheStatus;
+import com.lucky.agent.model.support.prompt.PromptCacheService;
+import com.lucky.agent.model.support.prompt.PromptCacheStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;

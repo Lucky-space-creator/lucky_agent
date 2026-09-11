@@ -2,12 +2,12 @@ package com.lucky.agent.persona.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.common.constant.WorkspaceDirs;
-import com.lucky.agent.persona.api.BehaviorEngine;
-import com.lucky.agent.persona.behavior.BehaviorParamEngine;
-import com.lucky.agent.persona.bind.PersonaSkillBinder;
-import com.lucky.agent.persona.center.PersonaStore;
-import com.lucky.agent.persona.collab.MultiAgentOrchestrator;
-import com.lucky.agent.persona.api.PersonaService;
+import com.lucky.agent.persona.service.BehaviorEngine;
+import com.lucky.agent.persona.service.BehaviorParamEngine;
+import com.lucky.agent.persona.support.bind.PersonaSkillBinder;
+import com.lucky.agent.persona.repository.PersonaStore;
+import com.lucky.agent.persona.support.collab.MultiAgentOrchestrator;
+import com.lucky.agent.persona.service.PersonaService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 

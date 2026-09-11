@@ -3,11 +3,11 @@ package com.lucky.agent.permission.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.contract.PermissionRule;
-import com.lucky.agent.permission.guard.AuditLogger;
-import com.lucky.agent.permission.guard.DangerousOpDetector;
-import com.lucky.agent.permission.guard.PermissionOverrideStore;
-import com.lucky.agent.permission.rules.PermissionChain;
-import com.lucky.agent.permission.rules.PermissionEvaluator;
+import com.lucky.agent.permission.support.guard.AuditLogger;
+import com.lucky.agent.permission.support.guard.DangerousOpDetector;
+import com.lucky.agent.permission.support.guard.PermissionOverrideStore;
+import com.lucky.agent.permission.support.rules.PermissionChain;
+import com.lucky.agent.permission.support.rules.PermissionEvaluator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -15,7 +15,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 
 /**

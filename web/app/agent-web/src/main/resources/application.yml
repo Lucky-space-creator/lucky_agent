@@ -73,7 +73,7 @@ mcp:
   # 热加载扫描周期（毫秒，默认 60000；@Scheduled 的 fixedDelay 单位为毫秒）
   hot-reload-ms: 60000
 
-# 分层 Markdown 记忆（Hint 型：每层 md 总结，召回按层读取 整体→项目→会话）
+# 分层 Markdown 记忆（Hint 型：索引 + 条目，对标 Claude Code Auto Memory）
 # 总结模型 = 模型配置中 role=memory 的记忆管理 Agent 端点；未配置时回退主力模型
 memory:
   md:
@@ -85,3 +85,15 @@ memory:
     trigger-turns: 5
     # LLM 总结失败重试上限
     max-retry: 2
+    # MEMORY.md 索引行数 / 字节上限（超限保留最早条目并打修剪标记，由 Dream 整理）
+    index-max-lines: 200
+    index-max-bytes: 25600
+    # 记忆预取选择器：每轮引擎 run 从两级索引挑出最相关条目注入（会话内去重）
+    prefetch-enabled: true
+    prefetch-top-k: 5
+    # 可选：选择器专用廉价端点 id（空则回退主端点）
+    prefetch-model-id: ""
+    # Dream 合成：周期（小时）与触发最少新增会话数；启动延迟（毫秒）
+    dream-interval-hours: 24
+    dream-min-new-sessions: 5
+    dream-initial-delay-ms: 600000

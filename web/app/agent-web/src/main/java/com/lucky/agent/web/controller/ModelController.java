@@ -2,8 +2,8 @@ package com.lucky.agent.web.controller;
 
 import com.lucky.agent.model.api.dto.InferenceDepth;
 import com.lucky.agent.model.api.dto.ModelConfig;
-import com.lucky.agent.model.endpoint.EndpointAccessCenter;
-import com.lucky.agent.model.endpoint.HealthProbe;
+import com.lucky.agent.model.support.endpoint.EndpointAccessCenter;
+import com.lucky.agent.model.support.endpoint.HealthProbe;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;

@@ -2,14 +2,14 @@ package com.lucky.agent.skill;
 
 import com.lucky.agent.common.api.Tool;
 import com.lucky.agent.common.api.ToolSource;
-import com.lucky.agent.skill.adapter.SkillToolAdapter;
-import com.lucky.agent.skill.api.SkillMatcher;
-import com.lucky.agent.skill.api.SkillRegistry;
-import com.lucky.agent.skill.api.dto.SkillDef;
-import com.lucky.agent.skill.api.dto.SkillMatch;
+import com.lucky.agent.skill.support.gateway.SkillToolAdapter;
+import com.lucky.agent.skill.service.SkillMatcher;
+import com.lucky.agent.skill.service.SkillRegistry;
+import com.lucky.agent.skill.repository.dto.SkillDef;
+import com.lucky.agent.skill.repository.dto.SkillMatch;
 import com.lucky.agent.skill.config.SkillProperties;
-import com.lucky.agent.skill.resolve.DependencyResolver;
-import com.lucky.agent.skill.sandbox.SkillSandbox;
+import com.lucky.agent.skill.support.resolve.DependencyResolver;
+import com.lucky.agent.skill.support.sandbox.SkillSandbox;
 
 import java.util.List;
 

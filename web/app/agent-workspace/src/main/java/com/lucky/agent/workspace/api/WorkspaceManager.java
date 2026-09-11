@@ -14,7 +14,7 @@ import java.util.Optional;
  * <p>建名即用：创建时生成 workspaceId，并将「名称 ↔ 路径 ↔ 权限级别」写入
  * {@code <frameworkRoot>/.config/workspaces.json}（框架隐藏目录，零托管）。</p>
  */
-@Remote(serviceName = "workspace")
+@Remote(serviceName = "com/lucky/agent/workspace")
 public interface WorkspaceManager {
 
     /**

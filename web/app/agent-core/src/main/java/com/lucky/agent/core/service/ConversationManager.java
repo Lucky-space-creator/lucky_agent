@@ -13,18 +13,18 @@ import com.lucky.agent.common.dto.RunResult;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.dto.UserInput;
+import com.lucky.agent.core.repository.SessionRepository;
 import com.lucky.agent.core.models.dto.EngineRunResult;
-import com.lucky.agent.core.hook.LifecycleHookDispatcher;
-import com.lucky.agent.core.metrics.MetricsCollector;
-import com.lucky.agent.core.runtime.AgentEventPublisher;
-import com.lucky.agent.core.runtime.ConversationStateManager;
-import com.lucky.agent.core.subagent.TaskDecomposer;
+import com.lucky.agent.core.util.hook.LifecycleHookDispatcher;
+import com.lucky.agent.core.util.metrics.MetricsCollector;
+import com.lucky.agent.core.util.runtime.AgentEventPublisher;
+import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import com.lucky.agent.executor.api.RollbackService;
 import com.lucky.agent.executor.api.dto.Snapshot;
 import com.lucky.agent.memory.api.MemoryStore;
-import com.lucky.agent.memory.md.MarkdownMemoryWriter;
+import com.lucky.agent.memory.support.md.MarkdownMemoryWriter;
 import com.lucky.agent.model.api.ModelRouter;
-import com.lucky.agent.permission.api.PermissionService;
+import com.lucky.agent.permission.service.PermissionService;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import dev.langchain4j.data.message.SystemMessage;
@@ -237,6 +237,8 @@ public class ConversationManager {
         // 会话绑定的工作空间失效/为空时自动修复为有效工作空间（优先自建，其次内置默认），
         // 并持久化回会话元数据，避免 Agent 实际工作在错误/默认目录而“看不到用户的项目”。
         ref = repairWorkspace(ref);
+        // 供 finally 中异步记忆任务捕获（ref 之后不会再变，但需显式 final 方可在 lambda 中引用）
+        final SessionRef memoryRef = ref;
         ConversationStateManager.SessionState state = stateManager.session(ref);
         if (state.running()) {
             return RunResult.of(ref.sessionId()).status(RunResult.RunStatus.ERROR)
@@ -265,7 +267,8 @@ public class ConversationManager {
                 state.appendMessage(UserMessage.from(content));
                 sessionRepository.upsertMeta(ref, titleFor(ref, content));
                 sessionRepository.appendMessage(ref.sessionId(), "user", content, Instant.now().toString());
-                memoryStore.appendUser(ref.userId(), content, 0.8, "user");
+                // JSONL 用户轨记忆按工作空间分组落盘（P1-8：跨项目记忆不串扰）
+                memoryStore.appendUser(ref.userId(), ref.workspaceId(), content, 0.8, "user");
 
                 // 意图解析（轻量模型调用）：直接同步调用模型解析意图，不经引擎轮，不产生
                 // 事件流/stop/会话状态污染（避免解析轮提前发 stop 导致前端截断正文）。
@@ -315,7 +318,7 @@ public class ConversationManager {
                         .toList();
                 sessionRepository.appendMessage(ref.sessionId(), "assistant", result.finalText(),
                         Instant.now().toString(), newCheckpoints);
-                memoryStore.appendUser(ref.userId(), result.finalText(), 0.7, "observation");
+                memoryStore.appendUser(ref.userId(), ref.workspaceId(), result.finalText(), 0.7, "observation");
             }
             if (result.error() != null) {
                 // 错误事件已由引擎发出，这里不重复发布
@@ -334,12 +337,17 @@ public class ConversationManager {
         } finally {
             state.running(false);
             hookDispatcher.fire(new HookEvent(HookEventName.STOP, ref.sessionId()));
-            // 会话收尾：分层 Markdown 记忆总结（会话→项目→整体），失败由 writer 内部降级，不阻断主流程
-            try {
-                markdownMemoryWriter.updateForSession(ref, transcriptOf(ref));
-            } catch (Exception e) {
-                log.warn("分层记忆总结异常：session={} err={}", ref.sessionId(), e.getMessage());
-            }
+            // P0-4 fix：会话收尾分层 Markdown 记忆总结改为异步执行，不阻塞 SSE 主流程收尾；
+            // 记忆合并失败由 writer 内部降级处理，不阻断主流程；依赖 Spring 线程池调度，
+            // 避免记忆三连 LLM 调用阻塞 SSE 收尾导致前端长时间等待「完成」状态。
+            Schedulers.boundedElastic().schedule(() -> {
+                try {
+                    markdownMemoryWriter.updateForSession(memoryRef, transcriptOf(memoryRef));
+                    log.debug("分层记忆总结完成：session={}", memoryRef.sessionId());
+                } catch (Exception e) {
+                    log.warn("分层记忆总结异常（异步非阻塞，不影响主流程）：session={} err={}", memoryRef.sessionId(), e.getMessage());
+                }
+            });
             // 本轮事件流收尾：SSE 正常结束（不再靠心跳悬挂），并销毁 sink 供下一轮重建
             publisher.complete(ref.sessionId());
         }
@@ -373,8 +381,12 @@ public class ConversationManager {
      * 避免解析轮污染正文/提前收尾；JSON 解析失败时返回 {@code null}，调用方回退为直接执行。</p>
      */
     private IntentParse parseIntent(SessionRef ref, String content, String modelId) {
+        // 附上最近一段会话历史，供模型判断该输入是否引用了之前的上下文（选项编号/待办/对话），
+        // 纠正「无历史则无法判定引用」的盲区（P0-1 意图解析门实际生效的前提）
+        String historyContext = recentHistory(ref);
         String goal = "请解析用户最新输入「" + content + "」，仅输出如下 JSON（不要输出其他任何内容）：\n"
                 + "{\"independent\":true,\"summary\":\"一句话总结用户意图\",\"fileRelated\":false,\"confirmQuestion\":\"\"}\n"
+                + (historyContext.isBlank() ? "" : "【最近对话历史】\n" + historyContext + "\n")
                 + "判定规则：\n"
                 + "1. independent：该输入是否是一个全新的独立请求。若明显是在回应之前的选项编号/待办/问题"
                 + "（如单个数字、'继续'、'对，选1'、'写那个报告'等），为 false；否则为 true。\n"
@@ -409,6 +421,42 @@ public class ConversationManager {
             log.warn("意图解析失败，回退直接执行：session={} err={}", ref.sessionId(), e.getMessage());
             return null;
         }
+    }
+
+    /** 取会话状态最近一段历史（最多 6 条、每条截断）作为意图解析的上下文参考；无则返回空串。 */
+    private String recentHistory(SessionRef ref) {
+        ConversationStateManager.SessionState state = stateManager.find(ref.sessionId()).orElse(null);
+        if (state == null || state.messages() == null || state.messages().isEmpty()) {
+            return "";
+        }
+        List<dev.langchain4j.data.message.ChatMessage> messages = state.messages();
+        StringBuilder sb = new StringBuilder();
+        int from = Math.max(0, messages.size() - 6);
+        for (int i = from; i < messages.size(); i++) {
+            dev.langchain4j.data.message.ChatMessage m = messages.get(i);
+            String role = m instanceof dev.langchain4j.data.message.UserMessage ? "user"
+                    : (m instanceof dev.langchain4j.data.message.AiMessage ? "assistant"
+                    : (m instanceof dev.langchain4j.data.message.ToolExecutionResultMessage ? "tool"
+                    : "system"));
+            if (m instanceof dev.langchain4j.data.message.SystemMessage) {
+                continue;
+            }
+            String text;
+            try {
+                text = m.type() != null ? m.toString() : "";
+            } catch (Exception e) {
+                text = "";
+            }
+            sb.append(role).append(": ").append(truncate(text, 200)).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private String truncate(String text, int max) {
+        if (text == null) {
+            return "";
+        }
+        return text.length() <= max ? text : text.substring(0, max) + "…";
     }
 
     /** 意图解析结果。 */

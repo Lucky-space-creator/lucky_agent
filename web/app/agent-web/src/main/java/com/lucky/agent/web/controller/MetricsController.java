@@ -1,6 +1,6 @@
 package com.lucky.agent.web.controller;
 
-import com.lucky.agent.core.metrics.MetricsCollector;
+import com.lucky.agent.core.util.metrics.MetricsCollector;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;

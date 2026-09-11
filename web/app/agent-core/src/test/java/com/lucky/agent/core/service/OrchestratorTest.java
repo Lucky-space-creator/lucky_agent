@@ -2,25 +2,26 @@ package com.lucky.agent.core.service;
 
 import com.lucky.agent.common.constant.PermissionLevel;
 import com.lucky.agent.common.constant.Phase;
-import com.lucky.agent.common.dto.AgentEvent;
 import com.lucky.agent.common.dto.ConversationCtx;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.core.config.CoreProperties;
-import com.lucky.agent.core.engine.EarlyStopPolicy;
-import com.lucky.agent.core.engine.StepLimitGuard;
+import com.lucky.agent.core.models.PlanValidator;
+import com.lucky.agent.core.util.subagent.SubAgentResult;
+import com.lucky.agent.core.util.engine.EarlyStopPolicy;
+import com.lucky.agent.core.util.engine.StepLimitGuard;
 import com.lucky.agent.core.models.Engine;
 import com.lucky.agent.core.models.Plan;
 import com.lucky.agent.core.models.dto.EngineRunResult;
-import com.lucky.agent.core.planactask.ActScheduler;
-import com.lucky.agent.core.planactask.AskSuspender;
-import com.lucky.agent.core.planactask.PlanGenerator;
-import com.lucky.agent.core.planactask.Replanner;
-import com.lucky.agent.core.runtime.AgentEventPublisher;
-import com.lucky.agent.core.runtime.ConversationStateManager;
-import com.lucky.agent.core.subagent.TaskProgressTracker;
-import com.lucky.agent.core.subagent.TaskScheduler;
-import com.lucky.agent.core.verify.VerificationChain;
-import com.lucky.agent.core.verify.VerificationVerdict;
+import com.lucky.agent.core.util.planactask.ActScheduler;
+import com.lucky.agent.core.util.planactask.AskSuspender;
+import com.lucky.agent.core.util.planactask.PlanGenerator;
+import com.lucky.agent.core.util.planactask.Replanner;
+import com.lucky.agent.core.util.runtime.AgentEventPublisher;
+import com.lucky.agent.core.util.runtime.ConversationStateManager;
+import com.lucky.agent.core.util.subagent.TaskProgressTracker;
+import com.lucky.agent.core.util.subagent.TaskScheduler;
+import com.lucky.agent.core.util.verify.VerificationChain;
+import com.lucky.agent.core.util.verify.VerificationVerdict;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -31,7 +32,6 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -75,7 +75,7 @@ class OrchestratorTest {
         when(state.messages()).thenReturn(new java.util.concurrent.CopyOnWriteArrayList<>());
         when(stateManager.session(any())).thenReturn(state);
         return new Orchestrator(engine, stateManager,
-                new PlanGenerator(), new com.lucky.agent.core.models.PlanValidator(),
+                new PlanGenerator(), new PlanValidator(),
                 new Replanner(engine), new TaskProgressTracker(), chain,
                 mock(LoopMemoryManager.class), props, suspender,
                 new StepLimitGuard(props.planMaxSteps(), props.actMaxSteps()),
@@ -229,7 +229,7 @@ class OrchestratorTest {
         TaskScheduler scheduler = mock(TaskScheduler.class);
         // 子代理调度返回一条摘要结果
         when(scheduler.scheduleSerial(any(), any(), anyString(), anyString()))
-                .thenReturn(Flux.just(new com.lucky.agent.core.subagent.SubAgentResult(
+                .thenReturn(Flux.just(new SubAgentResult(
                         "sa-1", "模块A已独立评审通过", true)));
         Orchestrator orch = orchestrator(engine, chain, props, suspender, scheduler);
 
@@ -249,7 +249,7 @@ class OrchestratorTest {
         when(state.messages()).thenReturn(new java.util.concurrent.CopyOnWriteArrayList<>());
         when(stateManager.session(any())).thenReturn(state);
         return new Orchestrator(engine, stateManager,
-                new PlanGenerator(), new com.lucky.agent.core.models.PlanValidator(),
+                new PlanGenerator(), new PlanValidator(),
                 new Replanner(engine), new TaskProgressTracker(), chain,
                 mock(LoopMemoryManager.class), props, suspender,
                 new StepLimitGuard(props.planMaxSteps(), props.actMaxSteps()),

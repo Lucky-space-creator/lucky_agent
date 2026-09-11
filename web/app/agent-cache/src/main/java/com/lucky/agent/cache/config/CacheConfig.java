@@ -2,12 +2,11 @@ package com.lucky.agent.cache.config;
 
 import com.lucky.agent.common.cache.CacheProvider;
 import com.lucky.agent.common.cache.InMemoryCacheProvider;
-import com.lucky.agent.cache.session.SessionMessageCache;
-import com.lucky.agent.cache.session.TtlSweeper;
-import com.lucky.agent.cache.toolresult.FingerprintCache;
+import com.lucky.agent.cache.support.session.SessionMessageCache;
+import com.lucky.agent.cache.support.session.TtlSweeper;
+import com.lucky.agent.cache.support.toolresult.FingerprintCache;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Primary;
 

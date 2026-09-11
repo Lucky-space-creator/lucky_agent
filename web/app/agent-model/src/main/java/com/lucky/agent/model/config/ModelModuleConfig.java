@@ -1,9 +1,9 @@
 package com.lucky.agent.model.config;
 
 import com.lucky.agent.common.constant.WorkspaceDirs;
-import com.lucky.agent.model.prompt.BasePromptStore;
-import com.lucky.agent.model.prompt.PromptCacheService;
-import com.lucky.agent.model.prompt.SystemPromptAssembler;
+import com.lucky.agent.model.support.prompt.BasePromptStore;
+import com.lucky.agent.model.support.prompt.PromptCacheService;
+import com.lucky.agent.model.support.prompt.SystemPromptAssembler;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

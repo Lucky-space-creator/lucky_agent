@@ -6,7 +6,7 @@ import com.lucky.agent.mcp.api.McpConnector;
 import com.lucky.agent.mcp.api.McpRegistry;
 import com.lucky.agent.mcp.api.dto.McpServerDef;
 import com.lucky.agent.mcp.api.dto.McpTool;
-import com.lucky.agent.mcp.auth.UserAuthIsolator;
+import com.lucky.agent.mcp.support.auth.UserAuthIsolator;
 import com.lucky.agent.web.util.PackageImporter;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
