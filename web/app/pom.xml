@@ -191,6 +191,15 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- JDK 21 下 JVM 默认拒绝 manifest classpath 中的绝对路径（surefire fork 的
+                         booter/test-classes），导致 JUnit 发现测试类失败；关闭该校验（JDK 17 不受影响） -->
+                    <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>

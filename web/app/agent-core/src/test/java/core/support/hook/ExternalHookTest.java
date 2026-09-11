@@ -84,8 +84,14 @@ class ExternalHookTest {
     }
 
     @Test
-    void testManager_SaveDeleteReloadImmediate() {
-        ExternalHookStore store = new ExternalHookStore((WorkspaceDirs) tempDir.resolve("hooks.json"), new ObjectMapper());
+    void testManager_SaveDeleteReloadImmediate() throws Exception {
+        // 跨包无法访问 ExternalHookStore 的包级 (Path, ObjectMapper) 构造器，
+        // 构造真实 WorkspaceDirs（框架根指向临时目录），走公开构造器注入
+        WorkspaceDirs dirs = new WorkspaceDirs();
+        setField(dirs, "frameworkRoot", tempDir.toString());
+        setField(dirs, "workspaceRoot", tempDir.resolve("ws").toString());
+        dirs.init();
+        ExternalHookStore store = new ExternalHookStore(dirs, new ObjectMapper());
         ExternalHookManager manager = new ExternalHookManager(store, new ExternalHookFactory());
 
         assertTrue(manager.list().isEmpty());
@@ -99,5 +105,11 @@ class ExternalHookTest {
         assertTrue(manager.delete(saved.id()));
         assertTrue(manager.hooks().isEmpty());
         assertTrue(manager.list().isEmpty());
+    }
+
+    private static void setField(Object target, String field, Object value) throws Exception {
+        java.lang.reflect.Field f = target.getClass().getDeclaredField(field);
+        f.setAccessible(true);
+        f.set(target, value);
     }
 }
