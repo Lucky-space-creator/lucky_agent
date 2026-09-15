@@ -6,7 +6,7 @@ import com.lucky.agent.common.dto.ConversationCtx;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.core.config.CoreProperties;
 import com.lucky.agent.core.models.PlanValidator;
-import com.lucky.agent.core.util.subagent.SubAgentResult;
+import com.lucky.agent.core.repository.SubAgentResult;
 import com.lucky.agent.core.util.engine.EarlyStopPolicy;
 import com.lucky.agent.core.util.engine.StepLimitGuard;
 import com.lucky.agent.core.models.Engine;

@@ -32,6 +32,8 @@ const fileTreeOpen = ref(true)
 const panelWidth = ref(480)
 /** 是否正在拖拽分割线。 */
 const resizing = ref(false)
+/** 执行面板是否展开（悬浮面板默认展开，运行中点击头部可收缩）。 */
+const runPanelOpen = ref(true)
 
 /** 切换右侧工具面板（IDEA 风格：再次点击收起）。 */
 function toggleTool(tool: ToolKey) {
@@ -256,6 +258,30 @@ async function welcomeFiles(e: Event) {
       <div class="chat__layout">
         <!-- 对话区：flex:1，随右侧工具栏/面板展开被推动 -->
         <div class="chat__main">
+          <!-- 悬浮执行面板：展示思考、进度、工具调用，悬浮在输入框上方，可收缩（Issue 1） -->
+          <div v-if="chat.running || !chat.runPanel.done" class="run-panel">
+            <div class="run-panel__head" @click="runPanelOpen = !runPanelOpen">
+              <span class="run-panel__title">
+                <Icon :name="runPanelOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
+                {{ chat.runPanel.phase || '执行中' }}
+              </span>
+              <span class="run-panel__stat mono">
+                {{ chat.runPanel.thoughts.length }} 思考
+                <template v-if="chat.running"> · {{ chat.runPanel.toolCalls.filter(t => t.status === 'running').length }} 工具运行中</template>
+              </span>
+              <span v-if="chat.runPanel.done" class="run-panel__done">完成</span>
+            </div>
+            <div v-if="runPanelOpen && (chat.runPanel.logs.length || chat.runPanel.thoughts.length)" class="run-panel__body">
+              <div v-if="chat.runPanel.thoughts.length" class="run-panel__sect">
+                <div class="run-panel__sect-title">思考</div>
+                <div v-for="(t, i) in chat.runPanel.thoughts" :key="i" class="run-panel__thought">{{ t }}</div>
+              </div>
+              <div v-if="chat.runPanel.logs.length" class="run-panel__sect">
+                <div class="run-panel__sect-title">进度</div>
+                <div v-for="(t, i) in chat.runPanel.logs" :key="i" class="run-panel__log">{{ t }}</div>
+              </div>
+            </div>
+          </div>
           <div ref="listEl" class="chat__list">
             <MessageItem
               v-for="(item, i) in chat.messages"
@@ -442,6 +468,72 @@ async function welcomeFiles(e: Event) {
   min-height: 0;
   overflow-y: auto;
   padding: 16px 8px 4px 0;
+}
+
+/* ---- 悬浮执行面板（在输入框上方，可收缩展示思考/进度/工具调用） ---- */
+.run-panel {
+  flex-shrink: 0;
+  max-height: 200px;
+  margin: 0 8px 8px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-10);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.run-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  cursor: pointer;
+  background: var(--bg-2);
+}
+.run-panel__head:hover {
+  background: var(--bg-3);
+}
+.run-panel__title {
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--accent-text);
+}
+.run-panel__stat {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-3);
+}
+.run-panel__done {
+  font-size: 10px;
+  color: var(--teal);
+}
+.run-panel__body {
+  overflow-y: auto;
+  padding: 6px 12px 8px;
+}
+.run-panel__sect {
+  margin-top: 4px;
+}
+.run-panel__sect-title {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--text-3);
+  margin-bottom: 3px;
+}
+.run-panel__thought,
+.run-panel__log {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  margin: 2px 0;
+}
+.run-panel__thought {
+  color: var(--text-3);
 }
 
 /* ---- 右侧工具栏（参与 flex 布局，占宽度；可整体收缩） ---- */

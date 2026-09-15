@@ -1,7 +1,7 @@
 package com.lucky.agent.web.controller;
 
 import com.lucky.agent.core.util.subagent.TaskScheduler;
-import com.lucky.agent.core.util.subagent.TaskSchedulerStatus;
+import com.lucky.agent.core.repository.TaskSchedulerStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;

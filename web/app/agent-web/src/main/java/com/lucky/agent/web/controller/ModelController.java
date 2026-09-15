@@ -73,6 +73,33 @@ public class ModelController {
         return Map.of("removed", accessCenter.delete(id));
     }
 
+    /** 指定端点用量统计（模型详情小窗数据源；无调用记录返回空统计）。 */
+    @GetMapping("/{id}/usage")
+    public Map<String, Object> usage(@PathVariable String id) {
+        com.lucky.agent.model.support.usage.ModelUsageTracker.ModelUsage u = accessCenter.usageOf(id);
+        return u == null ? Map.of("modelId", id, "calls", 0L) : usageMap(u);
+    }
+
+    /** 全部端点用量统计（列表角标/汇总视图数据源）。 */
+    @GetMapping("/usage")
+    public Map<String, Object> usages() {
+        return accessCenter.usages().entrySet().stream()
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey,
+                        e -> usageMap(e.getValue())));
+    }
+
+    private Map<String, Object> usageMap(com.lucky.agent.model.support.usage.ModelUsageTracker.ModelUsage u) {
+        java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("modelId", u.modelId());
+        m.put("modelName", u.modelName());
+        m.put("calls", u.calls());
+        m.put("inputTokens", u.inputTokens());
+        m.put("outputTokens", u.outputTokens());
+        m.put("errors", u.errors());
+        m.put("lastUsedAt", u.lastUsedAt());
+        return m;
+    }
+
     /**
      * 探活端点：请求体可选。
      * <ul>

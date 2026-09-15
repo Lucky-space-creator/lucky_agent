@@ -6,6 +6,8 @@ import com.lucky.agent.common.dto.AgentEvent;
 import com.lucky.agent.common.dto.ConversationCtx;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.core.config.CoreProperties;
+import com.lucky.agent.core.repository.SubAgentIntent;
+import com.lucky.agent.core.repository.SubAgentResult;
 import com.lucky.agent.core.util.engine.EarlyStopPolicy;
 import com.lucky.agent.core.util.engine.StepLimitGuard;
 import com.lucky.agent.core.models.Engine;
@@ -20,8 +22,6 @@ import com.lucky.agent.common.contract.SubAgentSpec;
 import com.lucky.agent.core.util.runtime.AgentEventPublisher;
 import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import com.lucky.agent.core.util.runtime.RunBudget;
-import com.lucky.agent.core.util.subagent.SubAgentIntent;
-import com.lucky.agent.core.util.subagent.SubAgentResult;
 import com.lucky.agent.core.util.subagent.TaskProgressTracker;
 import com.lucky.agent.core.util.subagent.TaskScheduler;
 import com.lucky.agent.core.util.verify.VerificationChain;
@@ -133,6 +133,11 @@ public class Orchestrator implements AgentOrchestrator {
         String lastSummaryNorm = null;
 
         for (int iter = 1; ; iter++) {
+            // 用户已取消：停止开启新轮次（软取消，正在进行的单次调用放行）
+            if (stateManager.session(ref).cancelRequested()) {
+                publisher.publish(sessionId, AgentEvent.progress(sessionId, "已取消，停止本轮执行。"));
+                return EngineRunResult.of(sessionId, Phase.ACT, null, budget.usedTokens(), null, "cancelled");
+            }
             // N 安全阀（循环头统一检查）：迭代次数 / 回合数 / token 预算 任一耗尽 → 强制结束并总结
             Optional<EngineRunResult> tripped = checkSafetyValve(
                     sessionId, iter, maxIter, budget, accumulated, publisher);
@@ -141,12 +146,22 @@ public class Orchestrator implements AgentOrchestrator {
             }
 
             // B: LLM 分析需求（PLAN 阶段产出结构化计划，由模型判断是否需拆子任务/启动子代理）
-            publisher.publish(sessionId, AgentEvent.thought(sessionId,
+            publisher.publish(sessionId, AgentEvent.progress(sessionId,
                     "【分析】正在分析需求并判断是否需拆分为子任务/启动子代理（第 " + iter + " 轮）…"));
             Analysis analysis = analyze(ctx, goal, publisher);
             Plan plan = analysis.plan();
             List<SubAgentIntent> subIntents = analysis.subAgents();
             budget.incrementTurn();
+
+            // PLAN 阶段模型要么直接向用户征询信息（询问型回答），要么产出可执行计划。
+            // 询问型回答（如「请提供报错信息」「请回复……」）一次问完即停，
+            // 不再强制拆步骤/继续下一轮，从根上杜绝「用户没提问却反复收到提问」。
+            if (isAskingReply(analysis.rawText())) {
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
+                        "【分析】模型向用户征询信息，等待用户回复后再继续。"));
+                return EngineRunResult.of(sessionId, Phase.PLAN, analysis.rawText(),
+                        budget.usedTokens(), null, "ask");
+            }
 
             // C1: 是否声明了「隔离子代理」（仅 core.subagent-enabled=true 时生效）
             boolean hasSubAgents = properties.subagentEnabled()
@@ -155,7 +170,7 @@ public class Orchestrator implements AgentOrchestrator {
 
             // C2=否且无子代理 → 单 Agent 直接执行（默认单 agent，P2-1）
             if (!hasSteps && !hasSubAgents) {
-                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【分析】模型判定无需拆分/子代理，单 Agent 直接执行。"));
                 // 直连执行同样走 suppressStop：编排期内引擎不发 stop，收尾由会话层统一发布
                 EngineRunResult direct = actScheduler.execute(
@@ -172,8 +187,18 @@ public class Orchestrator implements AgentOrchestrator {
                             ? "unknown" : ctx.permissionLevel().getCode());
                     return direct;
                 }
+                if (direct.status() != null && direct.status().equals("cancelled")) {
+                    return direct;
+                }
                 if (direct.error() != null) {
                     return direct;
+                }
+                // 询问型结论（模型已向用户征询信息，本轮无工具动作）：一次问完即停，
+                // 先于验证判定返回（少跑一轮 judge 模型调用），不进入
+                // 「continueGoal → 再分析」死循环（重复提问根因之一）
+                if (isAskingReply(direct.finalText())) {
+                    return EngineRunResult.of(sessionId, Phase.ACT, direct.finalText(),
+                            direct.tokenUsed(), direct.model(), "ask");
                 }
                 // P2-2：单步任务也走轻量验证（无客观声明时仅主观判定）
                 VerificationVerdict v = verificationChain.verify(null, ctx, goal,
@@ -183,15 +208,21 @@ public class Orchestrator implements AgentOrchestrator {
                     return EngineRunResult.of(sessionId, Phase.ACT, v.summary(),
                             direct.tokenUsed(), direct.model(), "success");
                 }
+                // 验证总结亦为询问型：同样一次问完即停
+                if (isAskingReply(v.summary())) {
+                    String ask = v.summary() != null && !v.summary().isBlank() ? v.summary() : direct.finalText();
+                    return EngineRunResult.of(sessionId, Phase.ACT, ask,
+                            direct.tokenUsed(), direct.model(), "ask");
+                }
                 // 循环守卫：连续两轮未达成结论一致 → 模型在重复/反复询问，提前结束避免死循环
                 if (stuckLoop(iter, lastSummaryNorm, v.summary())) {
-                    publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                    publisher.publish(sessionId, AgentEvent.progress(sessionId,
                             "【安全阀】连续两轮结论一致，模型在重复/反复询问，提前结束本轮。"));
                     return EngineRunResult.of(sessionId, Phase.ACT, v.summary(),
                             direct.tokenUsed(), direct.model(), "stuck");
                 }
                 lastSummaryNorm = normalize(v.summary());
-                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【复查】单步执行未完全达成，进入下一轮分析。"));
                 loopMemoryManager.manage(ctx, stateManager.session(ref),
                         direct.finalText() + v.evidenceText(), publisher);
@@ -206,7 +237,7 @@ public class Orchestrator implements AgentOrchestrator {
 
             // C1=是：先启动隔离子代理，收集子问题结果（独立 spec/会话/摘要回灌）
             if (hasSubAgents) {
-                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【分析】检测到高复杂度子问题，启动 " + subIntents.size() + " 个隔离子代理并行分析…"));
                 // 推任务计划事件，供前端展示子代理清单
                 List<AgentEvent.TaskItem> subTasks = subIntents.stream()
@@ -258,7 +289,7 @@ public class Orchestrator implements AgentOrchestrator {
 
             // C2=是（且还有步骤）：核心 Agent 把剩余步骤拆开串行执行（D10「拆分成步骤」）
             if (hasSteps) {
-                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【分析】拆分为 " + plan.steps().size() + " 个步骤执行。"));
                 List<AgentEvent.TaskItem> tasks = plan.steps().stream()
                         .map(s -> new AgentEvent.TaskItem("s" + s.id(), s.desc()))
@@ -280,6 +311,17 @@ public class Orchestrator implements AgentOrchestrator {
             }
             budget.addTokens(roundTokens);
             accumulated.append(roundLog);
+            // 执行中用户取消：透传取消结果，不进入验证/续轮
+            if (stateManager.session(ref).cancelRequested()) {
+                return EngineRunResult.of(sessionId, Phase.ACT, null, roundTokens, null, "cancelled");
+            }
+
+            // 执行日志本身为询问型回答（步骤输出即「请回复/请提供…」）：一次问完即停，
+            // 不进入验证循环（验证判定会当作「未达成」继续续轮 → 重复提问）
+            if (isAskingReply(roundLog.toString())) {
+                return EngineRunResult.of(sessionId, Phase.ACT, roundLog.toString().trim(),
+                        roundTokens, null, "ask");
+            }
 
             // D → I: 客观验证 + 达成度判定（仅当存在可客观校验的步骤；子代理/单代理走主观兜底）
             VerificationVerdict verdict = verificationChain.verify(
@@ -291,9 +333,15 @@ public class Orchestrator implements AgentOrchestrator {
                         roundTokens, null, "success");
             }
 
+            // 询问型结论：一次问完即停，不再 continueGoal 续轮（防「重复提问」死循环）
+            if (isAskingReply(verdict.summary())) {
+                return EngineRunResult.of(sessionId, Phase.ACT, verdict.summary(),
+                        roundTokens, null, "ask");
+            }
+
             // 循环守卫：连续两轮未达成结论一致 → 模型在重复/反复询问，提前结束避免死循环
             if (stuckLoop(iter, lastSummaryNorm, verdict.summary())) {
-                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【安全阀】连续两轮结论一致，模型在重复/反复询问，提前结束本轮。"));
                 return EngineRunResult.of(sessionId, Phase.ACT, verdict.summary(),
                         roundTokens, null, "stuck");
@@ -308,7 +356,7 @@ public class Orchestrator implements AgentOrchestrator {
                         roundTokens, null, "ask");
             }
 
-            publisher.publish(sessionId, AgentEvent.thought(sessionId,
+            publisher.publish(sessionId, AgentEvent.progress(sessionId,
                     "【复查】仍有未完成项，进行记忆/上下文管理后进入下一轮分析（第 " + iter + " 轮已完成）。"));
             loopMemoryManager.manage(ctx, stateManager.session(ref),
                     roundLog.toString() + verdict.evidenceText(), publisher);
@@ -354,6 +402,35 @@ public class Orchestrator implements AgentOrchestrator {
     }
 
     /**
+     * 询问型结论判定：模型本轮未取得实质进展、以「向用户征询信息」收尾时，
+     * 一次问完即停（返回 ask 等待用户输入），不进入「未达成 → continueGoal → 再分析」死循环，
+     * 从根上杜绝「用户没提问却反复收到提问」的重复提问现象。
+     */
+    private boolean isAskingReply(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String trimmed = text.trim();
+        // 以问句收尾
+        if (trimmed.matches(".*[？?]\\s*$")) {
+            return true;
+        }
+        // 短文本且以「请/需要/麻烦/能否」开头索取信息（如「请回复「开始执行」」）
+        if (trimmed.length() <= 60 && trimmed.matches("^(请|需要|麻烦|你先|请先|能否|可以).*")) {
+            return true;
+        }
+        // 明确征询信息的关键词（覆盖规划/执行两阶段常见的索取信息表达）
+        String[] keywords = {"请回复", "请提供", "请补充", "请确认", "需要你", "请选择", "等待你",
+                "请告诉", "请告知", "请给", "请回答", "请明确", "要我提供", "请你提供", "能否提供", "可以告诉我"};
+        for (String k : keywords) {
+            if (trimmed.contains(k)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * N 安全阀：迭代次数 / 回合数 / token 预算三重检查。
      *
      * @return 触发时返回兜底结果（含已完成的进度总结），未触发返回空
@@ -376,7 +453,7 @@ public class Orchestrator implements AgentOrchestrator {
         if (reason == null) {
             return Optional.empty();
         }
-        publisher.publish(sessionId, AgentEvent.thought(sessionId,
+        publisher.publish(sessionId, AgentEvent.progress(sessionId,
                 "【安全阀】" + detail + "，强制结束并总结当前进度。"));
         String summary = "任务执行" + detail + "，未能完全达成目标。已完成的子任务与结果如下：\n" + accumulated;
         return Optional.of(EngineRunResult.of(sessionId, Phase.ACT, summary, 0, null, reason));
@@ -386,7 +463,7 @@ public class Orchestrator implements AgentOrchestrator {
     private Analysis analyze(ConversationCtx ctx, String goal, AgentEventPublisher publisher) {
         EngineRunResult planResult = engine.run(withSuppress(ctx, Phase.PLAN, goal), Phase.PLAN, goal).block();
         if (planResult == null || planResult.error() != null) {
-            return new Analysis(null, List.of());
+            return new Analysis(null, List.of(), "");
         }
         String raw = planResult.finalText() == null ? "" : planResult.finalText();
         Optional<Plan> planOpt = planGenerator.parse(raw);
@@ -394,11 +471,11 @@ public class Orchestrator implements AgentOrchestrator {
         List<SubAgentIntent> subagents = properties.subagentEnabled()
                 ? planGenerator.parseSubagents(raw) : List.of();
         if (plan != null && planValidator.isValid(plan)) {
-            return new Analysis(plan, subagents);
+            return new Analysis(plan, subagents, raw);
         }
         // 计划非法（或无步骤）但声明了子代理：子代理仍是有效决策，优先保留
         if (!subagents.isEmpty()) {
-            return new Analysis(plan, subagents);
+            return new Analysis(plan, subagents, raw);
         }
         // 非法计划：重规划一次（R3 闭环），仍失败返回空降级为「无需拆分」
         EngineRunResult replanResult = replanner.replan(withSuppress(ctx, Phase.PLAN, goal), goal,
@@ -409,13 +486,13 @@ public class Orchestrator implements AgentOrchestrator {
             List<SubAgentIntent> replanSubs = properties.subagentEnabled()
                     ? planGenerator.parseSubagents(replanRaw) : List.of();
             if (replan != null && planValidator.isValid(replan)) {
-                return new Analysis(replan, replanSubs);
+                return new Analysis(replan, replanSubs, replanRaw);
             }
             if (!replanSubs.isEmpty()) {
-                return new Analysis(replan, replanSubs);
+                return new Analysis(replan, replanSubs, replanRaw);
             }
         }
-        return new Analysis(null, List.of());
+        return new Analysis(null, List.of(), raw);
     }
 
     /** F: 逐任务执行（G: 局部重试，含指数退避；H: 重试超限提前终止）。 */
@@ -426,6 +503,10 @@ public class Orchestrator implements AgentOrchestrator {
         long tokens = 0;
         int size = tasks.size();
         for (int i = 0; i < size; i++) {
+            // 用户已取消：不再继续调度剩余子任务（执行中的单次调用由引擎边界放行收尾）
+            if (state.cancelRequested()) {
+                return new ExecOutcome(false, false, null, log, tokens);
+            }
             AgentEvent.TaskItem t = tasks.get(i);
             taskProgressTracker.progress(sessionId, t.taskId(),
                     AgentEvent.TaskProgressStatus.RUNNING, i, size, publisher);
@@ -437,7 +518,7 @@ public class Orchestrator implements AgentOrchestrator {
                 if (attempt > 0) {
                     // P2-3：重试前回滚本任务上次尝试追加的消息，避免失败噪音污染上下文
                     state.truncateTo(snapshotSize);
-                    publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                    publisher.publish(sessionId, AgentEvent.progress(sessionId,
                             "子任务「" + t.title() + "」第 " + attempt + " 次重试…"));
                     sleepQuietly(backoffMs(attempt));
                 }
@@ -459,7 +540,7 @@ public class Orchestrator implements AgentOrchestrator {
             if (r == null || r.error() != null) {
                 taskProgressTracker.progress(sessionId, t.taskId(),
                         AgentEvent.TaskProgressStatus.FAILED, i + 1, size, publisher);
-                publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "子任务「" + t.title() + "」多次重试仍失败（" + (r == null ? "无返回" : r.error())
                                 + "），超过重试上限，提前终止并告知用户。"));
                 log.append('\n').append("- ").append(t.title()).append("：失败 - ")
@@ -526,7 +607,7 @@ public class Orchestrator implements AgentOrchestrator {
                                StringBuilder log, long tokens) {
     }
 
-    /** B 分析结果：步骤计划 + 子代理声明（两者可并存或只其一）。 */
-    private record Analysis(Plan plan, List<SubAgentIntent> subAgents) {
+    /** B 分析结果：步骤计划 + 子代理声明 + PLAN 原始文本（询问型判定用）。 */
+    private record Analysis(Plan plan, List<SubAgentIntent> subAgents, String rawText) {
     }
 }

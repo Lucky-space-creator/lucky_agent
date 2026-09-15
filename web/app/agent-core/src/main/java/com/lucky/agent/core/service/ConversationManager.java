@@ -245,6 +245,8 @@ public class ConversationManager {
                     .error("会话正在运行中，请等待完成");
         }
         state.running(true);
+        // 新一轮提交允许运行：清除上一轮的取消标记（此前被取消的会话可再次执行）
+        state.clearCancel();
         AgentEventPublisher publisher = stateManager.publisher();
         // 每轮运行前清空上一轮未消费的暂存事件，避免把上一轮的 stop/error 回放到新一轮（跨轮污染）
         publisher.reset(ref.sessionId());
@@ -281,7 +283,7 @@ public class ConversationManager {
                             + (intent.summary() == null || intent.summary().isBlank() ? content : intent.summary())
                             + "」，对吗？"
                             : intent.confirmQuestion();
-                    publisher.publish(ref.sessionId(), AgentEvent.thought(ref.sessionId(),
+                    publisher.publish(ref.sessionId(), AgentEvent.progress(ref.sessionId(),
                             "输入引用了历史上下文，先向你确认…"));
                     publisher.publish(ref.sessionId(), AgentEvent.contentDelta(ref.sessionId(), question));
                     sessionRepository.appendMessage(ref.sessionId(), "assistant", question,
@@ -294,7 +296,7 @@ public class ConversationManager {
             // 确认续跑时以最近用户目标作为执行目标，避免以空文本重跑
             String goal = isConfirm ? lastUserGoal(state) : content;
             ConversationCtx ctx = buildCtx(ref, goal, modelIdOf(input));
-            publisher.publish(ref.sessionId(), AgentEvent.thought(ref.sessionId(),
+            publisher.publish(ref.sessionId(), AgentEvent.progress(ref.sessionId(),
                     isConfirm ? "已确认，继续执行…" : "收到你的请求：" + content));
 
             // 统一走编排器：是否拆子任务由 PLAN 阶段模型判断（P2-1，不在代码层做强分流）。
@@ -302,14 +304,21 @@ public class ConversationManager {
             Set<String> beforeCheckpoints = checkpointIds(ref.workspaceId());
             EngineRunResult result = orchestrator.run(ref, ctx, publisher);
             if (result != null) {
-                String reason = result.error() != null ? "error"
-                        : (result.status() != null && result.status().equals("ask") ? "ask" : "success");
+                String reason = result.error() != null
+                        ? "error"
+                        : (result.status() != null && result.status().equals("ask") ? "ask"
+                        : (result.status() != null && result.status().equals("cancelled") ? "cancelled"
+                        : "success"));
                 publisher.publish(ref.sessionId(), AgentEvent.stop(ref.sessionId(),
                         reason, result.finalText()));
             }
 
             if (result == null) {
                 return RunResult.of(ref.sessionId()).status(RunResult.RunStatus.ERROR).error("引擎无返回结果");
+            }
+            if ("cancelled".equals(result.status())) {
+                return RunResult.of(ref.sessionId()).status(RunResult.RunStatus.ERROR)
+                        .error("已取消");
             }
             if (result.finalText() != null && !result.finalText().isBlank()) {
                 // 本轮执行期间新产生的文件检查点挂到该条消息上，供消息级回溯（撤销修改过的文件）

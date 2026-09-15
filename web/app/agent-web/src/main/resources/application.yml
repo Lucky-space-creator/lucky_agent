@@ -92,7 +92,7 @@ memory:
     prefetch-enabled: true
     prefetch-top-k: 5
     # 可选：选择器专用廉价端点 id（空则回退主端点）
-    prefetch-model-id: ""
+    prefetch-model-id: "26a16409-3bb2-4736-bedb-51cbb3af083d"
     # Dream 合成：周期（小时）与触发最少新增会话数；启动延迟（毫秒）
     dream-interval-hours: 24
     dream-min-new-sessions: 5

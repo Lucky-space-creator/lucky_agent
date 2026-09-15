@@ -3,7 +3,7 @@ import { ref, watch, onMounted } from 'vue'
 import Icon from '@/components/common/Icon.vue'
 import Badge from '@/components/common/Badge.vue'
 import { modelApi, permissionApi, workspaceApi, systemApi } from '@/api'
-import type { ModelConfig, PermissionRule, ProbeResult } from '@/api/types'
+import type { ModelConfig, ModelUsage, PermissionRule, ProbeResult } from '@/api/types'
 import { useModelStore } from '@/stores/model'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useThemeStore } from '@/stores/theme'
@@ -208,6 +208,124 @@ function healthClass(id?: string): string {
   return r.healthy ? 'dot--ok' : 'dot--bad'
 }
 
+// ---- 模型用量统计与详情小窗 ----
+/** 全部端点用量（列表角标 + 详情小窗数据源），打开设置面板时拉取。 */
+const usages = ref<Record<string, ModelUsage>>({})
+
+async function loadUsages() {
+  try {
+    usages.value = await modelApi.usages()
+  } catch {
+    usages.value = {}
+  }
+}
+
+/** 千分位数字格式（用量统计用）。 */
+function formatCount(n?: number): string {
+  if (!n || n <= 0) return '0'
+  return n.toLocaleString('zh-CN')
+}
+
+/** token 数可读化：204800 → 200K，1048576 → 1M（1024 进位，与配置预设一致）。 */
+function tokensLabel(v?: number | null): string {
+  if (v === undefined || v === null || v <= 0) return ''
+  if (v >= 1048576) {
+    const m = v / 1048576
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`
+  }
+  if (v >= 1024) {
+    const k = v / 1024
+    return `${Number.isInteger(k) ? k : k.toFixed(1)}K`
+  }
+  return String(v)
+}
+
+/** 最近调用时间可读化（无记录显示 —）。 */
+function fmtTime(ts?: number): string {
+  if (!ts) return '—'
+  const d = new Date(ts)
+  const p = (x: number) => String(x).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/**
+ * 上下文窗口 / 最大输出预设（点击即填充，另有「自定义」数值输入框兜底）。
+ * 「不限制」置空表示用模型默认/不截断。
+ */
+const contextPresets: { label: string; v?: number }[] = [
+  { label: '8K', v: 8192 },
+  { label: '16K', v: 16384 },
+  { label: '32K', v: 32768 },
+  { label: '64K', v: 65536 },
+  { label: '128K', v: 131072 },
+  { label: '200K', v: 204800 },
+  { label: '1M', v: 1048576 },
+]
+const outputPresets: { label: string; v?: number }[] = [
+  { label: '1K', v: 1024 },
+  { label: '2K', v: 2048 },
+  { label: '4K', v: 4096 },
+  { label: '8K', v: 8192 },
+  { label: '16K', v: 16384 },
+  { label: '32K', v: 32768 },
+]
+
+/** 预设是否命中当前值（「不限制」命中 空/0）。 */
+function chipActive(cur: number | undefined | null, v?: number): boolean {
+  if (v === undefined) return cur === undefined || cur === null || cur === 0
+  return cur === v
+}
+
+// ---- 模型详情/用量小窗 ----
+const detailOpen = ref(false)
+/** 详情小窗内可编辑的配置副本（保存后同步回配置）。 */
+const detailCfg = ref<ModelConfig | null>(null)
+/** 当前详情端点的用量统计。 */
+const detailUsage = ref<ModelUsage | null>(null)
+const usageLoading = ref(false)
+let detailReqId = 0
+
+async function openDetail(cfg: ModelConfig) {
+  detailReqId++
+  const reqId = detailReqId
+  detailCfg.value = { ...cfg }
+  detailUsage.value = null
+  detailOpen.value = true
+  await loadDetailUsage(cfg.id, reqId)
+}
+
+/** 拉取指定端点用量（请求序号防串值：连续打开不同端点时只采用最后一次）。 */
+async function loadDetailUsage(id?: string, reqId?: number) {
+  const my = reqId ?? detailReqId
+  if (!id) {
+    detailUsage.value = null
+    return
+  }
+  usageLoading.value = true
+  try {
+    const u = await modelApi.usage(id)
+    if (my === detailReqId) detailUsage.value = u
+  } catch {
+    if (my === detailReqId) detailUsage.value = null
+  } finally {
+    if (my === detailReqId) usageLoading.value = false
+  }
+}
+
+/** 保存详情小窗内的上下文/输出配置，并同步刷新列表用量角标。 */
+async function saveDetail() {
+  if (!detailCfg.value) return
+  try {
+    const payload: ModelConfig = { ...detailCfg.value, apiKey: '' }
+    await modelStore.save(payload)
+    // 保存后同步列表里的本地副本（上下文等字段回填，Key 保持脱敏）
+    await loadUsages()
+    toast.success('模型配置已同步')
+  } catch (e) {
+    toast.error((e as Error).message)
+  }
+}
+
 // ---- 权限规则 ----
 const rules = ref<PermissionRule[]>([])
 
@@ -296,7 +414,7 @@ watch(
   async (v) => {
     if (v) {
       tab.value = 'general'
-      await Promise.all([modelStore.load(), loadRules()])
+      await Promise.all([modelStore.load(), loadRules(), loadUsages()])
     }
   },
 )
@@ -485,8 +603,19 @@ onMounted(async () => {
                         <Badge :tone="cfg.enabled ? 'teal' : 'neutral'">{{ cfg.enabled ? '启用' : '停用' }}</Badge>
                       </div>
                       <div class="model__meta mono">{{ cfg.modelName }} · {{ cfg.endpointUrl }}<span v-if="cfg.role === 'memory'"> · 仅用于记忆总结</span></div>
+                      <div v-if="usages[cfg.id!]?.calls" class="model__usage" :title="`累计调用 ${formatCount(usages[cfg.id!]?.calls)} 次`">
+                        <Icon name="chart" :size="11" />
+                        <span>{{ formatCount(usages[cfg.id!]?.calls) }} 次</span>
+                      </div>
                     </div>
                     <div class="model__actions" @click.stop>
+                      <button
+                        class="icon-c icon-c--probe"
+                        title="模型详情与用量统计"
+                        @click="openDetail(cfg)"
+                      >
+                        <Icon name="info" :size="13" />
+                      </button>
                       <button
                         class="icon-c icon-c--probe"
                         :title="healthText(cfg.id) || '测试连接'"
@@ -631,15 +760,81 @@ onMounted(async () => {
               <p v-if="editing.role === 'memory'" class="pane-hint text-3">
                 记忆管理 Agent 仅用于会话记忆总结，不参与主链路推理；未配置时总结回退主力模型。建议使用低成本/快模型。
               </p>
-              <div class="field-row">
-                <label class="field">
-                  <span class="field__label">上下文窗口（参考，可留空）</span>
-                  <input v-model.number="editing.contextWindow" type="number" class="input mono" placeholder="留空则不限制" />
-                </label>
-                <label class="field">
-                  <span class="field__label">最大输出 tokens（可留空）</span>
-                  <input v-model.number="editing.maxTokens" type="number" class="input mono" placeholder="留空则用模型默认" />
-                </label>
+              <div class="field">
+                <span class="field__label">
+                  上下文窗口（参考，可留空）
+                  <span v-if="tokensLabel(editing.contextWindow)" class="tokens-now mono">{{ tokensLabel(editing.contextWindow) }} tokens</span>
+                </span>
+                <div class="chips">
+                  <button
+                    v-for="p in contextPresets"
+                    :key="p.label"
+                    type="button"
+                    class="chip"
+                    :class="{ 'chip--on': chipActive(editing.contextWindow, p.v) }"
+                    @click="editing.contextWindow = p.v"
+                  >
+                    {{ p.label }}
+                  </button>
+                  <button
+                    type="button"
+                    class="chip chip--clear"
+                    :class="{ 'chip--on': chipActive(editing.contextWindow, undefined) }"
+                    title="不限制（留空）"
+                    @click="editing.contextWindow = undefined"
+                  >
+                    不限制
+                  </button>
+                </div>
+                <div class="token-input">
+                  <input
+                    v-model.number="editing.contextWindow"
+                    type="number"
+                    min="0"
+                    step="1024"
+                    class="input mono"
+                    placeholder="自定义 token 数，留空则不限制"
+                  />
+                  <span class="token-input__suffix mono">tokens</span>
+                </div>
+              </div>
+              <div class="field">
+                <span class="field__label">
+                  最大输出 tokens（可留空）
+                  <span v-if="tokensLabel(editing.maxTokens)" class="tokens-now mono">{{ tokensLabel(editing.maxTokens) }} tokens</span>
+                </span>
+                <div class="chips">
+                  <button
+                    v-for="p in outputPresets"
+                    :key="p.label"
+                    type="button"
+                    class="chip"
+                    :class="{ 'chip--on': chipActive(editing.maxTokens, p.v) }"
+                    @click="editing.maxTokens = p.v"
+                  >
+                    {{ p.label }}
+                  </button>
+                  <button
+                    type="button"
+                    class="chip chip--clear"
+                    :class="{ 'chip--on': chipActive(editing.maxTokens, undefined) }"
+                    title="不限制（留空，用模型默认）"
+                    @click="editing.maxTokens = undefined"
+                  >
+                    默认
+                  </button>
+                </div>
+                <div class="token-input">
+                  <input
+                    v-model.number="editing.maxTokens"
+                    type="number"
+                    min="0"
+                    step="1024"
+                    class="input mono"
+                    placeholder="自定义 token 数，留空则用模型默认"
+                  />
+                  <span class="token-input__suffix mono">tokens</span>
+                </div>
               </div>
               <p v-if="modelMsg" class="form__error">{{ modelMsg }}</p>
               <div class="form__actions">
@@ -648,6 +843,140 @@ onMounted(async () => {
                 <button class="btn btn--primary" @click="saveModel">保存</button>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+
+  <!-- 模型详情/用量小窗 -->
+  <Teleport to="body">
+    <Transition name="fade">
+      <div v-if="detailOpen" class="overlay" @click.self="detailOpen = false">
+        <div class="mini detail" role="dialog" aria-label="模型详情与用量统计">
+          <header class="head">
+            <div class="head__title">
+              <span class="head__icon"><Icon name="info" :size="15" /></span>
+              <span v-if="detailCfg">模型详情 · {{ detailCfg.name || detailCfg.modelName }}</span>
+            </div>
+            <button class="head__close" aria-label="关闭" @click="detailOpen = false"><Icon name="x" :size="15" /></button>
+          </header>
+          <div class="mini__body">
+            <!-- 用量统计 -->
+            <div class="detail-section">
+              <div class="detail-section__title">用量统计</div>
+              <div v-if="usageLoading" class="detail-loading">加载用量中…</div>
+              <div v-else-if="!detailUsage?.calls" class="detail-empty">暂无调用记录</div>
+              <div v-else class="detail-stats">
+                <div class="detail-stat">
+                  <span class="detail-stat__label">调用次数</span>
+                  <span class="detail-stat__val mono">{{ formatCount(detailUsage.calls) }}</span>
+                </div>
+                <div class="detail-stat">
+                  <span class="detail-stat__label">累计输入 token</span>
+                  <span class="detail-stat__val mono">{{ formatCount(detailUsage.inputTokens) }} ({{ tokensLabel(detailUsage.inputTokens) }})</span>
+                </div>
+                <div class="detail-stat">
+                  <span class="detail-stat__label">累计输出 token</span>
+                  <span class="detail-stat__val mono">{{ formatCount(detailUsage.outputTokens) }} ({{ tokensLabel(detailUsage.outputTokens) }})</span>
+                </div>
+                <div class="detail-stat">
+                  <span class="detail-stat__label">失败次数</span>
+                  <span class="detail-stat__val mono">{{ formatCount(detailUsage.errors) }}</span>
+                </div>
+                <div class="detail-stat" v-if="detailUsage.lastUsedAt">
+                  <span class="detail-stat__label">最近调用</span>
+                  <span class="detail-stat__val">{{ fmtTime(detailUsage.lastUsedAt) }}</span>
+                </div>
+              </div>
+            </div>
+            <!-- 配置编辑 -->
+            <div class="detail-section">
+              <div class="detail-section__title">上下文与输出长度配置</div>
+              <div v-if="detailCfg" class="detail-form">
+                <div class="field">
+                  <span class="field__label">
+                    上下文窗口（参考）
+                    <span v-if="tokensLabel(detailCfg.contextWindow)" class="tokens-now mono">{{ tokensLabel(detailCfg.contextWindow) }} tokens</span>
+                  </span>
+                  <div class="chips">
+                    <button
+                      v-for="p in contextPresets"
+                      :key="p.label"
+                      type="button"
+                      class="chip"
+                      :class="{ 'chip--on': chipActive(detailCfg.contextWindow, p.v) }"
+                      @click="detailCfg.contextWindow = p.v"
+                    >
+                      {{ p.label }}
+                    </button>
+                    <button
+                      type="button"
+                      class="chip chip--clear"
+                      :class="{ 'chip--on': chipActive(detailCfg.contextWindow, undefined) }"
+                      title="不限制（留空）"
+                      @click="detailCfg.contextWindow = undefined"
+                    >
+                      不限制
+                    </button>
+                  </div>
+                  <div class="token-input">
+                    <input
+                      v-model.number="detailCfg.contextWindow"
+                      type="number"
+                      min="0"
+                      step="1024"
+                      class="input mono"
+                      placeholder="自定义 token 数，留空则不限制"
+                    />
+                    <span class="token-input__suffix mono">tokens</span>
+                  </div>
+                </div>
+                <div class="field">
+                  <span class="field__label">
+                    最大输出 tokens
+                    <span v-if="tokensLabel(detailCfg.maxTokens)" class="tokens-now mono">{{ tokensLabel(detailCfg.maxTokens) }} tokens</span>
+                  </span>
+                  <div class="chips">
+                    <button
+                      v-for="p in outputPresets"
+                      :key="p.label"
+                      type="button"
+                      class="chip"
+                      :class="{ 'chip--on': chipActive(detailCfg.maxTokens, p.v) }"
+                      @click="detailCfg.maxTokens = p.v"
+                    >
+                      {{ p.label }}
+                    </button>
+                    <button
+                      type="button"
+                      class="chip chip--clear"
+                      :class="{ 'chip--on': chipActive(detailCfg.maxTokens, undefined) }"
+                      title="不限制（留空，用模型默认）"
+                      @click="detailCfg.maxTokens = undefined"
+                    >
+                      默认
+                    </button>
+                  </div>
+                  <div class="token-input">
+                    <input
+                      v-model.number="detailCfg.maxTokens"
+                      type="number"
+                      min="0"
+                      step="1024"
+                      class="input mono"
+                      placeholder="自定义 token 数，留空则用模型默认"
+                    />
+                    <span class="token-input__suffix mono">tokens</span>
+                  </div>
+                </div>
+                <div class="detail-actions">
+                  <button class="btn btn--ghost" @click="detailOpen = false">取消</button>
+                  <button class="btn btn--primary" @click="saveDetail">保存配置</button>
+                </div>
+              </div>
+            </div>
+            <p class="pane-hint text-3">用量数据仅本机统计，不对外传输；配置修改后同步保存到配置文件。</p>
           </div>
         </div>
       </div>
@@ -1168,6 +1497,128 @@ onMounted(async () => {
 }
 .model__dot--bad {
   background: var(--danger);
+}
+
+/* 模型调用次数角标 */
+.model__usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.model__usage svg {
+  color: var(--accent-text);
+}
+
+/* 上下文/输出长度预设 chips + 自定义输入 */
+.tokens-now {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--accent-text);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  padding: 4px 11px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+.chip--on {
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+.chip--clear {
+  color: var(--text-3);
+}
+.token-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.token-input .input {
+  flex: 1;
+  min-width: 0;
+}
+.token-input__suffix {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* 模型详情小窗 */
+.mini.detail {
+  width: 500px;
+}
+.detail-section {
+  margin-bottom: 16px;
+}
+.detail-section__title {
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 0.02em;
+  margin-bottom: 8px;
+}
+.detail-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.detail-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-8);
+}
+.detail-stat__label {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.detail-stat__val {
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-0);
+  word-break: break-all;
+}
+.detail-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+.detail-loading,
+.detail-empty {
+  padding: 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-8);
+  text-align: center;
+  font-size: var(--fs-12);
+  color: var(--text-3);
 }
 
 /* 开关 */

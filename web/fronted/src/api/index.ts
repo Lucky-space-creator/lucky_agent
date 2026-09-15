@@ -6,6 +6,7 @@ import type {
   McpServerDef,
   McpServerView,
   ModelConfig,
+  ModelUsage,
   PermissionRule,
   ProbeResult,
   SessionMetrics,
@@ -107,6 +108,10 @@ export const modelApi = {
   remove: (id: string) => http.del<{ removed: boolean }>(`/api/models/${id}`),
   /** 读取指定端点明文 API Key（仅编辑弹窗回显用，列表接口不携带 Key）。 */
   key: (id: string) => http.get<{ id: string; apiKey: string }>(`/api/models/${id}/key`),
+  /** 指定端点用量统计（模型详情小窗数据源；无调用记录返回空统计）。 */
+  usage: (id: string) => http.get<ModelUsage>(`/api/models/${id}/usage`),
+  /** 全部端点用量统计（列表角标/汇总视图数据源）。 */
+  usages: () => http.get<Record<string, ModelUsage>>('/api/models/usage'),
   /** 探活：空参探活全部启用端点；{id} 探活指定端点；完整配置测试未保存的表单。 */
   probe: (body?: ModelConfig | { id: string } | null) =>
     http.post<{ ok: boolean; results: ProbeResult[] }>('/api/models/probe', body ?? undefined),

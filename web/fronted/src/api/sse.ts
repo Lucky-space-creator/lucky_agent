@@ -2,6 +2,7 @@ import type { AgentEvent, AgentEventType, SessionRef } from './types'
 
 const EVENT_TYPES: AgentEventType[] = [
   'thought',
+  'progress',
   'content_delta',
   'action',
   'tool_result',

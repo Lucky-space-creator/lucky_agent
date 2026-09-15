@@ -2,6 +2,8 @@ package core.support.subagent;
 
 import com.lucky.agent.common.contract.SubAgentSpec;
 import com.lucky.agent.core.config.CoreProperties;
+import com.lucky.agent.core.repository.SubAgentResult;
+import com.lucky.agent.core.repository.TaskSchedulerStatus;
 import com.lucky.agent.core.util.subagent.*;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;

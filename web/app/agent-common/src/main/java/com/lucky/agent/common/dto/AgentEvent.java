@@ -115,6 +115,11 @@ public class AgentEvent {
         return of(AgentEventType.THOUGHT, sessionId, mapOf(KEY_CONTENT, content));
     }
 
+    /** 系统执行进度/状态消息（阶段切换、分析、验证、安全阀等，不占思考计数）。 */
+    public static AgentEvent progress(String sessionId, String content) {
+        return of(AgentEventType.PROGRESS, sessionId, mapOf(KEY_CONTENT, content));
+    }
+
     /** 最终回复正文流式增量（前端逐字追加到消息内容）。 */
     public static AgentEvent contentDelta(String sessionId, String delta) {
         return of(AgentEventType.CONTENT_DELTA, sessionId, mapOf("delta", delta));

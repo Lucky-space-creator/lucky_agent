@@ -7,8 +7,11 @@ package com.lucky.agent.common.dto;
  */
 public enum AgentEventType {
 
-    /** 推理思考过程，payload: {@code content}。 */
+    /** 推理思考过程（一次 LLM 调用产出的思考 = 一条），payload: {@code content}。 */
     THOUGHT("thought"),
+
+    /** 系统执行进度/状态消息（阶段切换、分析判定、安全阀等，不属 LLM 思考），payload: {@code content}。 */
+    PROGRESS("progress"),
 
     /** 最终回复正文流式增量，payload: {@code delta}。 */
     CONTENT_DELTA("content_delta"),

@@ -16,19 +16,11 @@ const chat = useChatStore()
 const ui = useUiStore()
 
 const blocks = computed(() => renderMarkdown(props.item.content || ''))
-const showThoughts = computed(() => props.item.thoughts.length > 0)
 /** 思考中加载：运行中且正文尚未开始输出时展示「思考中…」指示。 */
 const showThinkingLoading = computed(() => props.item.status === 'running' && !props.item.content)
 const copied = ref(false)
 
-/* ---------- 思考过程：默认收起，展开后灰色字体滚动查看全部 ---------- */
-
-/** 思考区是否展开。 */
-const thoughtsOpen = ref(false)
-
-function toggleThoughts() {
-  thoughtsOpen.value = !thoughtsOpen.value
-}
+/* ---------- 思考过程（执行进度已移至悬浮执行面板，消息内不再内嵌展示） ---------- */
 
 /* ---------- 工具调用折叠窗口（Skill/MCP/命令等非文件工具） ---------- */
 
@@ -186,17 +178,6 @@ const hiddenCount = computed(() =>
 
       <!-- 助手消息 -->
       <template v-else>
-        <!-- 思考在前：默认收起仅显示摘要行，展开后灰色字体滚动查看全部 -->
-        <div v-if="showThoughts" class="msg__thoughts">
-          <button class="msg__thoughts-sum press" @click="toggleThoughts">
-            <span class="mono">思考过程（{{ item.thoughts.length }}）</span>
-            <Icon :name="thoughtsOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
-          </button>
-          <div v-if="thoughtsOpen" class="msg__thoughts-box">
-            <p v-for="(t, i) in item.thoughts" :key="i" class="msg__thought">{{ t }}</p>
-          </div>
-        </div>
-
         <!-- 思考中加载：运行中、有思考但正文尚未开始输出时的加载指示 -->
         <div v-if="showThinkingLoading" class="msg__thinking-loading">
           <span class="msg__thinking-dot" />

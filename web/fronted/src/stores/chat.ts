@@ -28,6 +28,27 @@ export interface AskView {
   op?: { opType: string; path: string; args: Record<string, any> }
 }
 
+/**
+ * 会话级「执行面板」：聚合一次对话运行期间的执行过程（分析/规划/执行进度/工具调用/思考次数），
+ * 悬浮于对话框上方可收缩展示；不再混入回复正文。
+ */
+export interface RunPanelView {
+  /** 当前阶段（分析 / 规划 / 执行 / 验证 / 完成）。 */
+  phase: string
+  /** 一次 LLM 思考 = 1 条（后端已按轮聚合）。 */
+  thoughts: string[]
+  /** 系统执行进度/状态消息（分析判定、验证结果、安全阀等，不占思考计数）。 */
+  logs: string[]
+  toolCalls: ToolCallView[]
+  plan: TaskPlanView[] | null
+  asking: boolean
+  done: boolean
+}
+
+export function emptyRunPanel(): RunPanelView {
+  return { phase: '', thoughts: [], logs: [], toolCalls: [], plan: null, asking: false, done: false }
+}
+
 export interface ChatItem {
   id: string
   role: 'user' | 'assistant'
@@ -73,6 +94,9 @@ export const useChatStore = defineStore('chat', () => {
   const running = ref(false)
   const error = ref<string | null>(null)
   const loaded = ref(false)
+
+  /** 会话级执行面板状态（悬浮展示执行过程，独立于回复正文）。 */
+  const runPanel = ref<RunPanelView>(emptyRunPanel())
 
   /** 透明面板实时指标（P3）。 */
   const metrics = ref<SessionMetrics | null>(null)
@@ -404,6 +428,8 @@ export const useChatStore = defineStore('chat', () => {
     running.value = true
     error.value = null
     closeActiveStream()
+    // 新一轮运行：重置执行面板（悬浮于对话框上方，不混入回复正文）
+    runPanel.value = emptyRunPanel()
 
     const ref: SessionRef = {
       sessionId,
@@ -489,6 +515,8 @@ export const useChatStore = defineStore('chat', () => {
     running.value = false
     stopMetrics()
     closeActiveStream()
+    runPanel.value.done = true
+    runPanel.value.phase = '已取消'
     const last = messages.value[messages.value.length - 1]
     if (last && last.status === 'running') {
       last.status = 'error'
@@ -552,6 +580,8 @@ export const useChatStore = defineStore('chat', () => {
     running.value = true
     error.value = null
     closeActiveStream()
+    // 确认续跑也是新一轮执行：重置执行面板，避免残留上一轮进度
+    runPanel.value = emptyRunPanel()
 
     const ref: SessionRef = {
       sessionId,
@@ -627,8 +657,19 @@ export const useChatStore = defineStore('chat', () => {
     const p = event.payload
     switch (event.type) {
       case 'thought': {
+        // 一次 LLM 思考 = 1 条（后端已按轮聚合 thinkTail）：
+        // 计入执行面板思考次数、并入暂存的消息思考区，不当作回复正文
         if (p.content) {
-          item.thoughts.push(String(p.content))
+          runPanel.value.thoughts.push(String(p.content))
+        }
+        break
+      }
+      case 'progress': {
+        // 系统执行进度/状态消息（分析/验证/安全阀等）：只进执行面板日志，不占思考计数
+        if (p.content) {
+          runPanel.value.logs.push(String(p.content))
+          const phase = phaseOf(String(p.content))
+          if (phase) runPanel.value.phase = phase
         }
         break
       }
@@ -647,6 +688,12 @@ export const useChatStore = defineStore('chat', () => {
           args: (p.args ?? {}) as Record<string, any>,
           status: 'running',
         })
+        runPanel.value.toolCalls.push({
+          id: event.callId ?? uid(),
+          tool: String(p.tool ?? 'tool'),
+          args: (p.args ?? {}) as Record<string, any>,
+          status: 'running',
+        })
         break
       }
       case 'tool_result': {
@@ -657,21 +704,34 @@ export const useChatStore = defineStore('chat', () => {
           call.summary = p.summary
           call.error = p.error
         }
+        const panelCall = runPanel.value.toolCalls.find((c) => c.id === (event.callId ?? p.callId))
+        if (panelCall) {
+          panelCall.status = 'done'
+          panelCall.ok = Boolean(p.ok)
+          panelCall.summary = p.summary
+          panelCall.error = p.error
+        }
         break
       }
       case 'task_plan': {
         if (Array.isArray(p.tasks)) {
-          item.plan = (p.tasks as { taskId: string; title: string }[]).map((t) => ({
+          const plan: TaskPlanView[] = (p.tasks as { taskId: string; title: string }[]).map((t) => ({
             taskId: t.taskId,
             title: t.title,
-            status: 'pending',
+            status: 'pending' as const,
           }))
+          item.plan = plan
+          runPanel.value.plan = [...plan]
         }
         break
       }
       case 'task_progress': {
         if (item.plan) {
           const t = item.plan.find((x) => x.taskId === p.taskId)
+          if (t) t.status = String(p.status) as TaskPlanView['status']
+        }
+        if (runPanel.value.plan) {
+          const t = runPanel.value.plan.find((x) => x.taskId === p.taskId)
           if (t) t.status = String(p.status) as TaskPlanView['status']
         }
         break
@@ -682,11 +742,20 @@ export const useChatStore = defineStore('chat', () => {
           risk: p.risk,
           op: p.op as AskView['op'],
         }
+        runPanel.value.asking = true
         break
       }
       case 'skill_invoke': {
         // Skill 调用并入透明面板工具区展示
         item.toolCalls.push({
+          id: event.callId ?? 'skill_' + uid(),
+          tool: `skill.${p.skillId ?? p.skill ?? 'skill'}`,
+          args: (p.args ?? {}) as Record<string, any>,
+          status: 'done',
+          ok: true,
+          summary: p.summary,
+        })
+        runPanel.value.toolCalls.push({
           id: event.callId ?? 'skill_' + uid(),
           tool: `skill.${p.skillId ?? p.skill ?? 'skill'}`,
           args: (p.args ?? {}) as Record<string, any>,
@@ -705,6 +774,14 @@ export const useChatStore = defineStore('chat', () => {
           ok: true,
           summary: p.summary,
         })
+        runPanel.value.toolCalls.push({
+          id: event.callId ?? 'mcp_' + uid(),
+          tool: `mcp.${p.serverId ?? p.server ?? 'mcp'}.${p.tool ?? 'tool'}`,
+          args: (p.args ?? {}) as Record<string, any>,
+          status: 'done',
+          ok: true,
+          summary: p.summary,
+        })
         break
       }
       case 'token': {
@@ -715,16 +792,31 @@ export const useChatStore = defineStore('chat', () => {
       case 'stop': {
         if (p.summary) item.content = String(p.summary)
         item.status = 'done'
+        runPanel.value.done = true
+        runPanel.value.phase = p.reason === 'cancelled' ? '已取消' : '完成'
         break
       }
       case 'error': {
         item.status = 'error'
         item.error = String(p.msg ?? '运行出错')
+        runPanel.value.done = true
+        runPanel.value.phase = '出错'
         break
       }
       default:
         break
     }
+  }
+
+  /** 从系统进度消息推导阶段标签（供执行面板头部展示）。 */
+  function phaseOf(log: string): string {
+    if (log.startsWith('收到你的请求') || log.startsWith('已确认')) return '分析'
+    if (log.includes('开始PLAN阶段')) return '规划'
+    if (log.includes('开始ACT阶段') || log.includes('单 Agent 直接执行') || log.startsWith('【分析】拆分为')) return '执行'
+    if (log.startsWith('【验证】')) return '验证'
+    if (log.includes('安全阀') || log.startsWith('【复查】')) return '复查'
+    if (log.includes('已取消')) return '已取消'
+    return ''
   }
 
   return {
@@ -736,6 +828,7 @@ export const useChatStore = defineStore('chat', () => {
     error,
     loaded,
     metrics,
+    runPanel,
     loadSessions,
     loadHistory,
     ensureSession,

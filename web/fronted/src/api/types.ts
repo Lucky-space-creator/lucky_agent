@@ -8,6 +8,7 @@ export interface SessionRef {
 
 export type AgentEventType =
   | 'thought'
+  | 'progress'
   | 'content_delta'
   | 'action'
   | 'tool_result'
@@ -59,6 +60,22 @@ export interface ModelConfig {
 
 /** 全局推理深度（枚举名，与后端 settings.json 一致）。 */
 export type InferenceDepth = 'OFF' | 'QUICK' | 'BALANCED' | 'DEEP' | 'MAXIMUM'
+
+/** 单端点用量统计（模型详情小窗数据源；与后端 model-usage.json 对齐）。 */
+export interface ModelUsage {
+  modelId: string
+  modelName?: string
+  /** 调用次数。 */
+  calls: number
+  /** 累计输入 token 数。 */
+  inputTokens: number
+  /** 累计输出 token 数。 */
+  outputTokens: number
+  /** 累计失败次数。 */
+  errors: number
+  /** 最近一次调用时间（毫秒时间戳），无调用为空。 */
+  lastUsedAt?: number
+}
 
 /** 模型端点探活结果。 */
 export interface ProbeResult {

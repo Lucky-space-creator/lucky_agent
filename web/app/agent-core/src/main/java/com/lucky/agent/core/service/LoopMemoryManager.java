@@ -113,7 +113,7 @@ public class LoopMemoryManager {
             }
             state.replaceMessages(compacted);
             long after = tokenMeter.count(compacted);
-            publisher.publish(sessionId, AgentEvent.thought(sessionId,
+            publisher.publish(sessionId, AgentEvent.progress(sessionId,
                     "【记忆管理】上下文压缩完成：" + messages.size() + " → " + compacted.size()
                             + " 条，" + used + " → " + after + " tokens（保留系统提示与关键结果）。"));
             hookDispatcher.fire(new HookEvent(HookEventName.POST_COMPACT, sessionId));
