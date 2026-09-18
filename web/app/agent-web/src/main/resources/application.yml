@@ -25,7 +25,7 @@ model:
 executor:
   transport: local
   boundary-strict: true
-  sandbox-enabled: false
+  sandbox-enabled: true
   cmd-timeout-sec: 30
 
 # 编排

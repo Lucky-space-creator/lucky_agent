@@ -27,6 +27,7 @@ import com.lucky.agent.model.api.ModelRouter;
 import com.lucky.agent.permission.service.PermissionService;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
+import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -191,6 +192,59 @@ public class ConversationManager {
                 return restored;
             }
             return 0;
+        });
+    }
+
+    /**
+     * 回滚到消息节点：截断指定消息之后的全部对话上下文（内存态 + 持久化），
+     * 保留该消息本身及其之前的全部消息。与「消息级回溯（撤销文件修改）」是两回事。
+     *
+     * <p>内存态从「截断后的磁盘记录」重建，保证与持久化完全一致，规避其间 tool 类消息、
+     * 确认续跑问句（落盘但未进内存态）等造成的索引错位。</p>
+     *
+     * @return 含 removed（删除条数）与 busy（会话运行中已拒绝）的结果
+     */
+    public Mono<Map<String, Object>> rollbackToNode(String sessionId, String messageTs) {
+        return Mono.fromCallable(() -> {
+            if (messageTs == null || messageTs.isBlank()) {
+                return Map.of("removed", 0, "busy", false);
+            }
+            List<SessionSnapshot.MessageRecord> records = sessionRepository.loadMessages(sessionId);
+            int diskIndex = -1;
+            for (int i = 0; i < records.size(); i++) {
+                if (messageTs.equals(records.get(i).ts())) {
+                    diskIndex = i;
+                    break;
+                }
+            }
+            if (diskIndex < 0) {
+                return Map.of("removed", 0, "busy", false);
+            }
+            // 运行中拒绝：避免与正在进行的事件流/状态回写冲突
+            Optional<ConversationStateManager.SessionState> st = stateManager.find(sessionId);
+            if (st.isPresent() && st.get().running()) {
+                return Map.of("removed", 0, "busy", true);
+            }
+            int keep = diskIndex + 1;
+            int removed = records.size() - keep;
+            if (removed <= 0) {
+                return Map.of("removed", 0, "busy", false);
+            }
+            // 内存态从截断后的磁盘记录重建：user/assistant 文本回灌，丢弃瞬态 tool 类消息
+            List<SessionSnapshot.MessageRecord> kept = records.subList(0, keep);
+            if (st.isPresent()) {
+                List<dev.langchain4j.data.message.ChatMessage> rebuilt = new ArrayList<>(kept.size());
+                for (SessionSnapshot.MessageRecord r : kept) {
+                    if ("user".equals(r.role())) {
+                        rebuilt.add(UserMessage.from(r.content()));
+                    } else if ("assistant".equals(r.role())) {
+                        rebuilt.add(AiMessage.from(r.content()));
+                    }
+                }
+                st.get().replaceMessages(rebuilt);
+            }
+            sessionRepository.truncateAfter(sessionId, messageTs);
+            return Map.of("removed", removed, "busy", false);
         });
     }
 

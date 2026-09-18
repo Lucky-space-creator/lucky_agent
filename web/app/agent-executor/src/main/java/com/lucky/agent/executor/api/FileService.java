@@ -1,5 +1,6 @@
 package com.lucky.agent.executor.api;
 
+import com.lucky.agent.common.contract.Remote;
 import com.lucky.agent.common.dto.ExecResult;
 import reactor.core.publisher.Mono;
 
@@ -8,7 +9,7 @@ import reactor.core.publisher.Mono;
  *
  * <p>所有操作经权限转发 + 执行臂硬边界校验；产物只落本机工作空间目录，不触碰工作空间外。</p>
  */
-@com.lucky.agent.common.contract.Remote(serviceName = "file-service")
+@Remote(serviceName = "file-service")
 public interface FileService {
 
     /** 读取文件内容（仅工作空间内）。 */

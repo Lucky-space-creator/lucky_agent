@@ -83,6 +83,35 @@ function onConfirm(allow: boolean) {
   chat.confirmAsk(props.item, allow)
 }
 
+/* ---------- 回滚到消息节点：截断该消息之后的对话上下文 ---------- */
+
+/** 是否正在展示回滚确认气泡。 */
+const confirmingRollback = ref(false)
+/** 回滚请求进行中。 */
+const rollingBackNode = ref(false)
+/** 该用户消息之后是否还有消息（无则回滚无意义，隐藏入口）。 */
+const hasFollowing = computed(() => {
+  const idx = chat.messages.findIndex((m) => m.id === props.item.id)
+  return idx >= 0 && idx < chat.messages.length - 1
+})
+
+/** 点击「回滚到此节点」：弹出确认气泡。 */
+function askRollbackNode() {
+  confirmingRollback.value = true
+}
+
+/** 确认回滚到该消息节点（截断后续所有消息）。 */
+async function onRollbackNode() {
+  if (rollingBackNode.value) return
+  rollingBackNode.value = true
+  confirmingRollback.value = false
+  try {
+    await chat.rollbackToNode(props.item)
+  } finally {
+    rollingBackNode.value = false
+  }
+}
+
 /* ---------- 文件操作：查看类（read/list/stat）与变动类（write/delete/mkdir/rename）分流 ---------- */
 
 /** 查看类文件工具（读取/列出/状态）：不属变动，展示在回复开头的「查看的文件」。 */
@@ -163,7 +192,7 @@ const hiddenCount = computed(() =>
 </script>
 
 <template>
-  <article class="msg" :class="`msg--${item.role}`">
+  <article class="msg" :class="`msg--${item.role}`" @click="confirmingRollback = false">
     <div class="msg__body">
       <!-- 用户消息 -->
       <template v-if="item.role === 'user'">
@@ -172,7 +201,24 @@ const hiddenCount = computed(() =>
           <button class="msg__copy" :title="copied ? '已复制' : '复制'" @click="copyContent">
             <Icon :name="copied ? 'check' : 'copy'" :size="11" />
           </button>
+          <button
+            v-if="hasFollowing"
+            class="msg__copy"
+            title="回滚到此节点"
+            @click.stop="askRollbackNode"
+          >
+            <Icon name="undo" :size="11" />
+          </button>
           <span v-if="timeText" class="msg__time mono">{{ timeText }}</span>
+
+          <!-- 回滚确认气泡：破坏性操作，二次确认 -->
+          <div v-if="confirmingRollback" class="msg__rollback-confirm" @click.stop>
+            <p>回滚到此节点将删除本条之后的全部消息，确认？</p>
+            <div class="msg__rollback-confirm-actions">
+              <button class="msg__copy" :disabled="rollingBackNode" @click="onRollbackNode">确认</button>
+              <button class="msg__copy" @click="confirmingRollback = false">取消</button>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -341,6 +387,7 @@ const hiddenCount = computed(() =>
   gap: 10px;
   margin-top: 5px;
   padding-right: 4px;
+  position: relative;
 }
 .msg__copy {
   display: inline-flex;
@@ -653,5 +700,31 @@ const hiddenCount = computed(() =>
 }
 .msg__copy--warn {
   color: var(--teal);
+}
+/* 回滚确认气泡：锚定在用户消息操作区下方，破坏性操作二次确认 */
+.msg__rollback-confirm {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  width: 248px;
+  padding: 12px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-8);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+  text-align: left;
+}
+.msg__rollback-confirm p {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-1);
+}
+.msg__rollback-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

@@ -210,7 +210,7 @@ public class Orchestrator implements AgentOrchestrator {
                 }
                 // 验证总结亦为询问型：同样一次问完即停
                 if (isAskingReply(v.summary())) {
-                    String ask = v.summary() != null && !v.summary().isBlank() ? v.summary() : direct.finalText();
+                    String ask = !v.summary().isBlank() ? v.summary() : direct.finalText();
                     return EngineRunResult.of(sessionId, Phase.ACT, ask,
                             direct.tokenUsed(), direct.model(), "ask");
                 }
@@ -233,7 +233,6 @@ public class Orchestrator implements AgentOrchestrator {
             // 本轮执行日志（步骤 + 子代理合并，供验证/记忆/总结）
             StringBuilder roundLog = new StringBuilder();
             long roundTokens = 0;
-            Plan verifyPlan = plan; // 客观验证基于步骤（无步骤时仅主观）
 
             // C1=是：先启动隔离子代理，收集子问题结果（独立 spec/会话/摘要回灌）
             if (hasSubAgents) {
@@ -278,7 +277,7 @@ public class Orchestrator implements AgentOrchestrator {
                                 .append(r.success() ? r.summary() : ("失败 - " + r.summary()));
                     }
                     // 子代理摘要回灌：仅追加为普通消息供后续验证/总结参考，不让子代理污染主上下文权限
-                    if (agg.length() > 0) {
+                    if (!agg.isEmpty()) {
                         stateManager.session(ref).appendMessage(
                                 UserMessage.from("【子代理结果】" + agg));
                     }

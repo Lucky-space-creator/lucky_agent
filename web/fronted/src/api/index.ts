@@ -59,6 +59,12 @@ export const chatApi = {
       messageTs: input.messageTs,
     })
   },
+  /** 回滚到消息节点：截断该消息之后的全部对话上下文（区别于消息级「撤销文件修改」）。 */
+  rollbackToNode(input: { sessionId: string; messageTs: string }) {
+    return http.post<{ removed: number; busy: boolean }>(`/api/chat/${input.sessionId}/rollback-node`, {
+      messageTs: input.messageTs,
+    })
+  },
   destroy(session: { sessionId: string; userId: string }) {
     const q = new URLSearchParams({ userId: session.userId }).toString()
     return http.del<{ removed: boolean }>(`/api/chat/${session.sessionId}?${q}`)

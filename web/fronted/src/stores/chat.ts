@@ -5,6 +5,7 @@ import { connectSse } from '@/api/sse'
 import type { AgentEvent, SessionMetrics, SessionRef } from '@/api/types'
 import { useWorkspaceStore } from './workspace'
 import { useModelStore } from './model'
+import { useToastStore } from './toast'
 
 export interface ToolCallView {
   id: string
@@ -157,6 +158,31 @@ export const useChatStore = defineStore('chat', () => {
       item.checkpointIds = []
     }
     return res.restored
+  }
+
+  /**
+   * 回滚到消息节点：截断该消息之后的全部对话上下文。
+   * 成功后从内存消息列表中删除该消息之后的所有项（服务端已同步截断磁盘与内存态）。
+   * 区别于 rollbackMessage（仅撤销文件修改，不动上下文）。
+   */
+  async function rollbackToNode(item: ChatItem): Promise<{ removed: number; busy: boolean }> {
+    const sessionId = currentSessionId.value
+    if (!sessionId || !item.ts) return { removed: 0, busy: false }
+    const toast = useToastStore()
+    try {
+      const res = await chatApi.rollbackToNode({ sessionId, messageTs: item.ts })
+      if (res.removed > 0) {
+        const idx = messages.value.findIndex((m) => m.id === item.id)
+        if (idx >= 0) messages.value.splice(idx + 1)
+        toast.success(`已回滚到该节点，删除 ${res.removed} 条后续消息`)
+      } else if (res.busy) {
+        toast.error('会话正在运行中，无法回滚，请等待完成')
+      }
+      return res
+    } catch {
+      toast.error('回滚失败，请重试')
+      return { removed: 0, busy: false }
+    }
   }
 
   /** 拉取一次会话指标（供立即刷新与收尾补拉）。 */
@@ -841,5 +867,6 @@ export const useChatStore = defineStore('chat', () => {
     cancel,
     confirmAsk,
     rollbackMessage,
+    rollbackToNode,
   }
 })

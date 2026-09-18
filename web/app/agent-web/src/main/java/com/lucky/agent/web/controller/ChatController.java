@@ -128,6 +128,13 @@ public class ChatController {
                 .map(n -> Map.of("restored", n));
     }
 
+    /** 回滚到消息节点：截断该消息之后的全部对话上下文（区别于消息级「撤销文件修改」）。 */
+    @PostMapping("/{sessionId}/rollback-node")
+    public Mono<Map<String, Object>> rollbackToNode(@PathVariable String sessionId,
+                                                     @RequestBody RollbackNodeRequest request) {
+        return conversationManager.rollbackToNode(sessionId, request.messageTs());
+    }
+
     /** 删除会话（内存 + 持久化）。 */
     @DeleteMapping("/{sessionId}")
     public Mono<Map<String, Boolean>> destroy(@PathVariable String sessionId,
@@ -150,5 +157,9 @@ public class ChatController {
 
     /** 消息级回溯请求体。 */
     public record RollbackMessageRequest(String workspaceId, String messageTs) {
+    }
+
+    /** 回滚到消息节点请求体。 */
+    public record RollbackNodeRequest(String messageTs) {
     }
 }
