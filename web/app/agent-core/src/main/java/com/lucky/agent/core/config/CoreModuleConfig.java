@@ -14,6 +14,7 @@ import com.lucky.agent.core.util.gateway.ObservationNormalizer;
 import com.lucky.agent.core.util.gateway.ToolGateway;
 import com.lucky.agent.core.util.hook.ExternalHookManager;
 import com.lucky.agent.core.util.hook.LifecycleHookDispatcher;
+import com.lucky.agent.core.runtime.gateway.ModelGateway;
 import com.lucky.agent.core.util.planactask.ActScheduler;
 import com.lucky.agent.core.util.planactask.AskSuspender;
 import com.lucky.agent.core.util.planactask.PlanGenerator;
@@ -122,10 +123,10 @@ public class CoreModuleConfig {
         return new Replanner(engine);
     }
 
-    /** ACT 阶段调度器。 */
+    /** ACT 阶段调度器（经 ModelGateway，复用模型调用侧的重试/熔断韧性）。 */
     @Bean
-    public ActScheduler actScheduler(Engine engine) {
-        return new ActScheduler(engine);
+    public ActScheduler actScheduler(ModelGateway modelGateway) {
+        return new ActScheduler(modelGateway);
     }
 
     /** 步数上限守卫（PLAN/ACT 阶段步数硬上限，防无限试错）。 */

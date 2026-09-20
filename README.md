@@ -51,17 +51,17 @@ lucky_agent/
 
 运行期数据位于 `~/.lucky_agent/`（框架必备目录）：
 
-| 目录 | 作用 |
-|------|------|
-| `LUCKY.md` | **基座提示词**，改完保存即时生效 |
-| `settings.json` | 全局设置（模型端点 + 推理深度；**API Key 已 AES-GCM 加密落盘**） |
-| `config/` | 账号 / 工作空间注册表 / 加密密钥 / Skill 状态 |
-| `memory/` | 记忆：`md/`（用户级 + `<工作空间全路径>/` 本地级分层条目与 MEMORY.md 索引）+ `{userId}/{工作空间}_ws/mem.jsonl` 原始事实带 |
-| `skills/` | 全局（平台级）Skill 库 |
-| `agent/sessions/` | 会话历史（JSONL + 元数据） |
-| `logs/audit.jsonl` | 操作审计日志 |
-| `rollback/` `trash/` | 回滚快照 / 回收站 |
-| `workspace/` | 内置默认工作空间（用户产物） |
+| 目录                   | 作用                                                                                       |
+|----------------------|------------------------------------------------------------------------------------------|
+| `LUCKY.md`           | **基座提示词**，改完保存即时生效                                                                       |
+| `settings.json`      | 全局设置（模型端点 + 推理深度；**API Key 已 AES-GCM 加密落盘**）                                             |
+| `config/`            | 账号 / 工作空间注册表 / 加密密钥 / Skill 状态                                                           |
+| `memory/`            | 记忆：`md/`（用户级 + `<工作空间全路径>/` 本地级分层条目与 MEMORY.md 索引）+ `{userId}/{工作空间}_ws/mem.jsonl` 原始事实带 |
+| `skills/`            | 全局（平台级）Skill 库                                                                           |
+| `agent/sessions/`    | 会话历史（JSONL + 元数据）                                                                        |
+| `logs/audit.jsonl`   | 操作审计日志                                                                                   |
+| `rollback/` `trash/` | 回滚快照 / 回收站                                                                               |
+| `workspace/`         | 内置默认工作空间（用户产物）                                                                           |
 
 ---
 
@@ -187,19 +187,36 @@ cd web/app && mvn -o test
 
 在保留上述主回环语义的前提下，提供「薄主循环」模式：主循环只保留三步 —— **调 LLM → 执行工具/子代理 → 回填观察**；拆解、调度、验证、记忆、预算、安全阀全部下沉到可插拔运行时（`com.lucky.agent.core.runtime`）：
 
-| 运行时组件 | 职责 |
-|------------|------|
-| `ExecutionResult` | 所有执行路径（单 Agent/步骤/子代理/工具/验证）统一结果契约（状态/输出/产物/错误/指标/trace/元数据） |
-| `AgentRuntime` | 厚运行时门面：中间件链 + 工具注册表 + 策略插件 + 验证器 + 记忆端口 + 子代理池 |
-| `Middleware`（`order()` 可排序） | 权限、预算、重试、日志、压缩、记忆等横切关注点（可 `block` 短路） |
-| `RuntimeTool`（LLM 可调用） | 拆解步骤 / 启动子代理 / 客观验证 / 记忆压缩沉淀 |
-| `StrategyPlugin` | 决定何时拆解、何时启动子代理、选择验证器 |
-| `Verifier`（客观优先） | 测试/lint/类型检查/命令退出码（客观，置信 1.0）；LLM 自评仅兜底并标记低置信 |
-| `MemoryPort` | 成功才沉淀长期记忆；失败只压缩（保留 goal/constraints/attempts/openQuestions/toolUsage） |
-| `BudgetManager` | 全局/任务/步骤/子代理 四级预算，各自独立超时/重试/token 限制 |
-| `SubAgentPool` | Java 21 虚拟线程 + 并发上限 + 深度限制；子代理独立 messages/budget/trace |
+| 运行时组件                       | 职责与具体实现                                                               |
+|-----------------------------|-----------------------------------------------------------------------|
+| `ExecutionResult`           | 所有执行路径（单 Agent/步骤/子代理/工具/验证）统一结果契约（状态/输出/产物/错误/指标/trace/元数据）          |
+| `AgentRuntime`              | 厚运行时门面：中间件链 + 工具注册表 + 策略插件 + 验证器 + 记忆端口 + 子代理池                        |
+| `Middleware`（`order()` 可排序） | 横切关注点，含**环绕钩子** `aroundTool`（重试类能力必须包裹真实调用）：权限 `-400` → 预算 `-100` → 重试 `500` → 压缩 `600` → 召回 `700` → 快照 `900` → 日志 `1000` |
+| `RuntimeTool`（LLM 可调用）      | `decompose` 拆解、`spawn_sub_agent` 子代理、`verify` 校验、`memory` 压缩/沉淀；工具只**声明**所需权限级别，由权限中间件裁决 |
+| `StrategyPlugin`            | `DefaultStrategyPlugin`：保守启发式（≥2 信号才拆解、拆出 ≥2 步且含并行意图才派子代理），拆解幂等、子代理不再派生孙代理 |
+| `Verifier`（客观优先）            | `CompositeVerifier` 链：`ChainVerifierAdapter` 桥接既有 `VerificationChain`（File/Command 客观校验经 `FileService`，受权限与执行臂边界约束）+ `LlmJudgeVerifier` 结构化判定；另含轻量 `FileArtifactVerifier`/`ExternalCommandVerifier` |
+| `MemoryPort`                | `SpringMemoryPort` 桥接既有分层 Markdown 记忆；成功才沉淀，失败只压缩（保留 goal/constraints/attempts/openQuestions/toolUsage） |
+| `BudgetManager`             | 全局/任务/步骤/子代理 四级预算，各自独立超时/重试/token 限制                                  |
+| `SubAgentPool`              | Java 21 虚拟线程 + 信号量背压 + 深度/单轮数量硬约束；子代理独立 messages/budget/trace           |
+| `LoopController`            | 达成度判定 / 卡死守卫（连续两轮结论一致即停）/ 记忆沉淀与压缩 / 早停转 ASK —— 使主循环无分支      |
+| `RuntimeSessionFactory`     | 统一引导（预算 + `RuntimeContext` + `MiddlewareContext` + 生命周期钩子），**thin 与 langgraph 共用**，消除双主循环引导漂移 |
+| `ModelGateway`              | 模型调用韧性装饰链 `CircuitBreaker( Retry( Engine ) )`：指数退避 + 抖动（仅重试瞬时故障，401/参数错误不重试）、三态熔断（OPEN 时连带短路重试） |
 
-完整方案见 [`resources/主循环重构方案.md`](./resources/主循环重构方案.md)。默认 `reactor` 主环保持不变，切换 `core.orchestrator-mode: thin` 启用（strangler 迁移，可随时回滚）。
+主循环体只剩三步，**不含任何拆解、验证、记忆、安全阀的分支判断**（原 `Orchestrator.run()` 240 行 → `ThinAgentLoop.run()` 64 行，↓ 73%）。完整方案见 [`resources/主循环重构方案.md`](./resources/主循环重构方案.md)。默认 `reactor` 主环保持不变，切换 `core.orchestrator-mode: thin` 启用（strangler 迁移，可随时回滚）。
+
+`reactor` / `langgraph` / `thin` 三个主循环**共用同一套运行时**（同一份验证链、记忆策略、早停语义、四级预算与模型网关），因此不存在「三份实现各自漂移」的问题。
+
+### 验收指标（可复现）
+
+`mvn -pl agent-core -Dtest='RuntimeAcceptanceTest,ModelGatewayTest' test` 可无成本复现下列量化指标：
+
+| 指标 | 目标 | 实测 |
+|---|---|---|
+| 主循环瘦身 | ≤ 120 行（↓ ≥ 50%） | **64 行（↓ 73%）** |
+| 客观验证覆盖率 | ≥ 70% | 整体 **80%**（含 2 个天然无法客观校验的语料）；**可客观校验任务中 100%** 走客观路径 |
+| token 消耗 | ↓ ≥ 20% | **↓ 60%**（同场景 5 轮 → 2 轮） |
+| 四级预算 | 各级可独立熔断 | **4 级独立触发**，且全局耗尽能把循环挡在下一次模型调用之前 |
+| traceId 贯通率 | ≥ 95% | **100%**，每轮 before/after-llm 快照可回放 |
 
 ---
 
@@ -233,8 +250,9 @@ cd web/app && mvn -o test
 ## 📌 当前边界
 
 - 当前以 **Web 端 Agent** 为主交互；CLI Agent 后续阶段接入（复用同一内核/配置/记忆）。
-- `langgraph` 编排模式与 `reactor` 语义等价，为平行实现，默认 `reactor`。
+- `langgraph` 编排模式与 `reactor` 语义等价；`thin` 为薄主循环模式。三者**共用同一套运行时**（验证链、记忆策略、早停语义、四级预算、模型网关），默认 `reactor`。
 - 新增 `thin`（薄主循环 + 厚运行时）编排模式：主循环仅三步，拆解/验证/记忆/预算外置为运行时组件；默认关闭，`core.orchestrator-mode: thin` 启用。
+- 模型调用侧韧性（指数退避 + 抖动 + 三态熔断）经 `ModelGateway` 统一提供，`reactor` 的 ACT 调度、`langgraph`、`thin` 三处均生效。
 - 记忆写入型工具（`memory.save` 等）默认不开放，仅框架自动生成 + `memory.search/read` 只读查阅；外部知识图谱/向量检索在后续阶段接入。
 - 客观验证默认开启（`core.verification-enabled`）。
 - API Key 已加密落盘（D8），密钥文件为本机私有、不入库。

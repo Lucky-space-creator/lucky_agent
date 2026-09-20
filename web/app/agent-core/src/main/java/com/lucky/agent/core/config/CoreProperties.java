@@ -14,7 +14,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param subagentTaskTimeoutSec  子任务超时
  * @param orchestratorMaxIterations 编排主回环最大迭代次数（安全阀，超过强制结束）
  * @param orchestratorMaxRetries    子任务失败局部重试上限（超限提前终止并告知用户）
- * @param orchestratorMode          核心编排器实现选择：reactor（默认，REACT 主回环）/ langgraph（LangGraph4j 状态图）
+ * @param orchestratorMode          核心编排器实现选择：reactor（默认，REACT 主回环）/ langgraph（LangGraph4j 状态图）/ thin（薄主循环 + 厚运行时）
  * @param verificationEnabled       是否启用客观验证器（false 时全部走模型主观判定）
  * @param verificationTimeoutSec    单个客观验证器超时（秒）
  * @param retryBackoffMs            子任务局部重试的基础退避毫秒数（指数退避）
@@ -62,9 +62,10 @@ public record CoreProperties(
         if (orchestratorMaxRetries <= 0) {
             orchestratorMaxRetries = 2;
         }
-        // 核心编排器实现：reactor（默认） / langgraph；非法值回退到 reactor
+        // 核心编排器实现：reactor（默认） / langgraph / thin；非法值回退到 reactor
         if (orchestratorMode == null || (!orchestratorMode.equals("reactor")
-                && !orchestratorMode.equals("langgraph"))) {
+                && !orchestratorMode.equals("langgraph")
+                && !orchestratorMode.equals("thin"))) {
             orchestratorMode = "reactor";
         }
         // 客观验证默认开启（Boolean 包装类型：未配置时取 true）

@@ -12,6 +12,7 @@ import com.lucky.agent.core.util.engine.StepLimitGuard;
 import com.lucky.agent.core.models.Engine;
 import com.lucky.agent.core.models.Plan;
 import com.lucky.agent.core.models.dto.EngineRunResult;
+import com.lucky.agent.core.runtime.gateway.EngineModelGateway;
 import com.lucky.agent.core.util.planactask.ActScheduler;
 import com.lucky.agent.core.util.planactask.AskSuspender;
 import com.lucky.agent.core.util.planactask.PlanGenerator;
@@ -80,7 +81,7 @@ class OrchestratorTest {
                 mock(LoopMemoryManager.class), props, suspender,
                 new StepLimitGuard(props.planMaxSteps(), props.actMaxSteps()),
                 new EarlyStopPolicy(props.earlyStopConfidenceThreshold()),
-                new ActScheduler(engine),
+                new ActScheduler(new EngineModelGateway(engine)),
                 mock(TaskScheduler.class));
     }
 
@@ -254,7 +255,7 @@ class OrchestratorTest {
                 mock(LoopMemoryManager.class), props, suspender,
                 new StepLimitGuard(props.planMaxSteps(), props.actMaxSteps()),
                 new EarlyStopPolicy(props.earlyStopConfidenceThreshold()),
-                new ActScheduler(engine),
+                new ActScheduler(new EngineModelGateway(engine)),
                 scheduler);
     }
 }
