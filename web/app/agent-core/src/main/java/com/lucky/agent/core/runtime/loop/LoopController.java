@@ -30,6 +30,8 @@ public class LoopController {
 
     /** 上一轮判定摘要（用于卡死守卫）。 */
     public static final String ATTR_LAST_VERDICT = "lastVerdictSummary";
+    /** 上一轮回答文本（增强卡死守卫：防止结论措辞略变但回答一字不差的重复，Issue 1 根因）。 */
+    public static final String ATTR_LAST_ANSWER = "lastAnswerText";
 
     private final MemoryPort memory;
     private final int maxIterations;
@@ -75,15 +77,21 @@ public class LoopController {
             return LoopDecision.finish("success", blankTo(output, outcome.summary()));
         }
 
-        // 卡死守卫：连续两轮结论一致即提前终止，避免空转烧 token
+        // 卡死守卫：连续两轮「结论」或「回答文本」一致即提前终止，避免空转烧 token
+        // 增强：比对实际回答文本，防止结论措辞略变但回答一字不差的重复（Issue 1 根因）
         String normalized = normalize(outcome.summary());
+        String answerNorm = normalize(output);
         Object previous = rc.attribute(ATTR_LAST_VERDICT);
-        if (iteration > 1 && !normalized.isEmpty() && normalized.equals(previous)) {
+        Object prevAnswer = rc.attribute(ATTR_LAST_ANSWER);
+        boolean verdictStuck = iteration > 1 && !normalized.isEmpty() && normalized.equals(previous);
+        boolean answerStuck = iteration > 1 && !answerNorm.isEmpty() && answerNorm.equals(prevAnswer);
+        if (verdictStuck || answerStuck) {
             log.info("[loop] 判定连续两轮一致，提前终止（stuck）: {}", outcome.summary());
             memory.compact(rc.ref(), structured(rc, goal, iteration, outcome));
             return LoopDecision.finish("stuck", blankTo(outcome.summary(), output));
         }
         rc.attribute(ATTR_LAST_VERDICT, normalized);
+        rc.attribute(ATTR_LAST_ANSWER, answerNorm);
 
         memory.compact(rc.ref(), structured(rc, goal, iteration, outcome));
 

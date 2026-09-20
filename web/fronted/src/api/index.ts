@@ -13,6 +13,8 @@ import type {
   SessionSnapshot,
   SkillDef,
   SystemOpenResult,
+  WorkflowDef,
+  WorkflowInstance,
   Workspace,
 } from './types'
 
@@ -195,4 +197,32 @@ export const systemApi = {
 export const privacyApi = {
   clearMemory: (userId: string) =>
     http.post<{ ok: boolean }>(`/api/privacy/clear-memory?userId=${encodeURIComponent(userId)}`, undefined),
+}
+
+/** 工作流接口（agent-workflow 模块，后端 WorkflowController 已落地） */
+export const workflowApi = {
+  /** 列出全部工作流定义。 */
+  list: () => http.get<WorkflowDef[]>('/api/workflows'),
+  /** 获取单个工作流定义。 */
+  get: (id: string) => http.get<WorkflowDef>(`/api/workflows/${id}`),
+  /** 创建/更新工作流定义（后端校验：必须含 1 个 START + 至少 1 个 END 节点）。 */
+  save: (def: Partial<WorkflowDef>) =>
+    def.id ? http.put<WorkflowDef>(`/api/workflows/${def.id}`, def) : http.post<WorkflowDef>('/api/workflows', def),
+  remove: (id: string) => http.del<{ removed: boolean }>(`/api/workflows/${id}`),
+  /** 启停工作流。 */
+  setEnabled: (id: string, enabled: boolean) =>
+    http.post<WorkflowDef>(`/api/workflows/${id}/enabled?enabled=${enabled}`, {}),
+  /** 结构校验（DAG/环检测）。 */
+  validate: (def: Partial<WorkflowDef>) =>
+    http.post<{ valid: boolean; startNodeId?: string; nodeCount?: number; topologicalOrder?: string[] }>(
+      '/api/workflows/validate',
+      def,
+    ),
+  /** 触发执行（mode=sync 等待返回实例；variables 为节点入参）。 */
+  trigger: (id: string, variables?: Record<string, any>) =>
+    http.post<WorkflowInstance>(`/api/workflows/${id}/trigger`, { variables: variables ?? {}, mode: 'sync' }),
+  /** 运行实例列表。 */
+  instances: () => http.get<WorkflowInstance[]>('/api/workflows/instances'),
+  /** 单个运行实例详情。 */
+  instance: (instanceId: string) => http.get<WorkflowInstance>(`/api/workflows/instances/${instanceId}`),
 }

@@ -192,7 +192,7 @@ public class ConversationManager {
                 return restored;
             }
             return 0;
-        });
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     /**
@@ -245,7 +245,7 @@ public class ConversationManager {
             }
             sessionRepository.truncateAfter(sessionId, messageTs);
             return Map.of("removed", removed, "busy", false);
-        });
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     /** 会话元数据 → 列表条目（与 listSessions 共用同一结构）。 */

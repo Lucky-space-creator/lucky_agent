@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 主回环记忆管理（流程图 K 节点）。
@@ -46,6 +47,8 @@ public class LoopMemoryManager {
     private final MemoryStore memoryStore;
     private final ModelRouter modelRouter;
     private final double contextThreshold;
+    /** 会话级「上一轮已沉淀的 round-log 归一化文本」：防止相同结论每轮重复灌入长期记忆。 */
+    private final Map<String, String> lastAppended = new ConcurrentHashMap<>();
 
     public LoopMemoryManager(CompactionPipeline compactionPipeline,
                              TokenMeter tokenMeter,
@@ -74,12 +77,18 @@ public class LoopMemoryManager {
         String sessionId = ctx.sessionId();
 
         // ① 长期记忆：本轮结论沉淀（置信度低于用户原话，按工作空间分组，避免跨项目串扰）
+        //    防抖：与上一轮归一化文本一致时跳过，避免相同 round-log 每轮重复灌入长期记忆
+        //    （记忆会回注下轮上下文 → 上下文只增不减 → 模型反复产出相似回答，Issue 1 根因之一）
         if (roundLog != null && !roundLog.isBlank()) {
-            try {
-                memoryStore.appendUser(ctx.userId(), ctx.workspaceId(),
-                        truncate(roundLog, MEMORY_MAX_LENGTH), 0.6, "round");
-            } catch (Exception e) {
-                log.warn("长期记忆沉淀失败：session={}", sessionId, e);
+            String norm = normalize(roundLog);
+            if (!norm.equals(lastAppended.get(sessionId))) {
+                try {
+                    memoryStore.appendUser(ctx.userId(), ctx.workspaceId(),
+                            truncate(roundLog, MEMORY_MAX_LENGTH), 0.6, "round");
+                    lastAppended.put(sessionId, norm);
+                } catch (Exception e) {
+                    log.warn("长期记忆沉淀失败：session={}", sessionId, e);
+                }
             }
         }
 
@@ -132,5 +141,13 @@ public class LoopMemoryManager {
 
     private String truncate(String text, int max) {
         return text.length() <= max ? text : text.substring(0, max) + "…";
+    }
+
+    /** 归一化文本：小写 + 去标点/空白，用于判断两轮 round-log 是否实质相同。 */
+    private String normalize(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.toLowerCase().replaceAll("[\\p{P}\\p{Z}\\p{C}]+", " ").trim();
     }
 }

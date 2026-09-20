@@ -196,6 +196,10 @@ onUnmounted(() => mq.removeEventListener('change', onMq))
         <Icon name="puzzle" :size="14" />
         <span class="hide-collapsed">插件</span>
       </button>
+      <button class="quick__item" title="工作流" @click="router.push('/workflows')">
+        <Icon name="gitBranch" :size="14" />
+        <span class="hide-collapsed">工作流</span>
+      </button>
     </nav>
 
     <!-- 搜索框 -->

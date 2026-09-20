@@ -131,6 +131,9 @@ public class Orchestrator implements AgentOrchestrator {
         RunBudget budget = new RunBudget(properties.runMaxTurns(), properties.runMaxBudget());
         // 循环守卫：记录上一轮未达成结论的归一化文本，连续两轮一致判定为死循环/重复
         String lastSummaryNorm = null;
+        // 同上，但针对「用户实际看到的回答文本」：验证结论 summary 常含易变动的证据文本，
+        // 仅比对 summary 会漏掉「回答一字不差、结论措辞略变」的重复回答（Issue 1 根因）
+        String lastAnswerNorm = null;
 
         for (int iter = 1; ; iter++) {
             // 用户已取消：停止开启新轮次（软取消，正在进行的单次调用放行）
@@ -215,6 +218,14 @@ public class Orchestrator implements AgentOrchestrator {
                             direct.tokenUsed(), direct.model(), "ask");
                 }
                 // 循环守卫：连续两轮未达成结论一致 → 模型在重复/反复询问，提前结束避免死循环
+                // 增强：直接比对「用户实际看到的回答」文本，防止结论措辞略变但回答一字不差的重复
+                if (stuckLoop(iter, lastAnswerNorm, direct.finalText())) {
+                    publisher.publish(sessionId, AgentEvent.progress(sessionId,
+                            "【安全阀】连续两轮回答内容一致，判定为重复回答，提前结束本轮。"));
+                    return EngineRunResult.of(sessionId, Phase.ACT, direct.finalText(),
+                            direct.tokenUsed(), direct.model(), "stuck");
+                }
+                lastAnswerNorm = normalize(direct.finalText());
                 if (stuckLoop(iter, lastSummaryNorm, v.summary())) {
                     publisher.publish(sessionId, AgentEvent.progress(sessionId,
                             "【安全阀】连续两轮结论一致，模型在重复/反复询问，提前结束本轮。"));
@@ -338,7 +349,16 @@ public class Orchestrator implements AgentOrchestrator {
                         roundTokens, null, "ask");
             }
 
-            // 循环守卫：连续两轮未达成结论一致 → 模型在重复/反复询问，提前结束避免死循环
+            // 循环守卫：增强为「回答文本 OR 验证结论」任一连续两轮一致即提前终止，
+            // 防止结论措辞略变但回答一字不差的重复回答（Issue 1 根因）
+            String thisAnswer = roundLog == null ? "" : roundLog.toString().trim();
+            if (stuckLoop(iter, lastAnswerNorm, thisAnswer)) {
+                publisher.publish(sessionId, AgentEvent.progress(sessionId,
+                        "【安全阀】连续两轮回答内容一致，判定为重复回答，提前结束本轮。"));
+                return EngineRunResult.of(sessionId, Phase.ACT, thisAnswer,
+                        roundTokens, null, "stuck");
+            }
+            lastAnswerNorm = normalize(thisAnswer);
             if (stuckLoop(iter, lastSummaryNorm, verdict.summary())) {
                 publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【安全阀】连续两轮结论一致，模型在重复/反复询问，提前结束本轮。"));

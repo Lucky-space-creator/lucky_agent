@@ -39,6 +39,7 @@ import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.output.TokenUsage;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.PartialResponse;
 import dev.langchain4j.model.chat.response.PartialResponseContext;
@@ -212,11 +213,14 @@ public class ReactEngine implements Engine {
                 } catch (Exception e) {
                     throw new IllegalStateException("模型调用失败：" + e.getMessage(), e);
                 }
-                // 真实指标：每次模型调用计 1；token 用量按本次调用增量上报（输入侧只计新增消息），
-                // 由指标收集器累加得到会话级总量，避免全量历史逐轮重复累计导致虚高
+                // 真实指标：每次模型调用计 1；token 用量优先取模型响应携带的真实 TokenUsage，
+                // 仅在流式端点不下发用量时（usage=null）回退本地估算，杜绝「虚假 token」统计
                 metricsCollector.reportModelCall(ctx.sessionId());
-                long inputTokens = tokenMeter.count(messages);
-                long outputTokens = tokenMeter.count(ai);
+                TokenUsage realUsage = outcome.tokenUsage();
+                long inputTokens = realUsage != null && realUsage.inputTokenCount() != null
+                        ? realUsage.inputTokenCount() : tokenMeter.count(messages);
+                long outputTokens = realUsage != null && realUsage.outputTokenCount() != null
+                        ? realUsage.outputTokenCount() : tokenMeter.count(ai);
                 long callTokens = Math.max(0, inputTokens - lastInput) + outputTokens;
                 lastInput = inputTokens;
                 tokenUsed += callTokens;
@@ -600,8 +604,10 @@ public class ReactEngine implements Engine {
         }
     }
 
-    /** 单轮模型调用结果：{@code streamed=true} 表示正文已由流式实时推送（同步回退为 false）。 */
-    private record TurnOutcome(String text, String thinking, AiMessage ai, boolean streamed) {
+    /** 单轮模型调用结果：{@code streamed=true} 表示正文已由流式实时推送（同步回退为 false）。
+     *  {@code tokenUsage} 为模型响应携带的真实用量（部分流式端点不下发时为 null，回退估算）。 */
+    private record TurnOutcome(String text, String thinking, AiMessage ai, boolean streamed,
+                               TokenUsage tokenUsage) {
     }
 
     /**
@@ -626,6 +632,7 @@ public class ReactEngine implements Engine {
         StringBuilder textBuf = new StringBuilder();
         StringBuilder thinkBuf = new StringBuilder();
         AtomicReference<AiMessage> aiRef = new AtomicReference<>();
+        AtomicReference<TokenUsage> usageRef = new AtomicReference<>();
         AtomicReference<Throwable> errorRef = new AtomicReference<>();
         // P1-6 fix：超时/失败后置 cancelled，禁止迟到的流式增量继续推送，
         // 避免「降级同步重试」期间旧流又吐出内容导致正文拼接错乱/重复
@@ -707,7 +714,7 @@ public class ReactEngine implements Engine {
             streamChunked(ctx, text, publisher);
         }
         String thinking = thinkBuf.length() > 0 ? thinkBuf.toString() : thinkingOf(ai);
-        return new TurnOutcome(text, thinking, ai, shownStreamed[0]);
+        return new TurnOutcome(text, thinking, ai, shownStreamed[0], usageRef.get());
     }
 
     /**
@@ -721,6 +728,7 @@ public class ReactEngine implements Engine {
                                  AgentEventPublisher publisher, ChatModel sync, String alreadyShown,
                                  boolean publishThinking) {
         ChatResponse response = sync.chat(request);
+        TokenUsage usage = response.tokenUsage();
         AiMessage ai = response.aiMessage();
         String full = ai.text() == null ? "" : ai.text();
         if (full.startsWith(alreadyShown) && full.length() > alreadyShown.length()) {
@@ -742,7 +750,7 @@ public class ReactEngine implements Engine {
                 publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(), thinking));
             }
         }
-        return new TurnOutcome(full, thinkingOf(ai), ai, false);
+        return new TurnOutcome(full, thinkingOf(ai), ai, false, usage);
     }
 
     /**

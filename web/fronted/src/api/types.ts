@@ -233,3 +233,67 @@ export interface SystemOpenResult {
   message?: string
 }
 
+/* ---------------- 工作流（agent-workflow 模块） ---------------- */
+
+export type WorkflowNodeType = 'START' | 'END' | 'LLM' | 'TOOL' | 'CONDITION' | 'CODE' | 'SUBFLOW'
+
+export interface WorkflowNodeDef {
+  id: string
+  type: WorkflowNodeType
+  name?: string
+  /** 节点参数（LLM 提示 / TOOL 工具名 / CODE 脚本等）。 */
+  params?: Record<string, any>
+}
+
+export interface WorkflowEdgeDef {
+  source: string
+  target: string
+  /** 条件边标签（CONDITION 节点分流用，可空）。 */
+  label?: string
+}
+
+export interface WorkflowTriggerDef {
+  type: 'MANUAL' | 'INTERVAL' | 'WEBHOOK'
+  enabled: boolean
+  /** 间隔触发周期（毫秒，INTERVAL 类型用）。 */
+  intervalMs?: number
+}
+
+export interface WorkflowDef {
+  id: string
+  name: string
+  description?: string
+  version?: number
+  nodes: WorkflowNodeDef[]
+  edges: WorkflowEdgeDef[]
+  trigger?: WorkflowTriggerDef
+  enabled: boolean
+  createdAt?: number
+  updatedAt?: number
+}
+
+export type WorkflowInstanceStatus = 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SUSPENDED'
+
+export interface WorkflowNodeInstance {
+  nodeId: string
+  nodeName?: string
+  type?: WorkflowNodeType
+  status?: string
+  output?: string
+  error?: string
+}
+
+export interface WorkflowInstance {
+  instanceId: string
+  workflowId: string
+  workflowName?: string
+  status: WorkflowInstanceStatus
+  variables?: Record<string, any>
+  nodeInstances?: Record<string, WorkflowNodeInstance>
+  startedAt?: number
+  endedAt?: number
+  currentNodeId?: string
+  error?: string
+}
+
+

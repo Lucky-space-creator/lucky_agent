@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, type Component } from 'vue'
-import { Sparkles } from 'lucide-vue-next'
+import { Sparkles, GitBranch, Loader, Play } from 'lucide-vue-next'
 
 // 轻量内联 SVG 图标集（1px 细线风格，currentColor）
 const props = withDefaults(
@@ -18,6 +18,9 @@ const props = withDefaults(
  */
 const lucideMap: Record<string, Component> = {
   sparkles: Sparkles,
+  gitBranch: GitBranch,
+  loader: Loader,
+  play: Play,
 }
 const lucideComp = computed<Component | null>(() => lucideMap[props.name] ?? null)
 
