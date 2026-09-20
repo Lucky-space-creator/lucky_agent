@@ -39,6 +39,8 @@ node_modules/
 .codebuddy/
 .codemoss/
 .codeium/
+# AI 工作记忆（本地产物，非项目源码）：保留在磁盘上，但不入库，避免 status 噪声
+.workbuddy/
 
 # ===== Secrets =====
 *.key
@@ -58,10 +60,14 @@ AGENTS.md
 convert_log.ps1
 probe.ps1
 restore_encoding.ps1
-lucky
-lucky.bat
-lucky.sh
-resources/
+# ⚠️ 启动脚本必须锚定到仓库根（前导 /）。
+#    裸写「lucky」会匹配任意层级中名为 lucky 的目录，而本项目 Java 包名正是 com.lucky.agent，
+#    会导致整个源码树对 git 不可见（新增文件既不出现在 status 中，也无法 add）。
+/lucky
+/lucky.bat
+/lucky.sh
+# 注：resources/ 已纳入版本控制 —— README 引用了其中的设计文档，
+#     不入库会导致 GitHub 上的相对链接断链。
 web/app/cp.txt
 web/app/probe.ps1
 web/app/run-verify.ps1
