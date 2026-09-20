@@ -10,6 +10,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Primary;
 
+import java.util.concurrent.TimeUnit;
+
 /**
  * 缓存模块配置（§4.6 / D5）。
  */
@@ -26,7 +28,7 @@ public class CacheConfig {
     @Bean
     public SessionMessageCache sessionMessageCache(CacheProvider provider, CacheProperties props) {
         return new SessionMessageCache(provider,
-                java.util.concurrent.TimeUnit.DAYS.toSeconds(props.sessionTtlDays()));
+                TimeUnit.DAYS.toSeconds(props.sessionTtlDays()));
     }
 
     @Bean
@@ -37,6 +39,6 @@ public class CacheConfig {
     @Bean
     public TtlSweeper ttlSweeper(CacheProvider provider, CacheProperties props) {
         return new TtlSweeper(provider,
-                java.util.concurrent.TimeUnit.HOURS.toSeconds(props.sweepHours()));
+                TimeUnit.HOURS.toSeconds(props.sweepHours()));
     }
 }

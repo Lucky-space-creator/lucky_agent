@@ -32,7 +32,7 @@ lucky_agent/
 └── web/
     ├── app/                       # 后端（Maven 多模块，Java 21 + Spring Boot 3）
     │   ├── agent-web/             # 入口：REST + SSE 事件流，托管前端
-    │   ├── agent-core/            # 编排中枢：REACT 引擎、Orchestrator、子代理、压缩、验证
+    │   ├── agent-core/            # 编排中枢：REACT 引擎、主循环、运行时(runtime: 中间件/工具/策略/验证/预算)、子代理、压缩
     │   ├── agent-model/           # 模型端点接入（OpenAI/Anthropic 兼容）、提示词、基座外置
     │   ├── agent-common/          # 公共 DTO/常量/契约
     │   ├── agent-workspace/       # 工作空间配置（唯一 owner）
@@ -42,6 +42,7 @@ lucky_agent/
     │   ├── agent-skill/           # Skill 注册与注入
     │   ├── agent-persona/         # 人格/角色
     │   ├── agent-mcp/             # MCP 工具接入
+    │   ├── agent-workflow/        # 独立工作流模块：定义/DAG 编译(拓扑+环检测)/调度执行 + REST/SSE
     │   ├── agent-cache/           # 缓存
     │   └── agent-cli/             # CLI 外壳（后续）
     └── fronted/                   # 前端（Vue 3 + TypeScript + Vite + Pinia + Vue Router）
@@ -182,6 +183,24 @@ cd web/app && mvn -o test
 安全阀(N): 最大迭代/回合/token → 强制结束并总结
 ```
 
+### 薄主循环 + 厚运行时（`core.orchestrator-mode=thin`）
+
+在保留上述主回环语义的前提下，提供「薄主循环」模式：主循环只保留三步 —— **调 LLM → 执行工具/子代理 → 回填观察**；拆解、调度、验证、记忆、预算、安全阀全部下沉到可插拔运行时（`com.lucky.agent.core.runtime`）：
+
+| 运行时组件 | 职责 |
+|------------|------|
+| `ExecutionResult` | 所有执行路径（单 Agent/步骤/子代理/工具/验证）统一结果契约（状态/输出/产物/错误/指标/trace/元数据） |
+| `AgentRuntime` | 厚运行时门面：中间件链 + 工具注册表 + 策略插件 + 验证器 + 记忆端口 + 子代理池 |
+| `Middleware`（`order()` 可排序） | 权限、预算、重试、日志、压缩、记忆等横切关注点（可 `block` 短路） |
+| `RuntimeTool`（LLM 可调用） | 拆解步骤 / 启动子代理 / 客观验证 / 记忆压缩沉淀 |
+| `StrategyPlugin` | 决定何时拆解、何时启动子代理、选择验证器 |
+| `Verifier`（客观优先） | 测试/lint/类型检查/命令退出码（客观，置信 1.0）；LLM 自评仅兜底并标记低置信 |
+| `MemoryPort` | 成功才沉淀长期记忆；失败只压缩（保留 goal/constraints/attempts/openQuestions/toolUsage） |
+| `BudgetManager` | 全局/任务/步骤/子代理 四级预算，各自独立超时/重试/token 限制 |
+| `SubAgentPool` | Java 21 虚拟线程 + 并发上限 + 深度限制；子代理独立 messages/budget/trace |
+
+完整方案见 [`resources/主循环重构方案.md`](./resources/主循环重构方案.md)。默认 `reactor` 主环保持不变，切换 `core.orchestrator-mode: thin` 启用（strangler 迁移，可随时回滚）。
+
 ---
 
 ## 🧠 上下文压缩与记忆
@@ -215,6 +234,7 @@ cd web/app && mvn -o test
 
 - 当前以 **Web 端 Agent** 为主交互；CLI Agent 后续阶段接入（复用同一内核/配置/记忆）。
 - `langgraph` 编排模式与 `reactor` 语义等价，为平行实现，默认 `reactor`。
+- 新增 `thin`（薄主循环 + 厚运行时）编排模式：主循环仅三步，拆解/验证/记忆/预算外置为运行时组件；默认关闭，`core.orchestrator-mode: thin` 启用。
 - 记忆写入型工具（`memory.save` 等）默认不开放，仅框架自动生成 + `memory.search/read` 只读查阅；外部知识图谱/向量检索在后续阶段接入。
 - 客观验证默认开启（`core.verification-enabled`）。
 - API Key 已加密落盘（D8），密钥文件为本机私有、不入库。

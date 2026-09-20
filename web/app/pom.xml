@@ -32,6 +32,7 @@
         <module>agent-mcp</module>
         <module>agent-web</module>
         <module>agent-cli</module>
+        <module>agent-workflow</module>
     </modules>
 
     <properties>
