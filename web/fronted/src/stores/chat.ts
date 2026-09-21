@@ -29,6 +29,24 @@ export interface AskView {
   op?: { opType: string; path: string; args: Record<string, any> }
 }
 
+/** 条件选择（LLM 让用户二选一/多选）：模型输出的受控选项集，用户点选后作为输入续跑。 */
+export interface OptionsView {
+  question: string
+  options: OptionItemView[]
+  allowCustom: boolean
+  customHint?: string
+  timeoutSec?: number
+  /** 用户已选定的选项 id（回填后卡片转为只读）。 */
+  pickedId?: string
+}
+
+export interface OptionItemView {
+  id: string
+  label: string
+  detail?: string
+  recommended?: boolean
+}
+
 /**
  * 会话级「执行面板」：聚合一次对话运行期间的执行过程（分析/规划/执行进度/工具调用/思考次数），
  * 悬浮于对话框上方可收缩展示；不再混入回复正文。
@@ -61,6 +79,8 @@ export interface ChatItem {
   toolCalls: ToolCallView[]
   plan: TaskPlanView[] | null
   ask?: AskView
+  /** 条件选择卡片（与 ask 互斥，同为交互卡片）。 */
+  options?: OptionsView
   tokenUsed?: number
   model?: string
   /** 该消息执行期间产生的文件检查点 ID（可消息级回溯）。 */
@@ -77,6 +97,24 @@ export interface ChatSession {
 }
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+
+/**
+ * 由首条用户消息推导会话标题兜底：取首行、剥离 markdown 标记与空白，超长截断。
+ * 后端 LLM 精简成功后会用更准确的标题覆盖此处结果。
+ */
+function deriveTitle(content: string): string {
+  const firstLine = (content || '').split(/\r?\n/).find((l) => l.trim()) ?? ''
+  const cleaned = firstLine
+    // 去掉标题/引用/列表等行首标记
+    .replace(/^\s*(#{1,6}|>|[-*+]|\d+[.)])\s*/, '')
+    // 去掉行内代码与强调标记
+    .replace(/[`*_~]/g, '')
+    // 去掉链接语法，仅保留文字
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return (cleaned || '新会话').slice(0, 24)
+}
 
 /**
  * 本机单人使用，无账号概念：用户标识固定为此常量，前后端共用。
@@ -98,6 +136,15 @@ export const useChatStore = defineStore('chat', () => {
 
   /** 会话级执行面板状态（悬浮展示执行过程，独立于回复正文）。 */
   const runPanel = ref<RunPanelView>(emptyRunPanel())
+
+  /**
+   * 回滚到节点的二次确认：全局唯一状态（避免每条消息各自维护弹出态导致多个弹窗重叠）。
+   * confirmingRollbackId 指向被回滚的消息 id；rollbackAnchor 记录触发按钮的视口坐标，
+   * 供 ChatView 中的 Teleport 弹窗定位（脱离消息子树，规避被后续消息覆盖、按钮点不到的问题）。
+   */
+  const confirmingRollbackId = ref<string | null>(null)
+  const rollbackAnchor = ref<{ x: number; y: number } | null>(null)
+  const rollingBackNode = ref(false)
 
   /** 透明面板实时指标（P3）。 */
   const metrics = ref<SessionMetrics | null>(null)
@@ -177,11 +224,45 @@ export const useChatStore = defineStore('chat', () => {
         toast.success(`已回滚到该节点，删除 ${res.removed} 条后续消息`)
       } else if (res.busy) {
         toast.error('会话正在运行中，无法回滚，请等待完成')
+      } else {
+        // removed=0 且非 busy：通常是因为 ts 未命中（如页面长期未刷新），给出明确反馈而非静默无反应
+        toast.error('未找到该节点，请刷新会话后重试')
       }
       return res
     } catch {
       toast.error('回滚失败，请重试')
       return { removed: 0, busy: false }
+    }
+  }
+
+  /** 打开回滚到节点的二次确认（全局唯一弹窗，定位到触发按钮）。 */
+  function openRollbackConfirm(id: string, anchor: { x: number; y: number }) {
+    confirmingRollbackId.value = id
+    rollbackAnchor.value = anchor
+  }
+
+  /** 关闭回滚确认弹窗。 */
+  function cancelRollbackNode() {
+    confirmingRollbackId.value = null
+    rollbackAnchor.value = null
+  }
+
+  /** 确认回滚到节点：复用 rollbackToNode（含成功 toast 与内存裁剪），结束后收起弹窗。 */
+  async function confirmRollbackNode() {
+    const id = confirmingRollbackId.value
+    if (!id) return
+    const item = messages.value.find((m) => m.id === id)
+    if (!item) {
+      cancelRollbackNode()
+      return
+    }
+    if (rollingBackNode.value) return
+    rollingBackNode.value = true
+    try {
+      await rollbackToNode(item)
+    } finally {
+      rollingBackNode.value = false
+      cancelRollbackNode()
     }
   }
 
@@ -408,14 +489,16 @@ export const useChatStore = defineStore('chat', () => {
     const workspaceId =
       session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || ''
     if (session && (session.title === '新会话' || session.title === '对话')) {
-      session.title = content.slice(0, 24)
+      session.title = deriveTitle(content)
     }
 
+    // 复用同一份 ts 字符串（同时作为后端落盘的消息定位键，保证前后端一致，回退可命中）
+    const userTs = new Date().toISOString()
     messages.value.push({
       id: uid(),
       role: 'user',
       content,
-      ts: new Date().toISOString(),
+      ts: userTs,
       status: 'done',
       thoughts: [],
       toolCalls: [],
@@ -439,11 +522,12 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
+    const assistantTs = new Date().toISOString()
     const assistant: ChatItem = {
       id: uid(),
       role: 'assistant',
       content: '',
-      ts: new Date().toISOString(),
+      ts: assistantTs,
       status: 'running',
       thoughts: [],
       toolCalls: [],
@@ -497,6 +581,9 @@ export const useChatStore = defineStore('chat', () => {
         }
         error.value = m
         running.value = false
+        // 收尾：标记执行面板终态，避免错误后悬浮面板永久残留「执行中」
+        runPanel.value.done = true
+        runPanel.value.phase = '出错'
         stopMetrics()
       },
     })
@@ -510,7 +597,9 @@ export const useChatStore = defineStore('chat', () => {
         userId: ref.userId,
         workspaceId: ref.workspaceId,
         content,
-        extra,
+        // userTs/assistantTs 作为后端落盘消息的定位键：前后端共用同一字符串，
+        // 使回退（rollbackToNode/rollbackMessage/truncateAfter）的 ts 匹配稳定命中。
+        extra: { ...extra, userTs, assistantTs },
         modelId: modelStore.selectedId,
       })
       // 后端接受即返回；最终结果由 stop/error 事件驱动
@@ -522,6 +611,9 @@ export const useChatStore = defineStore('chat', () => {
       }
       error.value = (e as Error).message
       running.value = false
+      // 收尾：提交请求本身失败时同样标记面板终态，避免悬浮残留
+      runPanel.value.done = true
+      runPanel.value.phase = '出错'
       refreshMetrics(sessionId)
       stopMetrics()
       closeActiveStream()
@@ -559,6 +651,22 @@ export const useChatStore = defineStore('chat', () => {
       RENAME: 'file.rename',
       MKDIR: 'file.mkdir',
     }[opType ?? ''] ?? 'file.op'
+  }
+
+  /**
+   * 用户选择条件选项：把选项回填为一次普通输入提交（后端以该文本作为新目标续跑），
+   * 卡片转为只读并标记已选，避免重复提交。
+   *
+   * @param item 承载选项卡片的助手消息
+   * @param opt  被点选的选项（或自定义文本）
+   */
+  function pickOption(item: ChatItem, opt: OptionItemView | { custom: string }) {
+    if (!item.options || item.options.pickedId) return
+    const text = 'custom' in opt ? opt.custom.trim() : opt.label
+    if (!text) return
+    item.options.pickedId = 'custom' in opt ? 'custom' : opt.id
+    runPanel.value.asking = false
+    submit(text)
   }
 
   /**
@@ -650,6 +758,8 @@ export const useChatStore = defineStore('chat', () => {
         }
         error.value = m
         running.value = false
+        runPanel.value.done = true
+        runPanel.value.phase = '出错'
         stopMetrics()
       },
     })
@@ -673,6 +783,8 @@ export const useChatStore = defineStore('chat', () => {
       }
       error.value = (e as Error).message
       running.value = false
+      runPanel.value.done = true
+      runPanel.value.phase = '出错'
       refreshMetrics(sessionId)
       stopMetrics()
       closeActiveStream()
@@ -771,6 +883,19 @@ export const useChatStore = defineStore('chat', () => {
         runPanel.value.asking = true
         break
       }
+      case 'options': {
+        // 条件选择：模型给出若干方案让用户拍板；卡片渲染后由用户点选（或超时后端自动选优）
+        item.options = {
+          question: String(p.question ?? '请选择'),
+          options: Array.isArray(p.options) ? p.options : [],
+          allowCustom: p.allowCustom !== false,
+          customHint: p.customHint ? String(p.customHint) : undefined,
+          timeoutSec: p.timeoutSec != null ? Number(p.timeoutSec) : undefined,
+        }
+        item.status = 'done'
+        runPanel.value.asking = true
+        break
+      }
       case 'skill_invoke': {
         // Skill 调用并入透明面板工具区展示
         item.toolCalls.push({
@@ -816,8 +941,38 @@ export const useChatStore = defineStore('chat', () => {
         break
       }
       case 'stop': {
-        if (p.summary) item.content = String(p.summary)
+        // 收尾对齐：stop.summary 是本轮「最终答案全文」，而正文此前已由 content_delta
+        // 逐字流式渲染。二者正常情况下一致，仅在「流式失败降级同步重试」等场景不完全相同
+        // （见后端 streamTurn/syncTurn：已展示增量与重试结果不一致时会先提示、再完整输出）。
+        //
+        // 缺陷背景：旧实现无条件 `item.content = summary`，会把「已流式渲染的完整正文」
+        // 整段替换为 summary 再触发一次 markdown 重渲染 → 视觉上表现为回复内容「重复出现」
+        // （尤其含代码块时，代码块会重建、高亮重算，跳动感明显）。
+        //
+        // 现策略：仅当 summary 确实是既有正文的「超集」（前缀补齐，即流式被截断的情况）
+        // 才覆盖，否则保留流式正文不动——因为二者内容等价，重渲染徒增闪动。
+        const summary = p.summary ? String(p.summary) : ''
+        if (summary) {
+          const streamed = item.content || ''
+          if (!streamed) {
+            // 流式未产生正文（如纯 options/ask 收尾、伪流式未执行）：以 summary 补齐
+            item.content = summary
+          } else if (summary !== streamed && summary.startsWith(streamed)) {
+            // 流式被截断：补齐剩余部分，保证答案完整且与落库一致
+            item.content = summary
+          }
+          // 其余情况：summary 与流式正文等价（或更短），保留流式正文，避免重复渲染
+        }
         item.status = 'done'
+        // 收尾：把本轮思考快照进消息（执行面板不再展示思考），供消息内「已深度思考」折叠区查看
+        if (runPanel.value.thoughts.length) {
+          item.thoughts = [...runPanel.value.thoughts]
+        }
+        // 后端 LLM 精简后的会话标题：随 stop 下发即同步本地列表
+        if (p.sessionTitle) {
+          const s = sessions.value.find((x) => x.id === event.sessionId)
+          if (s) s.title = String(p.sessionTitle)
+        }
         runPanel.value.done = true
         runPanel.value.phase = p.reason === 'cancelled' ? '已取消' : '完成'
         break
@@ -825,6 +980,10 @@ export const useChatStore = defineStore('chat', () => {
       case 'error': {
         item.status = 'error'
         item.error = String(p.msg ?? '运行出错')
+        // 收尾：出错时同样快照已产生的思考，避免过程信息丢失
+        if (runPanel.value.thoughts.length) {
+          item.thoughts = [...runPanel.value.thoughts]
+        }
         runPanel.value.done = true
         runPanel.value.phase = '出错'
         break
@@ -855,6 +1014,12 @@ export const useChatStore = defineStore('chat', () => {
     loaded,
     metrics,
     runPanel,
+    confirmingRollbackId,
+    rollbackAnchor,
+    rollingBackNode,
+    openRollbackConfirm,
+    cancelRollbackNode,
+    confirmRollbackNode,
     loadSessions,
     loadHistory,
     ensureSession,
@@ -866,6 +1031,7 @@ export const useChatStore = defineStore('chat', () => {
     submit,
     cancel,
     confirmAsk,
+    pickOption,
     rollbackMessage,
     rollbackToNode,
   }

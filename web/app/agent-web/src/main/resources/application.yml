@@ -54,6 +54,9 @@ core:
   verification-enabled: true
   # 单个客观验证器超时（秒）
   verification-timeout-sec: 120
+  # 条件选择（options）挂起超时（秒）：超时无人选择时自动采用推荐项继续；
+  # <=0 表示不设超时（永久挂起，等待用户手动选择）
+  options-timeout-sec: 300
 
 # Skill（渐进披露式技能加载）
 skill:

@@ -56,6 +56,10 @@
             <artifactId>agent-mcp</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-workflow</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>

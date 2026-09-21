@@ -114,6 +114,11 @@
                 <artifactId>agent-cli</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>com.lucky.agent</groupId>
+                <artifactId>agent-workflow</artifactId>
+                <version>${project.version}</version>
+            </dependency>
 
             <!-- LangChain4j（AI 编排核心：Agent/工具/记忆/RAG） -->
             <dependency>

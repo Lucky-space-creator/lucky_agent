@@ -9,6 +9,7 @@ import com.lucky.agent.workflow.exception.WorkflowException;
 import com.lucky.agent.workflow.service.WorkflowService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -18,19 +19,30 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 
-import java.io.IOException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * 工作流 REST 接口 + SSE 执行监控。
- * <p>注意：本类<b>不使用</b> @RestController 注解，仅以 @RequestMapping 标注为 MVC 处理器，
- * 由 {@code WorkflowAutoConfiguration} 以 @Bean 方式注册——从而不依赖宿主的组件扫描范围，
- * 也不会与宿主扫描产生重复注册。</p>
+ * 工作流 REST 接口 + SSE 执行监控（响应式）。
+ *
+ * <p><b>必须使用 {@link RestController} + 组件扫描注册（不可改为 @Bean 方式）：</b>
+ * WebFlux 的 {@code RequestMappingHandlerMapping.isHandler()} 只认
+ * {@code @Controller}/{@code @RequestMapping} 注解（即 {@code AnnotatedElementUtils.hasAnnotation}），
+ * <b>不认</b>「由 @Bean 方法返回、但类上无这些注解」的对象。历史缺陷正是
+ * 「类上只有 @RequestMapping、由 @Bean 注册」→ 路由不注册 → 请求落静态资源解析
+ * → 404 {@code No static resource api/workflows}。故此处与宿主其余 19 个控制器
+ * （{@code com.lucky.agent.web.controller.*}）走完全相同的注册路径：注解 + 扫描。</p>
+ *
+ * <p>SSE 采用 WebFlux 的 {@code Flux<ServerSentEvent>}（而非 Servlet 的 {@code SseEmitter}），
+ * 以保持本模块与宿主（响应式栈）一致，且不引入 Tomcat/spring-webmvc 依赖。</p>
  */
+@RestController
 @RequestMapping("/api/workflows")
 public class WorkflowController {
 
@@ -108,24 +120,31 @@ public class WorkflowController {
         return service.instance(instanceId);
     }
 
-    /** SSE：订阅指定实例的执行事件流。 */
+    /** SSE：订阅指定实例的执行事件流（WebFlux 响应式）。 */
     @GetMapping(value = "/instances/{instanceId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter events(@PathVariable String instanceId) {
-        SseEmitter emitter = new SseEmitter(0L);
+    public Flux<ServerSentEvent<WorkflowEvent>> events(@PathVariable String instanceId) {
+        // 多播 sink：事件总线回调 → Flux 下游；缓冲少量事件以容忍订阅前的瞬时缺口
+        Sinks.Many<WorkflowEvent> sink = Sinks.many().multicast().onBackpressureBuffer();
         Consumer<WorkflowEvent> listener = event -> {
             if (instanceId.equals(event.instanceId())) {
-                try {
-                    emitter.send(SseEmitter.event().name(event.type().name()).data(event));
-                } catch (IOException e) {
-                    emitter.completeWithError(e);
-                }
+                sink.tryEmitNext(event);
             }
         };
         eventBus.subscribe(listener);
-        emitter.onCompletion(() -> eventBus.unsubscribe(listener));
-        emitter.onTimeout(() -> eventBus.unsubscribe(listener));
-        emitter.onError(t -> eventBus.unsubscribe(listener));
-        return emitter;
+
+        return sink.asFlux()
+                .map(event -> ServerSentEvent.<WorkflowEvent>builder()
+                        .event(event.type().name())
+                        .data(event)
+                        .build())
+                // 心跳：无事件时定期发送注释帧，避免中间层（代理/浏览器）判定连接空闲而断开
+                .mergeWith(Flux.interval(Duration.ofSeconds(15))
+                        .map(i -> ServerSentEvent.<WorkflowEvent>builder()
+                                .comment("keep-alive")
+                                .build()))
+                .doOnCancel(() -> eventBus.unsubscribe(listener))
+                .doOnTerminate(() -> eventBus.unsubscribe(listener))
+                .doFinally(signal -> eventBus.unsubscribe(listener));
     }
 
     // ---------------- 异常映射 ----------------

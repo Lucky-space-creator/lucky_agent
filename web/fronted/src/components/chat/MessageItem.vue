@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { ChatItem, ToolCallView } from '@/stores/chat'
+import type { ChatItem, ToolCallView, OptionItemView } from '@/stores/chat'
 import { renderMarkdown } from '@/utils/markdown'
 import { useChatStore } from '@/stores/chat'
 import { useUiStore } from '@/stores/ui'
-import PlanCard from './PlanCard.vue'
 import ToolCallCard from './ToolCallCard.vue'
 import AskCard from './AskCard.vue'
+import OptionsCard from './OptionsCard.vue'
 import CodeBlock from './CodeBlock.vue'
 import Icon from '@/components/common/Icon.vue'
 
@@ -20,7 +20,17 @@ const blocks = computed(() => renderMarkdown(props.item.content || ''))
 const showThinkingLoading = computed(() => props.item.status === 'running' && !props.item.content)
 const copied = ref(false)
 
-/* ---------- 思考过程（执行进度已移至悬浮执行面板，消息内不再内嵌展示） ---------- */
+/* ---------- 思考过程（默认折叠在回复模块内；执行面板只保留任务列表） ---------- */
+
+/** 思考折叠区是否展开（默认收起）。 */
+const thoughtsOpen = ref(false)
+/** 本轮思考条数（一条 = 一次 LLM 思考，后端已按轮聚合）。 */
+const thoughtCount = computed(() => props.item.thoughts?.length ?? 0)
+
+/* ---------- 执行详情折叠区（文件总览 + 工具调用，默认折叠，正文只留总结） ---------- */
+
+/** 执行详情折叠区是否展开（默认收起）。 */
+const detailOpen = ref(false)
 
 /* ---------- 工具调用折叠窗口（Skill/MCP/命令等非文件工具） ---------- */
 
@@ -83,33 +93,33 @@ function onConfirm(allow: boolean) {
   chat.confirmAsk(props.item, allow)
 }
 
+/** 条件选择：用户点选某方案 → 作为输入续跑。 */
+function onPickOption(opt: OptionItemView) {
+  chat.pickOption(props.item, opt)
+}
+
+/** 条件选择：用户自定义补充 → 作为输入续跑。 */
+function onCustomOption(text: string) {
+  chat.pickOption(props.item, { custom: text })
+}
+
 /* ---------- 回滚到消息节点：截断该消息之后的对话上下文 ---------- */
 
-/** 是否正在展示回滚确认气泡。 */
-const confirmingRollback = ref(false)
-/** 回滚请求进行中。 */
-const rollingBackNode = ref(false)
 /** 该用户消息之后是否还有消息（无则回滚无意义，隐藏入口）。 */
 const hasFollowing = computed(() => {
   const idx = chat.messages.findIndex((m) => m.id === props.item.id)
   return idx >= 0 && idx < chat.messages.length - 1
 })
 
-/** 点击「回滚到此节点」：弹出确认气泡。 */
-function askRollbackNode() {
-  confirmingRollback.value = true
-}
-
-/** 确认回滚到该消息节点（截断后续所有消息）。 */
-async function onRollbackNode() {
-  if (rollingBackNode.value) return
-  rollingBackNode.value = true
-  confirmingRollback.value = false
-  try {
-    await chat.rollbackToNode(props.item)
-  } finally {
-    rollingBackNode.value = false
-  }
+/**
+ * 点击「回滚到此节点」：打开全局二次确认弹窗（状态在 chat store，保证同时只有一个弹窗）。
+ * 传入触发按钮的视口坐标，供 ChatView 的 Teleport 弹窗定位，从而脱离消息子树、
+ * 不被后续助手消息覆盖，按钮可正常点击。
+ */
+function askRollbackNode(e: MouseEvent) {
+  const el = e.currentTarget as HTMLElement
+  const r = el.getBoundingClientRect()
+  chat.openRollbackConfirm(props.item.id, { x: r.right, y: r.bottom })
 }
 
 /* ---------- 文件操作：查看类（read/list/stat）与变动类（write/delete/mkdir/rename）分流 ---------- */
@@ -192,7 +202,7 @@ const hiddenCount = computed(() =>
 </script>
 
 <template>
-  <article class="msg" :class="`msg--${item.role}`" @click="confirmingRollback = false">
+  <article class="msg" :class="`msg--${item.role}`">
     <div class="msg__body">
       <!-- 用户消息 -->
       <template v-if="item.role === 'user'">
@@ -210,15 +220,6 @@ const hiddenCount = computed(() =>
             <Icon name="undo" :size="11" />
           </button>
           <span v-if="timeText" class="msg__time mono">{{ timeText }}</span>
-
-          <!-- 回滚确认气泡：破坏性操作，二次确认 -->
-          <div v-if="confirmingRollback" class="msg__rollback-confirm" @click.stop>
-            <p>回滚到此节点将删除本条之后的全部消息，确认？</p>
-            <div class="msg__rollback-confirm-actions">
-              <button class="msg__copy" :disabled="rollingBackNode" @click="onRollbackNode">确认</button>
-              <button class="msg__copy" @click="confirmingRollback = false">取消</button>
-            </div>
-          </div>
         </div>
       </template>
 
@@ -230,58 +231,7 @@ const hiddenCount = computed(() =>
           <span>思考中…</span>
         </div>
 
-        <!-- 回复开头：查看的文件（read/list/stat，放大镜胶囊，点击在右侧文件面板定位） -->
-        <div v-if="querySummary.length" class="msg__files msg__files--head">
-          <div class="msg__files-head">
-            <Icon name="search" :size="12" />
-            <span class="msg__files-title mono">查看的文件（{{ querySummary.length }}）</span>
-            <span class="msg__files-sub text-3">点击定位</span>
-          </div>
-          <div class="msg__files-list">
-            <button
-              v-for="f in visibleQueries"
-              :key="f.path"
-              class="msg__file"
-              :class="{ 'msg__file--err': f.hasFail }"
-              :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
-              @click="openFile(f.path)"
-            >
-              <Icon name="search" :size="11" />
-              <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
-            </button>
-          </div>
-          <!-- 超出预览数量：下拉展开全部 / 收起 -->
-          <button v-if="hiddenQueryCount > 0" class="msg__files-more" @click="filesExpanded = true">
-            <Icon name="chevronDown" :size="11" />
-            <span class="mono">展开全部（{{ hiddenQueryCount }}）</span>
-          </button>
-          <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
-            <Icon name="chevronUp" :size="11" />
-            <span class="mono">收起</span>
-          </button>
-        </div>
-
-        <!-- 回复开头：工具调用（Skill/MCP/命令等），折叠窗口，点击展开/收起 -->
-        <div v-if="item.toolCalls.length > 0" class="msg__tools">
-          <button
-            v-if="otherCalls.length"
-            class="msg__toolops"
-            :class="{ 'msg__toolops--open': toolsOpen }"
-            @click="toolsOpen = !toolsOpen"
-          >
-            <Icon name="terminal" :size="13" />
-            <span class="msg__toolops-label mono">工具调用</span>
-            <span v-if="runningOtherCount" class="msg__toolops-run" :title="`${runningOtherCount} 个执行中`" />
-            <span class="msg__toolops-pos mono">{{ otherCalls.length }}</span>
-            <Icon :name="toolsOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
-          </button>
-          <!-- 工具卡片列表：折叠时隐藏 -->
-          <div v-if="toolsOpen" class="msg__toolops-list">
-            <ToolCallCard v-for="call in otherCalls" :key="call.id" :call="call" />
-          </div>
-        </div>
-
-        <!-- 正文内容（流式增量实时渲染） -->
+        <!-- 正文内容：用户只需看到总结回复（流式增量实时渲染） -->
         <div class="msg__blocks">
           <template v-for="(b, i) in blocks" :key="i">
             <CodeBlock v-if="b.type === 'code'" :code="b.content" :lang="b.lang" />
@@ -289,39 +239,116 @@ const hiddenCount = computed(() =>
           </template>
         </div>
 
+        <!-- 交互卡片：危险操作确认（属交互而非过程噪声，保留在正文区） -->
         <AskCard v-if="item.ask" :ask="item.ask" @confirm="onConfirm" />
 
-        <PlanCard v-if="item.plan && item.plan.length > 0" :plan="item.plan" />
+        <!-- 交互卡片：条件选择（LLM 给出若干方案让用户拍板） -->
+        <OptionsCard
+          v-if="item.options"
+          :options="item.options"
+          @pick="onPickOption"
+          @custom="onCustomOption"
+        />
 
-        <!-- 回复末尾：变动的文件（仅修改/删除类，放大镜胶囊，点击在右侧文件面板定位） -->
-        <div v-if="fileSummary.length" class="msg__files">
-          <div class="msg__files-head">
-            <Icon name="file" :size="12" />
-            <span class="msg__files-title mono">变动的文件（{{ fileSummary.length }}）</span>
-            <span class="msg__files-sub text-3">点击定位</span>
-          </div>
-          <div class="msg__files-list">
-            <button
-              v-for="f in visibleFiles"
-              :key="f.path"
-              class="msg__file"
-              :class="{ 'msg__file--err': f.hasFail }"
-              :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
-              @click="openFile(f.path)"
-            >
-              <Icon name="search" :size="11" />
-              <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
-            </button>
-          </div>
-          <!-- 超出预览数量：下拉展开全部 / 收起 -->
-          <button v-if="hiddenCount > 0" class="msg__files-more" @click="filesExpanded = true">
-            <Icon name="chevronDown" :size="11" />
-            <span class="mono">展开全部（{{ hiddenCount }}）</span>
+        <!-- 思考过程：默认折叠，置于正文下方 -->
+        <div v-if="thoughtCount" class="msg__fold">
+          <button class="msg__fold-head" @click="thoughtsOpen = !thoughtsOpen">
+            <Icon :name="thoughtsOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
+            <Icon name="sparkles" :size="11" />
+            <span class="mono">已深度思考（{{ thoughtCount }} 次）</span>
           </button>
-          <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
-            <Icon name="chevronUp" :size="11" />
-            <span class="mono">收起</span>
+          <div v-if="thoughtsOpen" class="msg__fold-body">
+            <div v-for="(t, i) in item.thoughts" :key="i" class="msg__thought">{{ t }}</div>
+          </div>
+        </div>
+
+        <!-- 执行详情：文件总览 + 工具调用，默认折叠（正文只留总结） -->
+        <div v-if="querySummary.length || fileSummary.length || otherCalls.length" class="msg__fold">
+          <button class="msg__fold-head" @click="detailOpen = !detailOpen">
+            <Icon :name="detailOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
+            <Icon name="terminal" :size="11" />
+            <span class="mono">执行详情</span>
+            <span class="msg__fold-badge mono">{{ querySummary.length + fileSummary.length }} 文件 · {{ otherCalls.length }} 工具</span>
           </button>
+          <div v-if="detailOpen" class="msg__fold-body">
+            <!-- 查看的文件（read/list/stat，点击在右侧文件面板定位） -->
+            <div v-if="querySummary.length" class="msg__files">
+              <div class="msg__files-head">
+                <Icon name="search" :size="12" />
+                <span class="msg__files-title mono">查看的文件（{{ querySummary.length }}）</span>
+                <span class="msg__files-sub text-3">点击定位</span>
+              </div>
+              <div class="msg__files-list">
+                <button
+                  v-for="f in visibleQueries"
+                  :key="f.path"
+                  class="msg__file"
+                  :class="{ 'msg__file--err': f.hasFail }"
+                  :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
+                  @click="openFile(f.path)"
+                >
+                  <Icon name="search" :size="11" />
+                  <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
+                </button>
+              </div>
+              <button v-if="hiddenQueryCount > 0" class="msg__files-more" @click="filesExpanded = true">
+                <Icon name="chevronDown" :size="11" />
+                <span class="mono">展开全部（{{ hiddenQueryCount }}）</span>
+              </button>
+              <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
+                <Icon name="chevronUp" :size="11" />
+                <span class="mono">收起</span>
+              </button>
+            </div>
+
+            <!-- 变动的文件（修改/删除类） -->
+            <div v-if="fileSummary.length" class="msg__files">
+              <div class="msg__files-head">
+                <Icon name="file" :size="12" />
+                <span class="msg__files-title mono">变动的文件（{{ fileSummary.length }}）</span>
+                <span class="msg__files-sub text-3">点击定位</span>
+              </div>
+              <div class="msg__files-list">
+                <button
+                  v-for="f in visibleFiles"
+                  :key="f.path"
+                  class="msg__file"
+                  :class="{ 'msg__file--err': f.hasFail }"
+                  :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
+                  @click="openFile(f.path)"
+                >
+                  <Icon name="search" :size="11" />
+                  <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
+                </button>
+              </div>
+              <button v-if="hiddenCount > 0" class="msg__files-more" @click="filesExpanded = true">
+                <Icon name="chevronDown" :size="11" />
+                <span class="mono">展开全部（{{ hiddenCount }}）</span>
+              </button>
+              <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
+                <Icon name="chevronUp" :size="11" />
+                <span class="mono">收起</span>
+              </button>
+            </div>
+
+            <!-- 工具调用（Skill/MCP/命令等） -->
+            <div v-if="otherCalls.length" class="msg__tools">
+              <button
+                class="msg__toolops"
+                :class="{ 'msg__toolops--open': toolsOpen }"
+                @click="toolsOpen = !toolsOpen"
+              >
+                <Icon name="terminal" :size="13" />
+                <span class="msg__toolops-label mono">工具调用</span>
+                <span v-if="runningOtherCount" class="msg__toolops-run" :title="`${runningOtherCount} 个执行中`" />
+                <span class="msg__toolops-pos mono">{{ otherCalls.length }}</span>
+                <Icon :name="toolsOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
+              </button>
+              <div v-if="toolsOpen" class="msg__toolops-list">
+                <ToolCallCard v-for="call in otherCalls" :key="call.id" :call="call" />
+              </div>
+            </div>
+          </div>
         </div>
 
         <div v-if="item.error" class="msg__error">
@@ -472,15 +499,6 @@ const hiddenCount = computed(() =>
 .msg__files {
   margin-top: 8px;
 }
-/* 回复开头的「查看的文件」：与正文间加轻分隔 */
-.msg__files--head {
-  margin-top: 2px;
-  padding-bottom: 6px;
-  border-bottom: 1px dashed var(--border);
-}
-.msg__files--head .msg__files-more {
-  margin-bottom: 0;
-}
 .msg__files-head {
   display: flex;
   align-items: center;
@@ -627,6 +645,51 @@ const hiddenCount = computed(() =>
   border-top: 1px dashed var(--border);
   padding-top: 6px;
 }
+/* 折叠块（思考过程 / 执行详情）：默认收起，正文只留总结 */
+.msg__fold {
+  margin-top: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+}
+.msg__fold-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-3);
+  cursor: pointer;
+  user-select: none;
+}
+.msg__fold-head:hover {
+  color: var(--text-1);
+}
+.msg__fold-badge {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  background: var(--bg-2);
+  border-radius: var(--r-pill);
+  padding: 1px 7px;
+}
+.msg__fold-body {
+  margin-top: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.msg__fold-body::-webkit-scrollbar {
+  width: 6px;
+}
+.msg__fold-body::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--r-pill);
+}
 .msg__thoughts-sum {
   display: inline-flex;
   align-items: center;
@@ -700,31 +763,5 @@ const hiddenCount = computed(() =>
 }
 .msg__copy--warn {
   color: var(--teal);
-}
-/* 回滚确认气泡：锚定在用户消息操作区下方，破坏性操作二次确认 */
-.msg__rollback-confirm {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 8px;
-  width: 248px;
-  padding: 12px 14px;
-  background: var(--bg-1);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-8);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
-  z-index: 20;
-  text-align: left;
-}
-.msg__rollback-confirm p {
-  margin: 0 0 10px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-1);
-}
-.msg__rollback-confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 </style>

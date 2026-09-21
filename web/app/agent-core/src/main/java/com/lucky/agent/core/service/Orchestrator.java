@@ -190,6 +190,13 @@ public class Orchestrator implements AgentOrchestrator {
                             ? "unknown" : ctx.permissionLevel().getCode());
                     return direct;
                 }
+                // 条件选择（options）：选项事件已由引擎发布（含回退正文），此处挂起等待用户选择；
+                // 超时由会话层/挂起器兜底自动选中推荐项，故与 ask 一样落一次挂起记录以便重启恢复。
+                if (direct.status() != null && direct.status().equals("options")) {
+                    askSuspender.suspend(ref, "conditional-options",
+                            ctx.permissionLevel() == null ? "unknown" : ctx.permissionLevel().getCode());
+                    return direct;
+                }
                 if (direct.status() != null && direct.status().equals("cancelled")) {
                     return direct;
                 }
@@ -219,7 +226,7 @@ public class Orchestrator implements AgentOrchestrator {
                 }
                 // 循环守卫：连续两轮未达成结论一致 → 模型在重复/反复询问，提前结束避免死循环
                 // 增强：直接比对「用户实际看到的回答」文本，防止结论措辞略变但回答一字不差的重复
-                if (stuckLoop(iter, lastAnswerNorm, direct.finalText())) {
+                if (iter >= 3 && stuckLoop(iter, lastAnswerNorm, direct.finalText())) {
                     publisher.publish(sessionId, AgentEvent.progress(sessionId,
                             "【安全阀】连续两轮回答内容一致，判定为重复回答，提前结束本轮。"));
                     return EngineRunResult.of(sessionId, Phase.ACT, direct.finalText(),
@@ -352,7 +359,7 @@ public class Orchestrator implements AgentOrchestrator {
             // 循环守卫：增强为「回答文本 OR 验证结论」任一连续两轮一致即提前终止，
             // 防止结论措辞略变但回答一字不差的重复回答（Issue 1 根因）
             String thisAnswer = roundLog == null ? "" : roundLog.toString().trim();
-            if (stuckLoop(iter, lastAnswerNorm, thisAnswer)) {
+            if (iter >= 3 && stuckLoop(iter, lastAnswerNorm, thisAnswer)) {
                 publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【安全阀】连续两轮回答内容一致，判定为重复回答，提前结束本轮。"));
                 return EngineRunResult.of(sessionId, Phase.ACT, thisAnswer,
@@ -449,6 +456,16 @@ public class Orchestrator implements AgentOrchestrator {
         return false;
     }
 
+    /** 该结果是否为「需挂起等待用户」（ask 或 options）——子任务循环据此中断后续步骤。 */
+    private boolean isSuspending(EngineRunResult r) {
+        return isOptions(r) || (r.status() != null && r.status().equals("ask"));
+    }
+
+    /** 条件选择（options）结果判定：模型输出了选项块，须挂起等待用户选择。 */
+    private boolean isOptions(EngineRunResult r) {
+        return r != null && r.status() != null && r.status().equals("options");
+    }
+
     /**
      * N 安全阀：迭代次数 / 回合数 / token 预算三重检查。
      *
@@ -543,8 +560,16 @@ public class Orchestrator implements AgentOrchestrator {
                 }
                 state.appendMessage(UserMessage.from(t.title()));
                 r = engine.run(withSuppress(ctx, Phase.ACT, t.title()), Phase.ACT, t.title()).block();
-                if (r != null && r.error() == null && !(r.status() != null && r.status().equals("ask"))) {
+                if (r != null && r.error() == null && !isSuspending(r)) {
                     break;
+                }
+                if (r != null && isOptions(r)) {
+                    // 条件选择：同 ask，中断后续步骤并挂起等待用户选择（选项事件已由引擎发布）
+                    taskProgressTracker.progress(sessionId, t.taskId(),
+                            AgentEvent.TaskProgressStatus.FAILED, i + 1, size, publisher);
+                    askSuspender.suspend(ctx.sessionRef(), "conditional-options",
+                            ctx.permissionLevel() == null ? "unknown" : ctx.permissionLevel().getCode());
+                    return new ExecOutcome(false, true, r, log, tokens);
                 }
                 if (r != null && r.status() != null && r.status().equals("ask")) {
                     // P0-1：高危操作需确认，中断并说明原因

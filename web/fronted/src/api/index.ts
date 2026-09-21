@@ -1,5 +1,7 @@
 import { http } from './http'
 import type {
+  AgentPreset,
+  AgentPresetBundle,
   ExecResult,
   FileOp,
   InferenceDepth,
@@ -9,6 +11,8 @@ import type {
   ModelUsage,
   PermissionRule,
   ProbeResult,
+  RuleBundle,
+  RuleItem,
   SessionMetrics,
   SessionSnapshot,
   SkillDef,
@@ -191,6 +195,32 @@ export const systemApi = {
     http.get<{ path: string; parent: string | null; dirs: { name: string; path: string }[] }>(
       `/api/system/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`,
     ),
+}
+
+/** 规则管理接口（多条全局 / 项目规则，默认 LUCKY.md 内 ## 分节，高级模式走 rules 目录） */
+export const ruleApi = {
+  /** 列出规则：传入 workspaceId 时同时返回该项目的项目规则。 */
+  list: (workspaceId?: string) =>
+    http.get<RuleBundle>(`/api/rules${workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : ''}`),
+  /** 整体覆盖保存某作用域规则（scope: global | project）。 */
+  save: (payload: { workspaceId?: string; scope: 'global' | 'project'; rules: RuleItem[] }) =>
+    http.post<{ saved: boolean; count: number; path: string }>('/api/rules', payload),
+  /** 切换某条规则启用状态（index 为该作用域列表内下标）。 */
+  toggle: (payload: { workspaceId?: string; scope: 'global' | 'project'; index: number; enabled: boolean }) =>
+    http.post<{ ok: boolean; count?: number; message?: string }>('/api/rules/toggle', payload),
+  /** 删除某条规则。 */
+  remove: (payload: { workspaceId?: string; scope: 'global' | 'project'; index: number }) =>
+    http.post<{ ok: boolean; count?: number; message?: string }>('/api/rules/delete', payload),
+}
+
+/** Agent 预设接口（步数/子代理/验证/压缩阈值/自定义提示词，保存即生效） */
+export const presetApi = {
+  /** 读取预设：同时返回用户配置 preset 与合成后的生效值 effective。 */
+  get: () => http.get<AgentPresetBundle>('/api/preset'),
+  /** 保存预设（整体覆盖；null 字段表示沿用 yml 默认值）。 */
+  save: (preset: AgentPreset) => http.post<AgentPresetBundle>('/api/preset', preset),
+  /** 恢复出厂（清空预设，全部沿用 yml 默认值）。 */
+  reset: () => http.post<AgentPresetBundle>('/api/preset/reset', undefined),
 }
 
 /** 隐私接口（本机单人使用，无账号体系） */

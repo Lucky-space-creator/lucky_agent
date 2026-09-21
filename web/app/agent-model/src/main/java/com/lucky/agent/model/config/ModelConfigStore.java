@@ -71,6 +71,12 @@ public class ModelConfigStore {
         try {
             Files.createDirectories(storeFile.getParent());
             AgentSettings copy = AgentSettings.of(settings.inferenceDepth(), new ArrayList<>());
+            // 预设随设置一起落盘：调用方未传入 preset 时，沿用已落盘的旧值，避免「保存端点」把预设抹掉
+            if (settings.agentPreset() != null) {
+                copy.agentPreset(settings.agentPreset());
+            } else {
+                copy.agentPreset(load().agentPreset());
+            }
             if (settings.models() != null) {
                 for (ModelConfig c : settings.models()) {
                     ModelConfig cc = c.copy();
@@ -85,6 +91,17 @@ public class ModelConfigStore {
         } catch (Exception e) {
             log.error("保存全局设置失败：{}", storeFile, e);
         }
+    }
+
+    /**
+     * 单独保存 Agent 预设（其余设置保持磁盘现状）。
+     *
+     * <p>与 {@link #save(AgentSettings)} 分道，避免「改预设」与「改端点」两条写路径互相覆盖。</p>
+     */
+    public synchronized void savePreset(com.lucky.agent.model.api.dto.AgentPreset preset) {
+        AgentSettings current = load();
+        current.agentPreset(preset);
+        save(current);
     }
 
     public Path storeFile() {

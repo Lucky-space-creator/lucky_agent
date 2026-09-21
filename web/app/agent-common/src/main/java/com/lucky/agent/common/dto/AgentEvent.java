@@ -108,6 +108,16 @@ public class AgentEvent {
     public static final String KEY_MODEL = "model";
     public static final String KEY_WARN = "warn";
     public static final String KEY_REASON = "reason";
+    /** 会话标题（stop 事件可选携带，供前端同步列表标题）。 */
+    public static final String KEY_SESSION_TITLE = "sessionTitle";
+    /** 条件选择的选项列表（options 事件）。 */
+    public static final String KEY_OPTIONS = "options";
+    /** 是否允许自定义补充（options 事件）。 */
+    public static final String KEY_ALLOW_CUSTOM = "allowCustom";
+    /** 自定义补充输入框提示（options 事件）。 */
+    public static final String KEY_CUSTOM_HINT = "customHint";
+    /** 选项挂起超时秒数（options 事件；超时后由后端按推荐项自动继续）。 */
+    public static final String KEY_TIMEOUT_SEC = "timeoutSec";
 
     // ---------- 静态工厂 ----------
 
@@ -196,6 +206,38 @@ public class AgentEvent {
         return of(AgentEventType.ASK, sessionId, payload);
     }
 
+    /**
+     * LLM 条件选择事件：向用户展示编号选项（可含「其他」自定义入口），
+     * 前端渲染为选项卡；用户选择后以普通用户消息回传，对话继续。
+     *
+     * @param sessionId   会话 id
+     * @param question    决策问题
+     * @param options     选项列表（id/label/detail/recommended）
+     * @param allowCustom 是否允许自定义补充
+     * @param customHint  自定义输入框占位提示
+     * @param timeoutSec  挂起超时秒数；&lt;=0 表示不设超时
+     */
+    public static AgentEvent options(String sessionId, String question, List<OptionItem> options,
+                                     boolean allowCustom, String customHint, long timeoutSec) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put(KEY_QUESTION, question);
+        payload.put(KEY_OPTIONS, options == null ? List.of() : options);
+        payload.put(KEY_ALLOW_CUSTOM, allowCustom);
+        if (customHint != null && !customHint.isBlank()) {
+            payload.put(KEY_CUSTOM_HINT, customHint);
+        }
+        if (timeoutSec > 0) {
+            payload.put(KEY_TIMEOUT_SEC, timeoutSec);
+        }
+        return of(AgentEventType.OPTIONS, sessionId, payload);
+    }
+
+    /** LLM 条件选择事件（默认允许自定义补充，超时由调用方决定）。 */
+    public static AgentEvent options(String sessionId, String question, List<OptionItem> options,
+                                     long timeoutSec) {
+        return options(sessionId, question, options, true, "其他（请补充说明）", timeoutSec);
+    }
+
     public static AgentEvent error(String sessionId, String stage, String callId, String msg, String fallback) {
         Map<String, Object> payload = new HashMap<>();
         payload.put(KEY_STAGE, stage);
@@ -236,6 +278,18 @@ public class AgentEvent {
         return of(AgentEventType.STOP, sessionId, payload);
     }
 
+    /**
+     * 带会话标题的 stop 事件：首轮结束后随收尾一并下发（应用 LLM 精简后的标题），
+     * 供前端同步会话列表标题，无需额外轮询会话列表。
+     */
+    public static AgentEvent stop(String sessionId, String reason, String summary, String sessionTitle) {
+        Map<String, Object> payload = mapOf(KEY_REASON, reason, KEY_SUMMARY, summary);
+        if (sessionTitle != null && !sessionTitle.isBlank()) {
+            payload.put(KEY_SESSION_TITLE, sessionTitle);
+        }
+        return of(AgentEventType.STOP, sessionId, payload);
+    }
+
     private static final String KEY_CALL_ID = "callId";
 
     private static AgentEvent of(AgentEventType type, String sessionId, Map<String, Object> payload) {
@@ -267,6 +321,17 @@ public class AgentEvent {
      * @param title  任务标题
      */
     public record TaskItem(String taskId, String title) {
+    }
+
+    /**
+     * 条件选择中的单个选项。
+     *
+     * @param id          选项标识（一般是 "1"/"2"/"3"，回传时作为用户选择）
+     * @param label       选项标题（一句话，显示在按钮上）
+     * @param detail      选项说明（可选，展开后显示）
+     * @param recommended 是否为模型推荐项（超时未选时优先选中）
+     */
+    public record OptionItem(String id, String label, String detail, Boolean recommended) {
     }
 
     /**

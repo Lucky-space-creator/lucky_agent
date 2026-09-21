@@ -37,6 +37,13 @@ public enum AgentEventType {
     /** 挂起提问，payload: {@code question, risk}。 */
     ASK("ask"),
 
+    /**
+     * LLM 条件选择（多选项 + 自定义补充），payload:
+     * {@code question, options:[{id,label,detail?,recommended?}], allowCustom, customHint?, timeoutSec?}。
+     * 与 {@link #ASK} 的区别：ASK 是「允许/拒绝」二元确认，OPTIONS 是「多选一」决策。
+     */
+    OPTIONS("options"),
+
     /** 错误，payload: {@code stage, callId?, msg, fallback}。 */
     ERROR("error"),
 

@@ -40,7 +40,12 @@ public class AgentEventPublisher {
     private final ConcurrentMap<String, Sinks.Many<AgentEvent>> sinks = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Queue<AgentEvent>> pending = new ConcurrentHashMap<>();
 
-    /** 订阅会话事件流：订阅建立（订阅者已注册）后立即补发暂存事件，再接续订阅后产生的实时事件。 */
+    /**
+     * 订阅会话事件流：订阅建立（订阅者已注册）后立即补发暂存事件，再接续订阅后产生的实时事件。
+     *
+     * <p>{@code drainInto} 在 {@code doOnSubscribe} 中同步执行完毕后才进入实时订阅段，
+     * 故「暂存补发」与「实时事件」天然串行、顺序为「先暂存后实时」，不会被插入打断。</p>
+     */
     public Flux<AgentEvent> stream(String sessionId) {
         return Flux.defer(() -> {
             Sinks.Many<AgentEvent> s = sink(sessionId);
@@ -49,7 +54,20 @@ public class AgentEventPublisher {
         });
     }
 
-    /** 发布一条事件：有订阅者直接发射；无订阅者先入暂存（订阅时补发，不丢收尾事件）。 */
+    /**
+     * 发布一条事件：有订阅者直接发射；无订阅者先入暂存（订阅时补发，不丢收尾事件）。
+     *
+     * <p><b>投递模型（「内容重复出现」的边界，勿误改）</b>：同一 {@link AgentEvent} 实例只会
+     * 沿「实时发射 XOR 入暂存补发」其中一条路径投递一次，不存在双投递。因此
+     * {@code CONTENT_DELTA} 的重复感知问题<b>不</b>发生在本类，而在消费端：
+     * 前端对 {@code content_delta} 做 {@code content += delta} 累加，一旦同一片段被投递两次
+     * （或收尾时用整段答案覆盖既有正文并重渲染），即表现为正文重复。</p>
+     *
+     * <p>故本类不做 id 级去重（{@code eventId} 逐事件新生成，按 id 判定恒为 false，属死代码）；
+     * 去重职责在语义侧：后端保证「同轮不重复发布」（见 {@code ReactEngine#streamTurn} 的
+     * {@code cancelled} 门禁与 {@code alreadyShown} 前缀判定），前端保证「收尾不整段覆盖」
+     * （见 {@code chat.ts} 的 {@code stop} 分支：仅当前缀补齐时才覆盖）。</p>
+     */
     public void publish(String sessionId, AgentEvent event) {
         Sinks.Many<AgentEvent> s = sinks.get(sessionId);
         if (s != null && s.currentSubscriberCount() > 0) {

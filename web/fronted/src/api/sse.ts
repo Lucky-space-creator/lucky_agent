@@ -11,6 +11,7 @@ const EVENT_TYPES: AgentEventType[] = [
   'task_plan',
   'task_progress',
   'ask',
+  'options',
   'error',
   'token',
   'stop',

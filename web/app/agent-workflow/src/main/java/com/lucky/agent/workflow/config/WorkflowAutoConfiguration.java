@@ -10,6 +10,7 @@ import com.lucky.agent.workflow.adapter.ToolAdapter;
 import com.lucky.agent.workflow.api.WorkflowController;
 import com.lucky.agent.workflow.engine.ConditionEvaluator;
 import com.lucky.agent.workflow.engine.DagCompiler;
+import com.lucky.agent.workflow.engine.LangGraphWorkflowEngine;
 import com.lucky.agent.workflow.engine.MappingEvaluator;
 import com.lucky.agent.workflow.engine.NodeExecutor;
 import com.lucky.agent.workflow.engine.WorkflowEngine;
@@ -33,10 +34,11 @@ import com.lucky.agent.workflow.repository.WorkflowInstanceRepository;
 import com.lucky.agent.workflow.repository.WorkflowRepository;
 import com.lucky.agent.workflow.service.WorkflowService;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -48,11 +50,22 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 工作流模块自动配置：装配引擎、执行器、适配器、仓储、调度器与 REST 通道。
- * <p>所有 Bean 均标注 {@link ConditionalOnMissingBean}，宿主可用自定义实现覆盖（低耦合、可扩展）。
- * 通过 {@code META-INF/spring/...AutoConfiguration.imports} 注册，不依赖宿主组件扫描范围。</p>
+ * 工作流模块配置：装配引擎、执行器、适配器、仓储、调度器与 REST 通道。
+ *
+ * <p>与同级能力模块（agent-skill / agent-mcp / agent-memory …）保持一致：使用普通
+ * {@link Configuration} + {@code @EnableConfigurationProperties}，由宿主的
+ * {@code scanBasePackages = "com.lucky.agent"} 扫描装配。</p>
+ *
+ * <p><b>为何不用 {@code @AutoConfiguration} + {@code META-INF/spring/...AutoConfiguration.imports}：</b>
+ * 该机制虽能装配普通 Bean，但本模块的 {@link com.lucky.agent.workflow.api.WorkflowController}
+ * 必须走「{@code @RestController} + 组件扫描」路径才能被 WebFlux 的
+ * {@code RequestMappingHandlerMapping} 识别为处理器（它只认注解，不认 @Bean 注册的普通对象），
+ * 否则路由不注册 → 404 {@code No static resource api/workflows}。
+ * 两条路径并存还会带来重复定义风险，故统一收敛到组件扫描。</p>
+ *
+ * <p>所有 Bean 仍标注 {@link ConditionalOnMissingBean}，宿主可用自定义实现覆盖。</p>
  */
-@AutoConfiguration
+@Configuration
 @EnableConfigurationProperties(WorkflowProperties.class)
 public class WorkflowAutoConfiguration {
 
@@ -186,6 +199,31 @@ public class WorkflowAutoConfiguration {
                 nodeExecutors, llmAdapter, toolAdapter, sandboxAdapter, repository, instanceRepository, asyncExecutor);
     }
 
+    /**
+     * LangGraph4j 引擎（MVP）：由配置 {@code lucky.workflow.execution.engine=langgraph} 启用。
+     *
+     * <p>两个引擎实现同一执行契约（{@code run/compile/invoke}），映射到同一 {@link WorkflowService}
+     * 与事件总线，故切换对 REST/SSE 与前端完全透明。默认仍为 legacy，待灰度验证后再切换默认值。</p>
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(name = "lucky.workflow.execution.engine", havingValue = "langgraph")
+    public LangGraphWorkflowEngine langGraphWorkflowEngine(DagCompiler compiler,
+                                                           WorkflowStateMachine stateMachine,
+                                                           MappingEvaluator mappingEvaluator,
+                                                           ConditionEvaluator conditionEvaluator,
+                                                           WorkflowEventBus eventBus,
+                                                           List<NodeExecutor> nodeExecutors,
+                                                           LlmAdapter llmAdapter,
+                                                           ToolAdapter toolAdapter,
+                                                           SandboxAdapter sandboxAdapter,
+                                                           WorkflowRepository repository,
+                                                           WorkflowInstanceRepository instanceRepository,
+                                                           @Qualifier("workflowAsyncExecutor") ExecutorService asyncExecutor) {
+        return new LangGraphWorkflowEngine(compiler, stateMachine, mappingEvaluator, conditionEvaluator, eventBus,
+                nodeExecutors, llmAdapter, toolAdapter, sandboxAdapter, repository, instanceRepository, asyncExecutor);
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public WorkflowScheduler workflowScheduler(WorkflowEngine engine, List<Trigger> triggers) {
@@ -202,11 +240,8 @@ public class WorkflowAutoConfiguration {
         return new WorkflowService(repository, instanceRepository, engine, compiler, scheduler);
     }
 
-    @Bean
-    @ConditionalOnMissingBean
-    public WorkflowController workflowController(WorkflowService service, WorkflowEventBus eventBus) {
-        return new WorkflowController(service, eventBus);
-    }
+    // 注意：WorkflowController 不在此处以 @Bean 注册——它由 @RestController + 组件扫描装配。
+    // 原因见类级 Javadoc：WebFlux 的 RequestMappingHandlerMapping 只认注解，不认 @Bean 返回对象。
 
     private ThreadFactory daemonFactory(String prefix) {
         AtomicInteger seq = new AtomicInteger();

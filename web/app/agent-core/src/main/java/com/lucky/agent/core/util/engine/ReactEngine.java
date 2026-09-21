@@ -24,7 +24,9 @@ import com.lucky.agent.memory.api.dto.RecallResult;
 import com.lucky.agent.memory.config.MemoryMdProperties;
 import com.lucky.agent.memory.support.md.HierarchyMemoryRetriever;
 import com.lucky.agent.model.api.ModelRouter;
+import com.lucky.agent.core.config.PresetResolver;
 import com.lucky.agent.model.support.prompt.BasePromptStore;
+import com.lucky.agent.model.support.prompt.RuleStore;
 import com.lucky.agent.model.support.prompt.SystemPromptAssembler;
 import com.lucky.agent.persona.service.PersonaService;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
@@ -60,8 +62,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -99,6 +99,8 @@ public class ReactEngine implements Engine {
     private final MetricsCollector metricsCollector;
     private final StepLimitGuard stepLimitGuard;
     private final BasePromptStore basePromptStore;
+    private final RuleStore ruleStore;
+    private final PresetResolver presetResolver;
     private final double contextThreshold;
 
     public ReactEngine(ModelRouter modelRouter, ToolGateway toolGateway, PersonaService personaService,
@@ -113,6 +115,8 @@ public class ReactEngine implements Engine {
                        MetricsCollector metricsCollector,
                        StepLimitGuard stepLimitGuard,
                        BasePromptStore basePromptStore,
+                       RuleStore ruleStore,
+                       PresetResolver presetResolver,
                        @Value("${model.context-threshold:0.9}") double contextThreshold) {
         this.modelRouter = modelRouter;
         this.toolGateway = toolGateway;
@@ -130,6 +134,8 @@ public class ReactEngine implements Engine {
         this.metricsCollector = metricsCollector;
         this.stepLimitGuard = stepLimitGuard;
         this.basePromptStore = basePromptStore;
+        this.ruleStore = ruleStore;
+        this.presetResolver = presetResolver;
         this.contextThreshold = contextThreshold;
     }
 
@@ -154,8 +160,9 @@ public class ReactEngine implements Engine {
             String sysPrompt = assembleSystemPrompt(ctx, phase, state);
             List<ToolSpecification> tools = toolGateway.buildToolSpecifications(ctx.workspaceId(), ctx.goal());
 
-            // 步数上限接线：PLAN/ACT 复用同一引擎，仅终止条件不同（StepLimitGuard 统一裁决）
-            int maxSteps = stepLimitGuard.maxSteps(phase);
+            // 步数上限接线：PLAN/ACT 复用同一引擎，仅终止条件不同（StepLimitGuard 统一裁决）。
+            // ACT 阶段优先取 Agent 预设中的 maxSteps（设置页可调、保存即生效），PLAN 保持 yml 口径。
+            int maxSteps = phase == Phase.ACT ? presetResolver.actMaxSteps() : stepLimitGuard.maxSteps(phase);
 
             List<ChatMessage> messages = new ArrayList<>();
             messages.add(SystemMessage.from(sysPrompt));
@@ -288,6 +295,25 @@ public class ReactEngine implements Engine {
             }
 
             if (finalText != null && !finalText.isBlank()) {
+                // 条件选择（选项块）：模型按约定输出 ```options 受控 JSON 块时，
+                // 剥离该块（用户只看说明文字）、发布 options 事件并挂起，等待用户选择后继续。
+                Optional<OptionsBlockParser.Parsed> picked = OptionsBlockParser.parse(finalText);
+                if (picked.isPresent()) {
+                    OptionsBlockParser.Parsed parsed = picked.get();
+                    String stripped = parsed.strippedBody();
+                    if (stripped != null && !stripped.isBlank()) {
+                        state.appendMessage(lastAi == null
+                                ? AiMessage.from(stripped)
+                                : lastAi.toBuilder().text(stripped).build());
+                    }
+                    publisher.publish(ctx.sessionId(), AgentEvent.options(
+                            ctx.sessionId(), parsed.question(), parsed.options(),
+                            parsed.allowCustom(), parsed.customHint(),
+                            presetResolver.optionsTimeoutSec()));
+                    log.info("条件选择挂起：session={} 选项数={}", ctx.sessionId(), parsed.options().size());
+                    return EngineRunResult.of(ctx.sessionId(), phase, stripped == null ? "" : stripped,
+                            tokenUsed, modelRouter.modelName(modelId), "options");
+                }
                 // 落库时保留 thinking：推理模型（deepseek-reasoner 等）要求下一轮把
                 // reasoning_content 原样回传，用 AiMessage.from(text) 重建会丢掉思考链，
                 // 导致下一轮请求被模型厂商拒绝。
@@ -322,7 +348,9 @@ public class ReactEngine implements Engine {
             return messages;
         }
         long estimatedTokens = tokenMeter.count(messages);
-        long budget = (long) (window * contextThreshold);
+        // 压缩阈值优先取 Agent 预设（设置页可调），未配置时回退 yml 默认。
+        double threshold = presetResolver.contextThreshold();
+        long budget = (long) (window * threshold);
         // 注意：这里不再发布 token 事件（P2-4）。该估算值是「全量历史」，并非本次模型
         // 调用的增量消耗，若按 used 上报会导致会话级 token 虚高（每轮重复累计全量）。
         // 真实 token 由每次模型调用处按增量上报。
@@ -331,7 +359,7 @@ public class ReactEngine implements Engine {
         }
         log.info("上下文接近上限：{} tokens / {}，触发压缩", estimatedTokens, window);
         publisher.publish(ctx.sessionId(), AgentEvent.progress(ctx.sessionId(), "上下文接近上限，正在压缩（保留关键结果）"));
-        List<ChatMessage> compacted = compactionPipeline.compact(messages, Map.of("threshold", contextThreshold));
+        List<ChatMessage> compacted = compactionPipeline.compact(messages, Map.of("threshold", threshold));
         return compacted == null ? messages : compacted;
     }
 
@@ -346,6 +374,12 @@ public class ReactEngine implements Engine {
         SystemPromptAssembler assembler = new SystemPromptAssembler();
         assembler.base(basePromptStore.basePrompt());
         assembler.persona(personaService.renderPersonaLayer(personaId(ctx)));
+        // 自定义系统提示词（Agent 预设，设置页可编辑）：置于基座与人格之后、阶段/权限之前，
+        // 让用户可以「补丁式」追加输出风格与硬性要求，而无需改动框架自带的 LUCKY.md 基座。
+        String customPrompt = presetResolver.systemPrompt();
+        if (customPrompt != null) {
+            assembler.memory("【自定义指令】\n" + customPrompt);
+        }
         assembler.phase(phaseInstruction(phase));
         assembler.permission(permissionInstruction(ctx.permissionLevel()));
         // 当前工作空间上下文（核心）：告诉 Agent 它到底在哪个工作区、根目录在哪，
@@ -358,18 +392,16 @@ public class ReactEngine implements Engine {
                     + "用户所说的“项目”“工作目录”“这里”等，若未特别说明，均指这个根目录；"
                     + "所有文件操作（列目录/读/写）应基于此根目录进行，不要向用户索要路径，"
                     + "也不要访问根目录之外的路径。");
-            // 项目规则（两级 LUCKY.md 的第二级）：工作空间根下的 LUCKY.md，
-            // 与全局规则（框架根 LUCKY.md，已作为基座层注入）叠加生效，项目规则优先级更高。
-            Path ruleFile = Path.of(ws.get().path()).resolve("LUCKY.md");
+            // 多条规则注入（§五-5-1）：全局规则（框架根 LUCKY.md 的 ## 分节）+ 项目规则
+            // （工作空间 LUCKY.md 的 ## 分节），项目优先级更高；仅注入启用项。
+            // 未分节的旧版 LUCKY.md 由 RuleStore 兼容为「整文件单条规则」，行为与改造前一致。
             try {
-                if (Files.isRegularFile(ruleFile)) {
-                    String rules = Files.readString(ruleFile, StandardCharsets.UTF_8);
-                    if (rules != null && !rules.isBlank()) {
-                        assembler.memory("【项目规则】\n" + rules.trim());
-                    }
+                String rules = ruleStore.renderForPrompt(ws.get().path());
+                if (rules != null && !rules.isBlank()) {
+                    assembler.memory(rules.trim());
                 }
             } catch (Exception e) {
-                log.warn("读取项目规则失败（忽略）：{}", ruleFile, e);
+                log.warn("读取规则失败（忽略）：ws={}", ctx.workspaceId(), e);
             }
         }
         // 记忆召回：md 轨（索引+预取 或 全量兜底）+ JSONL 按工作空间补充（P1-7/1-8）
@@ -461,7 +493,15 @@ public class ReactEngine implements Engine {
                     5. 模糊输入必须确认：当用户消息是单个字、单个数字或极短内容且可能对应多个解释
                        （如选项编号、历史待办等）时，禁止自行猜测为一个选项并开始执行，必须先用一句话确认用户意图，
                        得到用户明确回复后再执行。
-                    总结必须使用 Markdown 格式输出（可用标题、无序/有序列表、加粗、行内代码、代码块、引用等标准 Markdown 语法）。""";
+                    总结必须使用 Markdown 格式输出（可用标题、无序/有序列表、加粗、行内代码、代码块、引用等标准 Markdown 语法）。
+                    6. 需要用户在多个方案中做选择时，用受控选项块表达，不要在正文里直接罗列后自问自答：
+                       先写一两句说明，然后输出一个 ```options 代码块（JSON），不要把选项写成普通列表。
+                       例如：
+                       ```options
+                       {"question":"选择实现方案","options":[{"id":"1","label":"方案A：…","detail":"…"},{"id":"2","label":"方案B：…","detail":"…","recommended":true}],"allowCustom":true,"customHint":"其他（请补充说明）"}
+                       ```
+                       规则：options 为 2~4 项；每项须有 id 与 label；推荐的方案加 "recommended": true；
+                       允许用户补充其他想法时置 "allowCustom": true（默认开启）。用户选择后对话会自动继续。""";
             case ASK -> "【阶段指令】当前为确认阶段：仅就高风险点向用户确认，不要继续执行。";
         };
     }

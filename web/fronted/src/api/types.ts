@@ -17,6 +17,7 @@ export type AgentEventType =
   | 'task_plan'
   | 'task_progress'
   | 'ask'
+  | 'options'
   | 'error'
   | 'token'
   | 'stop'
@@ -231,6 +232,65 @@ export interface SystemOpenResult {
   path: string
   /** 打开失败时的原因说明（可选）。 */
   message?: string
+}
+
+/** 单条规则（多条规则体系；默认存储于 LUCKY.md 的 `## 规则名` 分节）。 */
+export interface RuleItem {
+  /** 规则名（分节标题）。 */
+  name: string
+  /** 规则正文。 */
+  content: string
+  /** 是否启用；停用规则保留在文件中但不注入模型。 */
+  enabled: boolean
+  /** 作用域：global 全局 / project 项目（项目优先级更高）。 */
+  scope: 'global' | 'project'
+}
+
+/** 规则总览（全局 + 当前项目）。 */
+export interface RuleBundle {
+  /** 存储形态：single-file（LUCKY.md 分节） / multi-file（rules 目录）。 */
+  storage: 'single-file' | 'multi-file'
+  global: RuleItem[]
+  project: RuleItem[]
+  /** 全局规则文件路径。 */
+  globalPath: string
+  /** 项目规则文件路径（未选工作空间时为空串）。 */
+  projectPath: string
+}
+
+/** Agent 预设（null 字段 = 沿用 application.yml 默认值）。 */
+export interface AgentPreset {
+  /** ACT 阶段最大步数。 */
+  maxSteps?: number | null
+  /** 是否启用多 Agent / 子代理。 */
+  subagentEnabled?: boolean | null
+  /** 子代理并行上限。 */
+  subagentMaxConcurrency?: number | null
+  /** 是否启用客观验证链。 */
+  verificationEnabled?: boolean | null
+  /** 上下文压缩触发阈值（0~1）。 */
+  contextThreshold?: number | null
+  /** 失败步骤自动重试。 */
+  autoRetry?: boolean | null
+  /** 自定义系统提示词段。 */
+  systemPrompt?: string | null
+}
+
+/** 预设总览：用户配置 + 合成后的生效值 + 覆盖来源标记。 */
+export interface AgentPresetBundle {
+  preset: AgentPreset
+  /** 与 yml 合成后的最终生效值（设置页展示「当前生效值」）。 */
+  effective: {
+    maxSteps: number
+    subagentEnabled: boolean
+    subagentMaxConcurrency: number
+    verificationEnabled: boolean
+    contextThreshold: number
+    autoRetry: boolean
+    orchestratorMode: string
+  }
+  /** 各字段是否由用户自定义（true=已覆盖 yml）。 */
+  overridden: Record<string, boolean>
 }
 
 /* ---------------- 工作流（agent-workflow 模块） ---------------- */

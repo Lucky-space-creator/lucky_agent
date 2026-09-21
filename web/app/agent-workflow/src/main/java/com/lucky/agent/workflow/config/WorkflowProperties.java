@@ -18,6 +18,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *       thread-pool-size: 4
  *       default-mode: SYNC
  *       auto-triggers: true               # 是否启用周期等自动触发
+ *       engine: legacy                    # legacy=自研调度；langgraph=LangGraph4j 状态图
  * </pre>
  */
 @ConfigurationProperties(prefix = "lucky.workflow")
@@ -87,6 +88,16 @@ public class WorkflowProperties {
         private int threadPoolSize = 4;
         private RunMode defaultMode = RunMode.SYNC;
         private boolean autoTriggers = true;
+        /** 引擎实现：{@code legacy}（默认，自研调度器）/ {@code langgraph}（LangGraph4j 状态图）。 */
+        private String engine = "legacy";
+
+        public String getEngine() {
+            return engine;
+        }
+
+        public void setEngine(String engine) {
+            this.engine = engine;
+        }
 
         public int getThreadPoolSize() {
             return threadPoolSize;

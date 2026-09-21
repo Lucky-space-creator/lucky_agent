@@ -2,6 +2,7 @@ package com.lucky.agent.model.support.endpoint;
 
 import com.lucky.agent.common.exception.AgentException;
 import com.lucky.agent.model.api.ModelEndpoint;
+import com.lucky.agent.model.api.dto.AgentPreset;
 import com.lucky.agent.model.api.dto.AgentSettings;
 import com.lucky.agent.model.api.dto.InferenceDepth;
 import com.lucky.agent.model.api.dto.ModelConfig;
@@ -36,13 +37,15 @@ public class EndpointAccessCenter {
     private final ModelUsageTracker usageTracker;
     private final List<ModelConfig> configs;
     private InferenceDepth inferenceDepth;
+    /** 当前内存设置快照：端点/preset 各自更新时以此为基，避免互相覆盖（保留 preset 等旁路字段）。 */
+    private AgentSettings settings;
 
     public EndpointAccessCenter(ModelConfigStore store, HealthProbe healthProbe, ModelUsageTracker usageTracker) {
         this.store = store;
         this.healthProbe = healthProbe;
         this.usageTracker = usageTracker;
-        AgentSettings settings = store.load();
-        this.configs = settings.models();
+        this.settings = store.load();
+        this.configs = settings.views();
         this.inferenceDepth = settings.inferenceDepth() == null ? InferenceDepth.defaultValue() : settings.inferenceDepth();
         normalizeRoles();
         this.configs.forEach(c -> c.keyConfigured(isConfigured(c.apiKey())));
@@ -93,9 +96,23 @@ public class EndpointAccessCenter {
         persist();
     }
 
-    /** 将当前内存配置整体明文落盘（含推理深度）。 */
+    /** 将当前内存配置整体落盘（含推理深度与 Agent 预设）。 */
     private synchronized void persist() {
-        store.save(AgentSettings.of(inferenceDepth, configs));
+        settings.inferenceDepth(inferenceDepth);
+        settings.models(configs);
+        store.save(settings);
+    }
+
+    /** 当前 Agent 预设（未配置返回空预设，表示全部沿用 yml 默认值）。 */
+    public synchronized AgentPreset agentPreset() {
+        AgentPreset preset = settings.agentPreset();
+        return preset == null ? AgentPreset.empty() : preset.copy();
+    }
+
+    /** 更新 Agent 预设并落盘。 */
+    public synchronized void setAgentPreset(AgentPreset preset) {
+        settings.agentPreset(preset == null ? AgentPreset.empty() : preset);
+        store.save(settings);
     }
 
     /** 全部端点配置（复制副本返回，避免外部直接修改内部对象）。 */

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref } from 'vue'
 import Icon from '@/components/common/Icon.vue'
 import { workflowApi } from '@/api'
 import type { WorkflowDef, WorkflowInstance, WorkflowInstanceStatus } from '@/api/types'

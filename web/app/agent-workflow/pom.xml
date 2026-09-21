@@ -15,15 +15,28 @@
     <description>独立工作流模块：工作流定义/配置、流程节点与步骤管理、触发与执行、状态流转与条件控制；提供节点/连接器/调度器等可复用组件，低耦合、职责单一、便于扩展。</description>
 
     <dependencies>
-        <!-- Web 层：REST 接口 + SSE 执行监控。仅引入 web，不耦合任何内部 sibling 模块 -->
+        <!-- Web 层：REST 接口 + SSE 执行监控。
+             只引入 spring-web（注解）与 spring-webflux（响应式 SSE），**不引入 spring-boot-starter-web**：
+             后者会带入 spring-boot-starter-tomcat + spring-webmvc，使宿主的
+             WebApplicationType 被判定为 SERVLET，从而禁用 WebFlux（宿主 agent-web 为响应式栈）。
+             保持本模块「web 栈无关」，交由宿主决定 Web 实现。 -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-web</artifactId>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-webflux</artifactId>
         </dependency>
         <!-- 响应式事件总线（同 agent-common 生态） -->
         <dependency>
             <groupId>io.projectreactor</groupId>
             <artifactId>reactor-core</artifactId>
+        </dependency>
+        <!-- LangGraph4j：工作流 DAG 的状态图引擎（与 agent-core 同版本，见父 pom 属性） -->
+        <dependency>
+            <groupId>org.bsc.langgraph4j</groupId>
+            <artifactId>langgraph4j-core</artifactId>
         </dependency>
         <!-- JSON 序列化（定义持久化） -->
         <dependency>

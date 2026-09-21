@@ -62,6 +62,32 @@ function closeTool() {
   activeTool.value = null
 }
 
+/** 回滚确认弹窗定位样式：依据触发按钮的视口坐标固定定位，并夹取在视口内。 */
+const rbStyle = computed(() => {
+  const a = chat.rollbackAnchor
+  if (!a) return {}
+  const w = 248
+  const h = 132
+  let left = a.x - w
+  let top = a.y + 8
+  left = Math.max(8, Math.min(left, window.innerWidth - w - 8))
+  top = Math.max(8, Math.min(top, window.innerHeight - h - 8))
+  return { left: `${left}px`, top: `${top}px` }
+})
+
+/** 任务状态中文标签（执行面板任务列表展示用）。 */
+function taskStatusLabel(s: string): string {
+  return (
+    { pending: '待执行', running: '执行中', done: '已完成', failed: '失败', ask: '待确认' } as Record<
+      string,
+      string
+    >
+  )[s] ?? s
+}
+
+/** 已完成任务数（执行面板头部进度展示）。 */
+const doneTaskCount = computed(() => (chat.runPanel.plan ?? []).filter((t) => t.status === 'done').length)
+
 // 收起右侧工具栏时：同时收起工具面板并隐藏工具栏窄条，让对话占满整行
 watch(
   () => ui.rightRailOpen,
@@ -258,27 +284,37 @@ async function welcomeFiles(e: Event) {
       <div class="chat__layout">
         <!-- 对话区：flex:1，随右侧工具栏/面板展开被推动 -->
         <div class="chat__main">
-          <!-- 悬浮执行面板：展示思考、进度、工具调用，悬浮在输入框上方，可收缩（Issue 1） -->
-          <div v-if="chat.running || !chat.runPanel.done" class="run-panel">
+          <!-- 悬浮执行面板：只展示需要分步执行的任务列表，悬浮在输入框上方，可收缩（Issue 1） -->
+          <div
+            v-if="chat.running || (chat.runPanel.plan && chat.runPanel.plan.length > 0)"
+            class="run-panel"
+          >
             <div class="run-panel__head" @click="runPanelOpen = !runPanelOpen">
               <span class="run-panel__title">
                 <Icon :name="runPanelOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
-                {{ chat.runPanel.phase || '执行中' }}
+                任务进度
               </span>
               <span class="run-panel__stat mono">
-                {{ chat.runPanel.thoughts.length }} 思考
-                <template v-if="chat.running"> · {{ chat.runPanel.toolCalls.filter(t => t.status === 'running').length }} 工具运行中</template>
+                已完成 {{ doneTaskCount }}/{{ chat.runPanel.plan?.length ?? 0 }}
               </span>
-              <span v-if="chat.runPanel.done" class="run-panel__done">完成</span>
+              <span v-if="!chat.running" class="run-panel__done">{{ chat.runPanel.phase || '完成' }}</span>
             </div>
-            <div v-if="runPanelOpen && (chat.runPanel.logs.length || chat.runPanel.thoughts.length)" class="run-panel__body">
-              <div v-if="chat.runPanel.thoughts.length" class="run-panel__sect">
-                <div class="run-panel__sect-title">思考</div>
-                <div v-for="(t, i) in chat.runPanel.thoughts" :key="i" class="run-panel__thought">{{ t }}</div>
-              </div>
-              <div v-if="chat.runPanel.logs.length" class="run-panel__sect">
-                <div class="run-panel__sect-title">进度</div>
-                <div v-for="(t, i) in chat.runPanel.logs" :key="i" class="run-panel__log">{{ t }}</div>
+            <div
+              v-if="runPanelOpen && chat.runPanel.plan && chat.runPanel.plan.length"
+              class="run-panel__body"
+            >
+              <!-- 任务列表：分步骤同步展示，跑完打标记 -->
+              <div class="run-panel__sect">
+                <div
+                  v-for="t in chat.runPanel.plan"
+                  :key="t.taskId"
+                  class="rp-task"
+                  :class="'rp-task--' + t.status"
+                >
+                  <span class="rp-task__dot" />
+                  <span class="rp-task__title">{{ t.title }}</span>
+                  <span class="rp-task__tag">{{ taskStatusLabel(t.status) }}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -439,6 +475,26 @@ async function welcomeFiles(e: Event) {
       </div>
     </div>
   </div>
+
+  <!-- 回滚到节点二次确认：全局唯一弹窗，Teleport 到 body 脱离消息子树，规避被后续消息覆盖、按钮点不到；
+       透明遮罩点击即关闭，弹窗本体 stop 阻止冒泡 -->
+  <Teleport to="body">
+    <div v-if="chat.confirmingRollbackId" class="rb-backdrop" @click="chat.cancelRollbackNode">
+      <div class="rb-confirm" :style="rbStyle" @click.stop>
+        <p class="rb-confirm__text">回滚到此节点将删除本条之后的全部消息，确认？</p>
+        <div class="rb-confirm__actions">
+          <button
+            class="rb-confirm__btn rb-confirm__btn--primary"
+            :disabled="chat.rollingBackNode"
+            @click="chat.confirmRollbackNode"
+          >
+            确认
+          </button>
+          <button class="rb-confirm__btn" @click="chat.cancelRollbackNode">取消</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -515,25 +571,115 @@ async function welcomeFiles(e: Event) {
 .run-panel__sect {
   margin-top: 4px;
 }
-.run-panel__sect-title {
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  color: var(--text-3);
-  margin-bottom: 3px;
-}
-.run-panel__thought,
-.run-panel__log {
-  font-size: 11px;
-  line-height: 1.5;
+
+/* 执行面板任务列表：分步骤同步展示，跑完打标记 */
+.rp-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
   color: var(--text-2);
-  white-space: pre-wrap;
-  word-break: break-word;
-  border-left: 2px solid var(--border);
-  padding-left: 8px;
-  margin: 2px 0;
 }
-.run-panel__thought {
+.rp-task__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+.rp-task--running .rp-task__dot {
+  background: var(--accent);
+  animation: thinkingPulse 1.1s ease-in-out infinite;
+}
+.rp-task--done .rp-task__dot {
+  background: var(--teal);
+}
+.rp-task--failed .rp-task__dot {
+  background: var(--danger-text);
+}
+.rp-task--ask .rp-task__dot {
+  background: var(--warn, #e0a84e);
+}
+.rp-task__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rp-task__tag {
+  font-size: 10px;
   color: var(--text-3);
+  flex-shrink: 0;
+}
+.rp-task--done .rp-task__title {
+  color: var(--text-1);
+}
+.rp-task--done .rp-task__tag {
+  color: var(--teal);
+}
+.rp-task--failed .rp-task__tag {
+  color: var(--danger-text);
+}
+
+/* 回滚到节点：全局二次确认弹窗（Teleport 到 body，脱离消息子树，按钮可点击） */
+.rb-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: transparent;
+}
+.rb-confirm {
+  position: fixed;
+  width: 248px;
+  padding: 12px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-8);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  text-align: left;
+}
+.rb-confirm__text {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-1);
+}
+.rb-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.rb-confirm__btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+.rb-confirm__btn:hover {
+  color: var(--accent-text);
+  background: var(--accent-dim);
+  border-color: var(--accent-border);
+}
+.rb-confirm__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.rb-confirm__btn--primary {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.rb-confirm__btn--primary:hover:not(:disabled) {
+  filter: brightness(1.05);
 }
 
 /* ---- 右侧工具栏（参与 flex 布局，占宽度；可整体收缩） ---- */

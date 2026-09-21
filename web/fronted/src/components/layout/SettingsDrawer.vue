@@ -2,8 +2,8 @@
 import { ref, watch, onMounted } from 'vue'
 import Icon from '@/components/common/Icon.vue'
 import Badge from '@/components/common/Badge.vue'
-import { modelApi, permissionApi, workspaceApi, systemApi } from '@/api'
-import type { ModelConfig, ModelUsage, PermissionRule, ProbeResult } from '@/api/types'
+import { modelApi, permissionApi, workspaceApi, systemApi, ruleApi, presetApi } from '@/api'
+import type { ModelConfig, ModelUsage, PermissionRule, ProbeResult, RuleItem, AgentPresetBundle } from '@/api/types'
 import { useModelStore } from '@/stores/model'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useThemeStore } from '@/stores/theme'
@@ -401,12 +401,174 @@ async function openRules(workspaceId?: string) {
   }
 }
 
-// ---- Agent 预设 ----
-const temperature = ref(0.7)
-const maxSteps = ref(20)
-const subAgents = ref('4')
-const ctxWindow = ref('128k')
-const autoRetry = ref(true)
+// ---- 多条规则（全局 / 项目） ----
+/** 规则编辑范围：全局 or 当前工作空间项目。 */
+const ruleScope = ref<'global' | 'project'>('global')
+/** 当前作用域下的规则列表（编辑副本，保存时整表提交）。 */
+const ruleItems = ref<RuleItem[]>([])
+/** 每个作用域的规则列表缓存（切换作用域时避免重复请求）。 */
+const ruleCache = ref<Record<'global' | 'project', RuleItem[]>>({ global: [], project: [] })
+const ruleLoading = ref(false)
+const ruleSaving = ref(false)
+/** 规则存储形态（single-file / multi-file），用于面板底部提示。 */
+const ruleStorage = ref<'single-file' | 'multi-file'>('single-file')
+
+/** 拉取规则（全局 + 项目一次取回，分别缓存）。 */
+async function loadRuleItems() {
+  ruleLoading.value = true
+  try {
+    const bundle = await ruleApi.list(workspace.current?.workspaceId)
+    ruleStorage.value = bundle.storage
+    ruleCache.value = {
+      global: (bundle.global ?? []).map((r) => ({ ...r })),
+      project: (bundle.project ?? []).map((r) => ({ ...r })),
+    }
+    ruleItems.value = ruleCache.value[ruleScope.value]
+  } catch (e) {
+    toast.error((e as Error).message)
+    ruleCache.value = { global: [], project: [] }
+    ruleItems.value = []
+  } finally {
+    ruleLoading.value = false
+  }
+}
+
+/** 切换作用域：优先用本地缓存，避免多余请求。 */
+function switchRuleScope(scope: 'global' | 'project') {
+  ruleScope.value = scope
+  ruleItems.value = ruleCache.value[scope]
+}
+
+/** 新增一条空白规则（名称可留待用户填写，保存前做非空校验）。 */
+function addRule() {
+  ruleItems.value.push({
+    name: '',
+    content: '',
+    enabled: true,
+    scope: ruleScope.value,
+  })
+}
+
+/** 删除规则（本地删除，点保存后落盘；作用于当前作用域）。 */
+function removeRule(index: number) {
+  ruleItems.value.splice(index, 1)
+}
+
+/** 保存当前作用域规则并同步缓存。 */
+async function saveRuleItems() {
+  if (ruleScope.value === 'project' && !workspace.current) {
+    toast.error('请先选择工作空间')
+    return
+  }
+  const bad = ruleItems.value.findIndex((r) => !r.name.trim())
+  if (bad >= 0) {
+    toast.error(`第 ${bad + 1} 条规则缺少名称`)
+    return
+  }
+  const empty = ruleItems.value.findIndex((r) => !r.content.trim())
+  if (empty >= 0) {
+    toast.error(`第 ${empty + 1} 条规则内容为空`)
+    return
+  }
+  ruleSaving.value = true
+  try {
+    const payload = {
+      workspaceId: ruleScope.value === 'project' ? workspace.current?.workspaceId : undefined,
+      scope: ruleScope.value,
+      rules: ruleItems.value.map((r) => ({ ...r, scope: ruleScope.value })),
+    }
+    await ruleApi.save(payload as any)
+    ruleCache.value[ruleScope.value] = ruleItems.value.map((r) => ({ ...r }))
+    toast.success(`已保存 ${ruleItems.value.length} 条${ruleScope.value === 'global' ? '全局' : '项目'}规则`)
+  } catch (e) {
+    toast.error((e as Error).message)
+  } finally {
+    ruleSaving.value = false
+  }
+}
+
+// ---- Agent 预设（真实接线到后端 CoreProperties / 运行时） ----
+/** 预设总览：preset 为用户配置，effective 为与 yml 合成后的生效值，overridden 标记来源。 */
+const presetBundle = ref<AgentPresetBundle | null>(null)
+const presetSaving = ref(false)
+/** 本地编辑副本（null 字段表示「沿用默认」，UI 上以「跟随默认」展示）。 */
+const presetDraft = ref({
+  maxSteps: undefined as number | undefined,
+  subagentEnabled: undefined as boolean | undefined,
+  subagentMaxConcurrency: undefined as number | undefined,
+  verificationEnabled: undefined as boolean | undefined,
+  contextThreshold: undefined as number | undefined,
+  autoRetry: undefined as boolean | undefined,
+  systemPrompt: '',
+})
+
+/** 拉取预设，并把 null 映射为 undefined（表示沿用默认）。 */
+async function loadPreset() {
+  try {
+    const b = await presetApi.get()
+    presetBundle.value = b
+    presetDraft.value = {
+      maxSteps: b.preset.maxSteps ?? undefined,
+      subagentEnabled: b.preset.subagentEnabled ?? undefined,
+      subagentMaxConcurrency: b.preset.subagentMaxConcurrency ?? undefined,
+      verificationEnabled: b.preset.verificationEnabled ?? undefined,
+      contextThreshold: b.preset.contextThreshold ?? undefined,
+      autoRetry: b.preset.autoRetry ?? undefined,
+      systemPrompt: b.preset.systemPrompt ?? '',
+    }
+  } catch (e) {
+    toast.error((e as Error).message)
+  }
+}
+
+/** 某字段当前是否被用户自定义（用于展示「已自定义 / 跟随默认」标签）。 */
+function isOverridden(key: string): boolean {
+  return presetBundle.value?.overridden?.[key] === true
+}
+
+/** 保存预设：undefined 字段序列化为 null，后端据此回退 yml 默认。 */
+async function savePreset() {
+  presetSaving.value = true
+  try {
+    const d = presetDraft.value
+    const b = await presetApi.save({
+      maxSteps: d.maxSteps ?? null,
+      subagentEnabled: d.subagentEnabled ?? null,
+      subagentMaxConcurrency: d.subagentMaxConcurrency ?? null,
+      verificationEnabled: d.verificationEnabled ?? null,
+      contextThreshold: d.contextThreshold ?? null,
+      autoRetry: d.autoRetry ?? null,
+      systemPrompt: d.systemPrompt.trim() || null,
+    })
+    presetBundle.value = b
+    toast.success('Agent 预设已保存，下次任务生效')
+  } catch (e) {
+    toast.error((e as Error).message)
+  } finally {
+    presetSaving.value = false
+  }
+}
+
+/** 恢复出厂：清空预设，全部沿用 application.yml 默认值。 */
+async function resetPreset() {
+  if (!confirm('确认将 Agent 预设恢复为默认？（自定义提示词也会被清空）')) return
+  try {
+    const b = await presetApi.reset()
+    presetBundle.value = b
+    presetDraft.value = {
+      maxSteps: undefined,
+      subagentEnabled: undefined,
+      subagentMaxConcurrency: undefined,
+      verificationEnabled: undefined,
+      contextThreshold: undefined,
+      autoRetry: undefined,
+      systemPrompt: '',
+    }
+    toast.success('已恢复默认预设')
+  } catch (e) {
+    toast.error((e as Error).message)
+  }
+}
 
 // 打开时刷新数据
 watch(
@@ -414,7 +576,8 @@ watch(
   async (v) => {
     if (v) {
       tab.value = 'general'
-      await Promise.all([modelStore.load(), loadRules(), loadUsages()])
+      ruleScope.value = 'global'
+      await Promise.all([modelStore.load(), loadRules(), loadUsages(), loadRuleItems(), loadPreset()])
     }
   },
 )
@@ -522,28 +685,75 @@ onMounted(async () => {
                 </div>
 
                 <div class="sg__row">
-                  <div class="sg__head">规则（两级 LUCKY.md）</div>
-                </div>
-                <div class="rules-files">
-                  <div class="rules-file">
-                    <span class="rules-file__icon"><Icon name="book" :size="13" /></span>
-                    <div class="rules-file__main">
-                      <span class="rules-file__name">全局规则</span>
-                      <span class="rules-file__path mono ellipsis">框架根 LUCKY.md（对所有项目生效）</span>
-                    </div>
-                    <button class="btn btn--ghost btn--sm" @click="openRules()">打开</button>
+                  <div class="sg__head">规则（多条，Web 直接编辑）</div>
+                  <div class="sg__acts">
+                    <button class="btn btn--ghost btn--sm" @click="addRule"><Icon name="plus" :size="12" /> 加规则</button>
+                    <button class="btn btn--primary btn--sm" :disabled="ruleSaving" @click="saveRuleItems">
+                      {{ ruleSaving ? '保存中…' : '保存' }}
+                    </button>
                   </div>
-                  <div v-if="workspace.current" class="rules-file">
-                    <span class="rules-file__icon"><Icon name="book" :size="13" /></span>
-                    <div class="rules-file__main">
-                      <span class="rules-file__name">项目规则（{{ workspace.current.name }}）</span>
-                      <span class="rules-file__path mono ellipsis">{{ workspace.current.path }} 下的 LUCKY.md</span>
+                </div>
+                <!-- 作用域切换：全局 / 当前项目 -->
+                <div class="rule-scope">
+                  <button
+                    class="rule-scope__btn"
+                    :class="{ 'rule-scope__btn--on': ruleScope === 'global' }"
+                    @click="switchRuleScope('global')"
+                  >
+                    全部项目（全局）
+                  </button>
+                  <button
+                    class="rule-scope__btn"
+                    :class="{ 'rule-scope__btn--on': ruleScope === 'project' }"
+                    :disabled="!workspace.current"
+                    @click="switchRuleScope('project')"
+                  >
+                    {{ workspace.current ? `仅 ${workspace.current.name}` : '仅当前项目' }}
+                  </button>
+                </div>
+
+                <div v-if="ruleLoading" class="empty">规则加载中…</div>
+                <div v-else-if="ruleItems.length === 0" class="empty">
+                  暂无{{ ruleScope === 'global' ? '全局' : '项目' }}规则，点击「加规则」新建
+                </div>
+                <div v-else class="rule-editor">
+                  <div v-for="(r, i) in ruleItems" :key="i" class="rule-item" :class="{ 'rule-item--off': !r.enabled }">
+                    <div class="rule-item__head">
+                      <button
+                        type="button"
+                        class="switch switch--tiny"
+                        :class="{ 'switch--on': r.enabled }"
+                        role="switch"
+                        :aria-checked="r.enabled"
+                        :title="r.enabled ? '已启用（点击停用）' : '已停用（点击启用）'"
+                        @click="r.enabled = !r.enabled"
+                      >
+                        <span class="switch__knob" />
+                      </button>
+                      <input v-model="r.name" class="input rule-item__name" placeholder="规则名（如：提交规范）" />
+                      <span class="rule-item__scope mono">{{ ruleScope === 'global' ? '全局' : '项目' }}</span>
+                      <button class="icon-c icon-c--danger" title="删除该规则" @click="removeRule(i)">
+                        <Icon name="trash" :size="13" />
+                      </button>
                     </div>
-                    <button class="btn btn--ghost btn--sm" @click="openRules(workspace.current.workspaceId)">打开</button>
+                    <textarea
+                      v-model="r.content"
+                      class="input rule-item__body"
+                      rows="3"
+                      placeholder="规则内容，将作为 system prompt 的一部分注入模型"
+                    />
                   </div>
                 </div>
                 <p class="pane-hint text-3">
-                  规则文件每次模型调用前读取、保存即生效；项目规则优先于全局规则。
+                  规则保存于
+                  <span class="mono">
+                    {{ ruleScope === 'global' ? '框架根 LUCKY.md' : (workspace.current?.path || '项目根') + '/LUCKY.md' }}
+                  </span>
+                  的 <span class="mono">## 分节</span>（{{ ruleStorage === 'multi-file' ? '当前为多文件目录模式' : '单文件模式' }}）；
+                  每次模型调用前读取，保存即生效；项目规则优先于全局规则。
+                  <button class="link-btn" @click="openRules(ruleScope === 'project' ? workspace.current?.workspaceId : undefined)">
+                    用系统编辑器打开
+                  </button>
                 </p>
 
                 <div class="sg__row">
@@ -632,56 +842,149 @@ onMounted(async () => {
 
               <!-- Agent 预设 -->
               <section v-else class="sg">
-                <div class="sg__head">生成参数</div>
-                <div class="field">
-                  <div class="field__row">
-                    <label class="field__label">温度</label>
-                    <span class="field__val mono">{{ temperature.toFixed(1) }}</span>
-                  </div>
-                  <input v-model.number="temperature" type="range" min="0" max="2" step="0.1" class="range" />
-                </div>
-                <div class="field">
-                  <div class="field__row">
-                    <label class="field__label">最大步数</label>
-                    <span class="field__val mono">{{ maxSteps }}</span>
-                  </div>
-                  <input v-model.number="maxSteps" type="range" min="1" max="50" step="1" class="range" />
-                </div>
-                <div class="field-row">
-                  <label class="field">
-                    <span class="field__label">并行子代理</span>
-                    <select v-model="subAgents" class="input input--select">
-                      <option value="1">1（串行）</option>
-                      <option value="2">2</option>
-                      <option value="4">4</option>
-                      <option value="8">8</option>
-                    </select>
-                  </label>
-                  <label class="field">
-                    <span class="field__label">上下文窗口</span>
-                    <select v-model="ctxWindow" class="input input--select">
-                      <option value="32k">32k</option>
-                      <option value="128k">128k</option>
-                      <option value="200k">200k</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="field field--switch">
-                  <div class="field__row">
-                    <label class="field__label">失败步骤自动重试</label>
-                    <button
-                      type="button"
-                      class="switch"
-                      :class="{ 'switch--on': autoRetry }"
-                      role="switch"
-                      :aria-checked="autoRetry"
-                      @click="autoRetry = !autoRetry"
-                    >
-                      <span class="switch__knob" />
+                <div class="sg__row">
+                  <div class="sg__head">Agent 预设（保存后对后续任务生效）</div>
+                  <div class="sg__acts">
+                    <button class="btn btn--ghost btn--sm" @click="resetPreset">恢复默认</button>
+                    <button class="btn btn--primary btn--sm" :disabled="presetSaving" @click="savePreset">
+                      {{ presetSaving ? '保存中…' : '保存' }}
                     </button>
                   </div>
                 </div>
-                <p class="pane-hint text-3">预设将作为后续 Agent 任务的默认参数（本地生效）。</p>
+                <p class="pane-hint text-3">
+                  未设置的项 <b>跟随默认</b>（取自 <span class="mono">application.yml</span>），
+                  修改后保存即生效，无需重启；右侧标签显示该项当前来源。
+                </p>
+
+                <!-- ACT 最大步数 -->
+                <div class="field field--switch">
+                  <div class="field__row">
+                    <label class="field__label">
+                      最大步数（ACT）
+                      <span class="src-tag" :class="isOverridden('maxSteps') ? 'src-tag--own' : 'src-tag--def'">
+                        {{ isOverridden('maxSteps') ? '已自定义' : '跟随默认' }}
+                      </span>
+                    </label>
+                    <span class="field__val mono">
+                      {{ presetDraft.maxSteps ?? presetBundle?.effective.maxSteps ?? 30 }}
+                    </span>
+                  </div>
+                  <input
+                    v-model.number="presetDraft.maxSteps"
+                    type="range"
+                    min="1"
+                    max="50"
+                    step="1"
+                    class="range"
+                  />
+                </div>
+
+                <!-- 上下文压缩阈值 -->
+                <div class="field field--switch">
+                  <div class="field__row">
+                    <label class="field__label">
+                      上下文压缩阈值
+                      <span class="src-tag" :class="isOverridden('contextThreshold') ? 'src-tag--own' : 'src-tag--def'">
+                        {{ isOverridden('contextThreshold') ? '已自定义' : '跟随默认' }}
+                      </span>
+                    </label>
+                    <span class="field__val mono">{{ (presetDraft.contextThreshold ?? presetBundle?.effective.contextThreshold ?? 0.9).toFixed(2) }}</span>
+                  </div>
+                  <input
+                    v-model.number="presetDraft.contextThreshold"
+                    type="range"
+                    min="0.5"
+                    max="1"
+                    step="0.05"
+                    class="range"
+                  />
+                </div>
+
+                <!-- 子代理 -->
+                <div class="field-row">
+                  <label class="field">
+                    <span class="field__label">
+                      多 Agent（子代理）
+                      <span class="src-tag" :class="isOverridden('subagentEnabled') ? 'src-tag--own' : 'src-tag--def'">
+                        {{ isOverridden('subagentEnabled') ? '已自定义' : '跟随默认' }}
+                      </span>
+                    </span>
+                    <select v-model="presetDraft.subagentEnabled" class="input input--select">
+                      <option :value="undefined">跟随默认（{{ presetBundle?.effective.subagentEnabled ? '启用' : '停用' }}）</option>
+                      <option :value="true">启用</option>
+                      <option :value="false">停用（单 Agent）</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field__label">
+                      并行子代理上限
+                      <span class="src-tag" :class="isOverridden('subagentMaxConcurrency') ? 'src-tag--own' : 'src-tag--def'">
+                        {{ isOverridden('subagentMaxConcurrency') ? '已自定义' : '跟随默认' }}
+                      </span>
+                    </span>
+                    <select v-model="presetDraft.subagentMaxConcurrency" class="input input--select">
+                      <option :value="undefined">跟随默认（{{ presetBundle?.effective.subagentMaxConcurrency ?? 4 }}）</option>
+                      <option :value="1">1（串行）</option>
+                      <option :value="2">2</option>
+                      <option :value="4">4</option>
+                      <option :value="8">8</option>
+                    </select>
+                  </label>
+                </div>
+
+                <!-- 客观验证开关 -->
+                <div class="field field--switch">
+                  <div class="field__row">
+                    <label class="field__label">
+                      客观验证链（文件/命令信号覆盖模型自述）
+                      <span class="src-tag" :class="isOverridden('verificationEnabled') ? 'src-tag--own' : 'src-tag--def'">
+                        {{ isOverridden('verificationEnabled') ? '已自定义' : '跟随默认' }}
+                      </span>
+                    </label>
+                    <select v-model="presetDraft.verificationEnabled" class="input input--select preset-select">
+                      <option :value="undefined">跟随默认（{{ presetBundle?.effective.verificationEnabled ? '启用' : '停用' }}）</option>
+                      <option :value="true">启用</option>
+                      <option :value="false">停用</option>
+                    </select>
+                  </div>
+                </div>
+
+                <!-- 失败重试 -->
+                <div class="field field--switch">
+                  <div class="field__row">
+                    <label class="field__label">
+                      失败步骤自动重试
+                      <span class="src-tag" :class="isOverridden('autoRetry') ? 'src-tag--own' : 'src-tag--def'">
+                        {{ isOverridden('autoRetry') ? '已自定义' : '跟随默认' }}
+                      </span>
+                    </label>
+                    <select v-model="presetDraft.autoRetry" class="input input--select preset-select">
+                      <option :value="undefined">跟随默认（{{ presetBundle?.effective.autoRetry ? '开启' : '关闭' }}）</option>
+                      <option :value="true">开启</option>
+                      <option :value="false">关闭（不重试）</option>
+                    </select>
+                  </div>
+                </div>
+
+                <!-- 自定义系统提示词 -->
+                <div class="field">
+                  <label class="field__label">自定义系统提示词（追加在基座与人格之后）</label>
+                  <textarea
+                    v-model="presetDraft.systemPrompt"
+                    class="input preset-prompt"
+                    rows="5"
+                    placeholder="例如：回答一律使用简体中文；结论先行；代码示例必须可直接运行。"
+                  />
+                  <p class="pane-hint text-3">
+                    此处填写的内容会作为「自定义指令」注入 system prompt，与规则（全局/项目）叠加生效；
+                    留空表示不追加。基座提示词请到「通用设置 → 规则」或框架根 LUCKY.md 修改。
+                  </p>
+                </div>
+
+                <p v-if="presetBundle" class="pane-hint text-3">
+                  当前编排器：<span class="mono">{{ presetBundle.effective.orchestratorMode }}</span>（在
+                  <span class="mono">application.yml → core.orchestrator-mode</span> 修改后重启生效）。
+                </p>
               </section>
             </div>
           </div>
@@ -1741,48 +2044,105 @@ onMounted(async () => {
   border-radius: var(--r-8);
 }
 
-/* 规则文件（两级 LUCKY.md） */
-.rules-files {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.rules-file {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+/* 多条规则编辑器（全局 / 项目，Web 直接编辑） */
+.rule-scope {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
   background: var(--bg-1);
   border: 1px solid var(--border);
   border-radius: var(--r-8);
-  padding: 9px 12px;
+  align-self: flex-start;
 }
-.rules-file__icon {
+.rule-scope__btn {
+  padding: 5px 12px;
+  border: none;
+  background: none;
+  border-radius: var(--r-6);
+  color: var(--text-2);
+  font-size: var(--fs-12);
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.rule-scope__btn:hover:not(:disabled) {
+  color: var(--text-1);
+}
+.rule-scope__btn--on {
+  background: var(--accent-dim);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+.rule-scope__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.rule-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rule-item {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-8);
+  padding: 9px 11px;
+  transition: border-color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+.rule-item--off {
+  opacity: 0.55;
+}
+.rule-item__head {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--r-6);
-  background: var(--bg-0);
-  border: 1px solid var(--border);
-  color: var(--accent-text);
-  flex-shrink: 0;
+  gap: 8px;
 }
-.rules-file__main {
+.rule-item__name {
   flex: 1;
   min-width: 0;
-}
-.rules-file__name {
-  display: block;
-  font-size: var(--fs-12);
   font-weight: 600;
-  color: var(--text-0);
 }
-.rules-file__path {
-  display: block;
-  margin-top: 2px;
+.rule-item__scope {
+  flex-shrink: 0;
   font-size: 11px;
   color: var(--text-3);
+  padding: 2px 7px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+}
+.rule-item__body {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
+  line-height: 1.55;
+  font-size: var(--fs-12);
+}
+/* 行内小开关（规则启停） */
+.switch--tiny {
+  width: 28px;
+  height: 16px;
+}
+.switch--tiny .switch__knob {
+  width: 11px;
+  height: 11px;
+}
+.switch--tiny.switch--on .switch__knob {
+  transform: translateX(12px);
+}
+.link-btn {
+  padding: 0;
+  margin-left: 6px;
+  background: none;
+  border: none;
+  color: var(--accent-text);
+  font-size: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-btn:hover {
+  color: var(--accent-strong);
 }
 
 /* 规则 */
@@ -1864,6 +2224,38 @@ onMounted(async () => {
 .rule__del:hover {
   color: var(--danger-text);
   background: var(--danger-dim);
+}
+
+/* 预设字段的来源标签（已自定义 / 跟随默认） */
+.src-tag {
+  margin-left: 7px;
+  padding: 1px 7px;
+  border-radius: var(--r-4);
+  font-size: 10px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+.src-tag--own {
+  background: var(--accent-dim);
+  color: var(--accent-text);
+}
+.src-tag--def {
+  background: var(--bg-2);
+  color: var(--text-3);
+}
+
+/* 预设：字段内右置下拉（跟随默认 / 启用 / 停用） */
+.preset-select {
+  width: 180px;
+  flex-shrink: 0;
+}
+
+/* 预设：自定义系统提示词多行输入 */
+.preset-prompt {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.6;
+  font-size: var(--fs-13);
 }
 
 /* 通用 */

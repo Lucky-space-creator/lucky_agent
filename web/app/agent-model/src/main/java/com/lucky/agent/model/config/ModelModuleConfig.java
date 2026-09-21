@@ -3,6 +3,7 @@ package com.lucky.agent.model.config;
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.model.support.prompt.BasePromptStore;
 import com.lucky.agent.model.support.prompt.PromptCacheService;
+import com.lucky.agent.model.support.prompt.RuleStore;
 import com.lucky.agent.model.support.prompt.SystemPromptAssembler;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -27,6 +28,15 @@ public class ModelModuleConfig {
     @Bean
     public BasePromptStore basePromptStore(WorkspaceDirs dirs) {
         return new BasePromptStore(dirs);
+    }
+
+    /**
+     * 规则存储：多条全局 / 项目规则的读写与注入拼装（默认 {@code LUCKY.md} 内 {@code ## 分节}，
+     * 高级模式改用 {@code rules/global}、{@code rules/project} 一规则一文件）。
+     */
+    @Bean
+    public RuleStore ruleStore(WorkspaceDirs dirs) {
+        return new RuleStore(dirs);
     }
 
     /** 提示词缓存服务（含命中统计，供状态面板查询）。 */
