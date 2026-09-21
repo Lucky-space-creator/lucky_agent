@@ -37,13 +37,36 @@ public class GlobalExceptionHandler {
         return Map.of("code", "BAD_REQUEST", "error", e.getMessage());
     }
 
-    /** 请求体/参数解析失败（WebFlux 输入异常）。*/
+    /**
+     * 请求体/参数解析失败（WebFlux 输入异常）。
+     *
+     * <p><b>为何不直接把 {@code e.getReason()} 回传前端：</b>Jackson 抛出的原始 reason 是
+     * {@code "Failed to read HTTP message"} 这类英文框架内部措辞，既不含出错字段、也无法指导用户，
+     * 还会让前端 toast 显示一串「报错黑话」。这里统一改写为可读中文，把真正的细节留在服务端日志。</p>
+     */
     @ExceptionHandler(ServerWebInputException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public Map<String, Object> handleServerWebInput(ServerWebInputException e) {
-        log.warn("请求输入异常：{}", e.getMessage());
-        return Map.of("code", "BAD_REQUEST",
-                "error", e.getReason() == null ? "请求参数不合法" : e.getReason());
+        String reason = e.getReason();
+        log.warn("请求输入异常：{} | reason={}", e.getMessage(), reason);
+        return Map.of("code", "BAD_REQUEST", "error", readableInputMessage(reason));
+    }
+
+    /** 把框架原始输入异常 reason 翻译为用户可读的中文说明。 */
+    private String readableInputMessage(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return "请求参数不合法";
+        }
+        String lower = reason.toLowerCase();
+        // Jackson 反序列化失败：最常见的就是「枚举字面量大小写不符」与「字段类型不匹配」
+        if (lower.contains("failed to read http message")) {
+            return "请求体解析失败：字段类型或枚举值不合法（请对照接口契约检查请求参数）";
+        }
+        if (lower.contains("no enum constant") || lower.contains("enum")) {
+            return "请求体解析失败：枚举字段取值不在允许范围内";
+        }
+        // 其余情况给出通用前缀，避免把框架内部措辞原样暴露
+        return "请求参数不合法：" + reason;
     }
 
     /** 路由/资源未命中（状态码透传）。*/

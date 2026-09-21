@@ -1,6 +1,14 @@
 server:
   port: 8080
 
+# 前端静态资源托管（生产形态：后端 8080 直接托管 web/fronted/dist）
+# 留空 = 自动探测（相对工作目录 + 相对 classes 位置的候选路径），覆盖从 web/app
+# 与从仓库根两种启动方式；若部署到自定义目录，填绝对路径显式覆盖，例如：
+#   lucky.web.frontend-dist: E:/JavaPro/lucky_agent/web/fronted/dist
+lucky:
+  web:
+    frontend-dist: ""
+
 spring:
   application:
     name: lucky-agent

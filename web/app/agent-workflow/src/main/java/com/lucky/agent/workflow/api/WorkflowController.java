@@ -107,7 +107,7 @@ public class WorkflowController {
     public WorkflowInstance trigger(@PathVariable String id,
                                     @RequestBody(required = false) TriggerRequest request) {
         TriggerRequest req = (request == null) ? TriggerRequest.empty() : request;
-        return service.trigger(id, req.variables(), req.mode());
+        return service.trigger(id, req.variables(), req.resolveMode());
     }
 
     @GetMapping("/instances")

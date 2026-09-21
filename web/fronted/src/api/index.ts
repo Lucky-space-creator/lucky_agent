@@ -248,9 +248,17 @@ export const workflowApi = {
       '/api/workflows/validate',
       def,
     ),
-  /** 触发执行（mode=sync 等待返回实例；variables 为节点入参）。 */
-  trigger: (id: string, variables?: Record<string, any>) =>
-    http.post<WorkflowInstance>(`/api/workflows/${id}/trigger`, { variables: variables ?? {}, mode: 'sync' }),
+  /**
+   * 触发执行（变量为节点入参）。
+   *
+   * <p>{@code mode} 必须传后端 {@code RunMode} 枚举名（大写 {@code SYNC} / {@code ASYNC}）；
+   * Jackson 默认吃不下小写 {@code 'sync'}，会抛
+   * {@code ServerWebInputException: Failed to read HTTP message} → HTTP 400。</p>
+   *
+   * @param mode SYNC=同步等待返回完成态实例；ASYNC=立即返回 RUNNING 实例
+   */
+  trigger: (id: string, variables?: Record<string, any>, mode: 'SYNC' | 'ASYNC' = 'SYNC') =>
+    http.post<WorkflowInstance>(`/api/workflows/${id}/trigger`, { variables: variables ?? {}, mode }),
   /** 运行实例列表。 */
   instances: () => http.get<WorkflowInstance[]>('/api/workflows/instances'),
   /** 单个运行实例详情。 */
