@@ -1,5 +1,6 @@
 package com.lucky.agent.workflow.domain;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.LinkedHashMap;
@@ -10,6 +11,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * 变量作用域：工作流/节点私有的键值容器。
  * <p>工作流级作用域在节点间共享；节点级作用域仅在一次节点执行内有效。
  * 通过 {@link #snapshot()} 可创建隔离副本，避免并行分支互相污染。</p>
+ *
+ * <p>序列化契约：以 {@code {"data": {...}}} 形态往返（{@link #getData()} 出、
+ * {@link #VariableScope(Map)} 入），供运行实例持久化后重新载入。</p>
  */
 public class VariableScope {
 
@@ -18,7 +22,9 @@ public class VariableScope {
     public VariableScope() {
     }
 
-    public VariableScope(Map<String, Object> seed) {
+    /** 种子构造；同时作为 Jackson 反序列化入口（见 {@code getData()}）。 */
+    @JsonCreator
+    public VariableScope(@JsonProperty("data") Map<String, Object> seed) {
         if (seed != null) {
             data.putAll(seed);
         }

@@ -1,0 +1,9 @@
+{"id":"wf-canvas","name":"画布往返验证","description":"P2b 契约","version":1,"enabled":true,
+ "trigger":{"type":"MANUAL","enabled":true},
+ "nodes":[
+   {"id":"start","type":"START","name":"开始","config":{},"position":{"x":40,"y":40}},
+   {"id":"tool-1","type":"TOOL","name":"列目录","config":{"toolName":"file.list","params":{"path":"config"}},"position":{"x":290,"y":156}},
+   {"id":"end","type":"END","name":"结束","config":{},"position":{"x":540,"y":40}}],
+ "edges":[
+   {"source":"start","target":"tool-1","condition":null,"label":null},
+   {"source":"tool-1","target":"end","condition":null,"label":null}]}

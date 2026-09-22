@@ -1,14 +1,6 @@
 server:
   port: 8080
 
-# 前端静态资源托管（生产形态：后端 8080 直接托管 web/fronted/dist）
-# 留空 = 自动探测（相对工作目录 + 相对 classes 位置的候选路径），覆盖从 web/app
-# 与从仓库根两种启动方式；若部署到自定义目录，填绝对路径显式覆盖，例如：
-#   lucky.web.frontend-dist: E:/JavaPro/lucky_agent/web/fronted/dist
-lucky:
-  web:
-    frontend-dist: ""
-
 spring:
   application:
     name: lucky-agent
@@ -65,6 +57,27 @@ core:
   # 条件选择（options）挂起超时（秒）：超时无人选择时自动采用推荐项继续；
   # <=0 表示不设超时（永久挂起，等待用户手动选择）
   options-timeout-sec: 300
+
+# ---------------------------------------------------------------------------
+# lucky.*：框架专属配置（同一顶层键下集中维护，勿在文件内重复声明 lucky:）
+# ---------------------------------------------------------------------------
+lucky:
+  web:
+    # 前端静态资源托管（生产形态：后端 8080 直接托管 web/fronted/dist）
+    # 留空 = 自动探测（相对工作目录 + 相对 classes 位置的候选路径），覆盖从 web/app
+    # 与从仓库根两种启动方式；若部署到自定义目录，填绝对路径显式覆盖，例如：
+    #   frontend-dist: E:/JavaPro/lucky_agent/web/fronted/dist
+    frontend-dist: ""
+  workflow:
+    # 定义与实例的落盘根目录。留空 = 使用框架必备目录 <user.home>/.lucky_agent/workflow
+    # （定义落根、运行实例落 instances/ 子目录，实例默认保留最近 200 条）。
+    # 仅在需要把工作流数据放到别处时才显式指定，例如：
+    #   storage-dir: D:/lucky-workflow
+    storage-dir: ""
+    execution:
+      # 引擎实现：legacy=自研 Kahn 调度（默认）；langgraph=LangGraph4j 状态图。
+      # 两者执行契约一致，切换对 REST/SSE/前端透明。
+      engine: legacy
 
 # Skill（渐进披露式技能加载）
 skill:

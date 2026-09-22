@@ -53,6 +53,8 @@ public class WorkspaceDirs {
     public static final String TRASH = "trash";
     /** 执行臂程序与运行态。 */
     public static final String AGENT = "agent";
+    /** 工作流定义与运行实例（agent-workflow 持久化）。 */
+    public static final String WORKFLOW = "workflow";
 
     /**
      * 每个工作空间物理路径下的「用户可见、可编辑」配置子树（非隐藏，可直接在文件管理器查看与修改）。
@@ -165,6 +167,11 @@ public class WorkspaceDirs {
         return frameworkRootPath.resolve(AGENT);
     }
 
+    /** 工作流定义与运行实例根目录：{@code <root>/workflow}（定义在根、实例在 instances/ 子目录）。 */
+    public Path workflowDir() {
+        return frameworkRootPath.resolve(WORKFLOW);
+    }
+
     /**
      * 扫描并创建全部必备目录（幂等）：缺失则自动创建，已存在则统计直接子条目数并输出汇总。
      * 磁盘满等 IO 异常抛出 {@link IllegalStateException} 交由上层提示（必备目录不可缺失）。
@@ -173,7 +180,7 @@ public class WorkspaceDirs {
         Set<Path> dirs = new LinkedHashSet<>(List.of(
                 frameworkRootPath, workspaceRootPath, defaultWorkspaceRoot(),
                 configDir(), memoryDir(), platformDir(), rollbackDir(), cacheDir(),
-                logsDir(), skillsDir(), mcpDir(), tmpDir(), trashDir(), agentDir()));
+                logsDir(), skillsDir(), mcpDir(), tmpDir(), trashDir(), agentDir(), workflowDir()));
         List<String> created = new ArrayList<>();
         List<String> existing = new ArrayList<>();
         for (Path dir : dirs) {

@@ -15,6 +15,15 @@
     <description>独立工作流模块：工作流定义/配置、流程节点与步骤管理、触发与执行、状态流转与条件控制；提供节点/连接器/调度器等可复用组件，低耦合、职责单一、便于扩展。</description>
 
     <dependencies>
+        <!-- 公共契约与目录规范。仅取 WorkspaceDirs（必备目录集中定义）：
+             WorkspaceDirs 明确要求「任何模块写盘必须经此类取路径，从编译期杜绝私自外写」，
+             本模块需把工作流定义与运行实例落到 <root>/workflow，故必须依赖。
+             仍不引入 agent-core / agent-model —— 引擎与模型能力保持解耦，
+             宿主接入通过 adapter 缝隙（LlmAdapter/ToolAdapter）完成。 -->
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-common</artifactId>
+        </dependency>
         <!-- Web 层：REST 接口 + SSE 执行监控。
              只引入 spring-web（注解）与 spring-webflux（响应式 SSE），**不引入 spring-boot-starter-web**：
              后者会带入 spring-boot-starter-tomcat + spring-webmvc，使宿主的

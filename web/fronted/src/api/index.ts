@@ -19,6 +19,7 @@ import type {
   SystemOpenResult,
   WorkflowDef,
   WorkflowInstance,
+  WorkflowNodeTypeMeta,
   Workspace,
 } from './types'
 
@@ -263,4 +264,9 @@ export const workflowApi = {
   instances: () => http.get<WorkflowInstance[]>('/api/workflows/instances'),
   /** 单个运行实例详情。 */
   instance: (instanceId: string) => http.get<WorkflowInstance>(`/api/workflows/instances/${instanceId}`),
+  /**
+   * 节点类型元数据（组件面板 + 属性表单的数据源）。
+   * 由后端 NodeTypeCatalog 下发，避免前端硬编码 config schema 造成两端漂移。
+   */
+  nodeTypes: () => http.get<WorkflowNodeTypeMeta[]>('/api/workflows/node-types'),
 }

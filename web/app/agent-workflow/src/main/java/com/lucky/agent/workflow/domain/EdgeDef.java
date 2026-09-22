@@ -1,5 +1,6 @@
 package com.lucky.agent.workflow.domain;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
@@ -7,7 +8,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * <p>{@code condition} 为可选的条件表达式（见 {@code ConditionEvaluator}）：
  * 为空表示无条件；非空时仅当表达式对当前全局作用域求值结果为 true 才走此边。
  * 条件边天然实现了「分支 / 条件触发」语义。</p>
+ *
+ * <p>{@code ignoreUnknown=true}：{@code isConditional()} 会作为 {@code conditional} 出现在
+ * 序列化输出中，落盘读回时需忽略（详见 {@link WorkflowDef}）。</p>
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record EdgeDef(
         @JsonProperty("id") String id,
         @JsonProperty("source") String source,

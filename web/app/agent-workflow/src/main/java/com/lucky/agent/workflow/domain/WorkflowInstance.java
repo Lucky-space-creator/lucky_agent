@@ -1,5 +1,7 @@
 package com.lucky.agent.workflow.domain;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.lucky.agent.workflow.domain.enums.WorkflowStatus;
 
 import java.util.LinkedHashMap;
@@ -28,6 +30,39 @@ public class WorkflowInstance {
         this.instanceId = UUID.randomUUID().toString();
         this.workflowId = workflowId;
         this.workflowName = workflowName;
+    }
+
+    /**
+     * 反序列化专用构造：从持久化快照还原运行实例。
+     * <p>运行期一律走 {@link #WorkflowInstance(String, String)}（自动生成 instanceId、status 置 RUNNING）；
+     * 本构造仅由仓储在载入历史实例时使用，勿在引擎链路中调用。
+     * {@code nodeStartOrder} 属运行期排序辅助结构，不持久化，此处重建为空。</p>
+     */
+    @JsonCreator
+    public WorkflowInstance(@JsonProperty("instanceId") String instanceId,
+                            @JsonProperty("workflowId") String workflowId,
+                            @JsonProperty("workflowName") String workflowName,
+                            @JsonProperty("status") WorkflowStatus status,
+                            @JsonProperty("variables") VariableScope variables,
+                            @JsonProperty("nodeInstances") Map<String, NodeInstance> nodeInstances,
+                            @JsonProperty("startedAt") long startedAt,
+                            @JsonProperty("endedAt") long endedAt,
+                            @JsonProperty("currentNodeId") String currentNodeId,
+                            @JsonProperty("error") String error) {
+        this.instanceId = instanceId;
+        this.workflowId = workflowId;
+        this.workflowName = workflowName;
+        this.status = (status == null) ? WorkflowStatus.RUNNING : status;
+        if (variables != null) {
+            this.variables.merge(variables);
+        }
+        if (nodeInstances != null) {
+            this.nodeInstances.putAll(nodeInstances);
+        }
+        this.startedAt = startedAt;
+        this.endedAt = endedAt;
+        this.currentNodeId = currentNodeId;
+        this.error = error;
     }
 
     public NodeInstance node(String nodeId, String nodeName, com.lucky.agent.workflow.domain.enums.WorkflowNodeType type) {

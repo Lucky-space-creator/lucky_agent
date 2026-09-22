@@ -1,6 +1,7 @@
 package com.lucky.agent.workflow.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.workflow.adapter.LlmAdapter;
 import com.lucky.agent.workflow.adapter.LocalSandboxAdapter;
 import com.lucky.agent.workflow.adapter.NoopLlmAdapter;
@@ -27,12 +28,15 @@ import com.lucky.agent.workflow.engine.trigger.ManualTrigger;
 import com.lucky.agent.workflow.engine.trigger.Trigger;
 import com.lucky.agent.workflow.engine.trigger.WorkflowScheduler;
 import com.lucky.agent.workflow.event.WorkflowEventBus;
+import com.lucky.agent.workflow.repository.FileWorkflowInstanceRepository;
 import com.lucky.agent.workflow.repository.FileWorkflowRepository;
 import com.lucky.agent.workflow.repository.InMemoryWorkflowInstanceRepository;
 import com.lucky.agent.workflow.repository.InMemoryWorkflowRepository;
 import com.lucky.agent.workflow.repository.WorkflowInstanceRepository;
 import com.lucky.agent.workflow.repository.WorkflowRepository;
 import com.lucky.agent.workflow.service.WorkflowService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -65,6 +69,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>所有 Bean 仍标注 {@link ConditionalOnMissingBean}，宿主可用自定义实现覆盖。</p>
  */
+@Slf4j
 @Configuration
 @EnableConfigurationProperties(WorkflowProperties.class)
 public class WorkflowAutoConfiguration {
@@ -124,20 +129,55 @@ public class WorkflowAutoConfiguration {
 
     // ---------------- 仓储 ----------------
 
+    /**
+     * 工作流定义仓储：优先落盘，无可用目录时才退化为内存实现。
+     *
+     * <p><b>解析顺序：</b>显式配置 {@code lucky.workflow.storage-dir} → 框架必备目录
+     * {@code <root>/workflow}（即 {@code ~/.lucky_agent/workflow}，由 {@link WorkspaceDirs} 提供）→
+     * 内存实现。注入 {@link ObjectProvider} 而非强依赖，使本模块脱离宿主（单测 / 独立运行）时
+     * 仍可自洽装配。</p>
+     *
+     * <p><b>为何默认落盘：</b>内存实现下工作流定义随进程消失，重启后前端列表为空、
+     * 已建流程无法触发 —— 属用户可直接感知的数据丢失（历史缺陷实证）。定义属用户产物，
+     * 按工程边界本就应落用户本机。</p>
+     */
     @Bean
     @ConditionalOnMissingBean(WorkflowRepository.class)
-    public WorkflowRepository workflowRepository(WorkflowProperties properties, ObjectMapper objectMapper) {
-        String dir = properties.getStorageDir();
-        if (dir != null && !dir.isBlank()) {
-            return new FileWorkflowRepository(Path.of(dir), objectMapper);
+    public WorkflowRepository workflowRepository(WorkflowProperties properties,
+                                                 ObjectMapper objectMapper,
+                                                 ObjectProvider<WorkspaceDirs> workspaceDirsProvider) {
+        Path dir = resolveStorageDir(properties, workspaceDirsProvider);
+        if (dir == null) {
+            log.warn("未解析到工作流存储目录（storage-dir 为空且无 WorkspaceDirs），"
+                    + "工作流定义将仅存于内存、重启即丢。");
+            return new InMemoryWorkflowRepository();
         }
-        return new InMemoryWorkflowRepository();
+        log.info("工作流定义落盘目录：{}", dir);
+        return new FileWorkflowRepository(dir, objectMapper);
     }
 
+    /** 运行实例仓储：与定义同根，实例落在 {@code <storageDir>/instances} 子目录。 */
     @Bean
     @ConditionalOnMissingBean(WorkflowInstanceRepository.class)
-    public WorkflowInstanceRepository workflowInstanceRepository() {
-        return new InMemoryWorkflowInstanceRepository();
+    public WorkflowInstanceRepository workflowInstanceRepository(WorkflowProperties properties,
+                                                                 ObjectMapper objectMapper,
+                                                                 ObjectProvider<WorkspaceDirs> workspaceDirsProvider) {
+        Path dir = resolveStorageDir(properties, workspaceDirsProvider);
+        if (dir == null) {
+            return new InMemoryWorkflowInstanceRepository();
+        }
+        return new FileWorkflowInstanceRepository(dir.resolve("instances"), objectMapper);
+    }
+
+    /** 解析存储根目录；配置优先，其次框架必备目录；两者皆无返回 {@code null}。 */
+    private Path resolveStorageDir(WorkflowProperties properties,
+                                   ObjectProvider<WorkspaceDirs> workspaceDirsProvider) {
+        String configured = properties.getStorageDir();
+        if (configured != null && !configured.isBlank()) {
+            return Path.of(configured).toAbsolutePath().normalize();
+        }
+        WorkspaceDirs dirs = workspaceDirsProvider.getIfAvailable();
+        return (dirs == null) ? null : dirs.workflowDir();
     }
 
     // ---------------- 线程资源 ----------------

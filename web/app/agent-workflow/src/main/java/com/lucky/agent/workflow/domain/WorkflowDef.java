@@ -1,5 +1,6 @@
 package com.lucky.agent.workflow.domain;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.lucky.agent.workflow.domain.enums.WorkflowNodeType;
 import com.lucky.agent.workflow.domain.enums.TriggerType;
@@ -12,7 +13,12 @@ import java.util.List;
  * 工作流定义（静态蓝图）：节点集合 + 边集合 + 触发器 + 元信息。
  * <p>定义与实例分离：{@code WorkflowDef} 描述「长什么样」，
  * {@code WorkflowInstance} 描述「某一次运行」。</p>
+ *
+ * <p>{@code ignoreUnknown=true}：本类有计算型 getter（如 {@code isAutoTrigger()}）会出现在
+ * 序列化输出中，但并非构造组件。落盘后再读回时这些字段需要被忽略，否则依赖调用方
+ * ObjectMapper 的宽松配置，持久化行为将随装配不同而变。</p>
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public record WorkflowDef(
         @JsonProperty("id") String id,
         @JsonProperty("name") String name,

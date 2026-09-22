@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:graph": "node --experimental-strip-types scripts/check-graph.mts"
   },
   "dependencies": {
+    "@vue-flow/core": "^1.48.2",
     "highlight.js": "11.12.0",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.3",

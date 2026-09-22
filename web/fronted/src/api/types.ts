@@ -297,18 +297,49 @@ export interface AgentPresetBundle {
 
 export type WorkflowNodeType = 'START' | 'END' | 'LLM' | 'TOOL' | 'CONDITION' | 'CODE' | 'SUBFLOW'
 
+/** 输入连接器：从全局/上游作用域取值，写入当前节点输入参数。 */
+export interface InputMapping {
+  /** 源表达式，支持点路径（如 nodeA.result）或带引号的字面量。 */
+  source: string
+  /** 目标参数名（写入节点输入作用域）。 */
+  target: string
+}
+
+/** 输出连接器：把节点输出字段写回工作流全局作用域。 */
+export interface OutputMapping {
+  source: string
+  target: string
+}
+
 export interface WorkflowNodeDef {
   id: string
   type: WorkflowNodeType
   name?: string
-  /** 节点参数（LLM 提示 / TOOL 工具名 / CODE 脚本等）。 */
-  params?: Record<string, any>
+  /**
+   * 节点参数（按 type 决定键名，由后端 /api/workflows/node-types 下发定义）：
+   * LLM=prompt/system、TOOL=toolName/params、CONDITION=condition、
+   * CODE=command/timeoutMs/failOnError、SUBFLOW=subWorkflowId。
+   */
+  config?: Record<string, any>
+  /**
+   * 画布坐标（可视化元数据，引擎不读）。
+   * 为空表示尚无人工布局，前端按拓扑自动分层摆位；用户拖动后会随定义一起落盘。
+   */
+  position?: { x: number; y: number } | null
+  /** 输入连接器（可选，画布连线以外显式声明变量映射时使用）。 */
+  inputs?: InputMapping[]
+  /** 输出连接器（可选）。 */
+  outputs?: OutputMapping[]
 }
 
 export interface WorkflowEdgeDef {
+  /** 边 id；未提供时后端按 `source->target` 补齐。 */
+  id?: string
   source: string
   target: string
-  /** 条件边标签（CONDITION 节点分流用，可空）。 */
+  /** 条件表达式：非空时仅当求值为真才走此边（实现分支路由）。 */
+  condition?: string
+  /** 条件边标签（可视化提示用）。 */
   label?: string
 }
 
@@ -332,15 +363,55 @@ export interface WorkflowDef {
   updatedAt?: number
 }
 
+/** 单个 config 字段定义（后端 NodeTypeCatalog 下发，前端据此动态渲染表单）。 */
+export interface WorkflowConfigField {
+  /** 写入 NodeDef.config 的键名。 */
+  key: string
+  label: string
+  /** 控件类型：TEXT / TEXTAREA / NUMBER / BOOLEAN / SELECT / JSON。 */
+  input: 'TEXT' | 'TEXTAREA' | 'NUMBER' | 'BOOLEAN' | 'SELECT' | 'JSON'
+  required: boolean
+  placeholder?: string
+  hint?: string
+  options?: { value: string; label: string }[]
+  defaultValue?: any
+}
+
+/** 节点类型元数据（画布组件面板 + 属性表单的数据源）。 */
+export interface WorkflowNodeTypeMeta {
+  type: WorkflowNodeType
+  label: string
+  description: string
+  /** 分组：structure / model / action / logic / composite。 */
+  category: string
+  /** 是否全流程唯一（START）。 */
+  singleton: boolean
+  /** 是否为流程必需节点（START / END）。 */
+  required: boolean
+  fields: WorkflowConfigField[]
+}
+
 export type WorkflowInstanceStatus = 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SUSPENDED'
+
+/** 后端 VariableScope 的序列化形态：变量统一挂在 data 下。 */
+export interface VariableScope {
+  data?: Record<string, any>
+}
+
+export type WorkflowNodeStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED' | 'WAITING'
 
 export interface WorkflowNodeInstance {
   nodeId: string
   nodeName?: string
   type?: WorkflowNodeType
-  status?: string
-  output?: string
+  status?: WorkflowNodeStatus
+  /** 节点入参快照（VariableScope）。 */
+  input?: VariableScope
+  /** 节点产出快照（VariableScope）。 */
+  output?: VariableScope
   error?: string
+  startedAt?: number
+  endedAt?: number
 }
 
 export interface WorkflowInstance {
@@ -348,7 +419,8 @@ export interface WorkflowInstance {
   workflowId: string
   workflowName?: string
   status: WorkflowInstanceStatus
-  variables?: Record<string, any>
+  /** 工作流级作用域最终快照。 */
+  variables?: VariableScope
   nodeInstances?: Record<string, WorkflowNodeInstance>
   startedAt?: number
   endedAt?: number

@@ -1,0 +1,5 @@
+{"id":"wf-tool-real","name":"TOOL真调验证","version":1,"enabled":true,
+ "nodes":[{"id":"start","type":"START","name":"开始"},
+          {"id":"ls","type":"TOOL","name":"列目录","config":{"toolName":"file.list"},"inputs":[{"source":"path","target":"path"}]},
+          {"id":"end","type":"END","name":"结束"}],
+ "edges":[{"source":"start","target":"ls"},{"source":"ls","target":"end"}]}

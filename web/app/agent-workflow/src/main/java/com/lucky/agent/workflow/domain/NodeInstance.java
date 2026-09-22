@@ -1,5 +1,7 @@
 package com.lucky.agent.workflow.domain;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.lucky.agent.workflow.domain.enums.NodeStatus;
 import com.lucky.agent.workflow.domain.enums.WorkflowNodeType;
 
@@ -21,6 +23,32 @@ public class NodeInstance {
         this.nodeId = nodeId;
         this.nodeName = nodeName;
         this.type = type;
+    }
+
+    /**
+     * 反序列化专用构造：从持久化快照还原节点实例（含终态、输入输出与时间戳）。
+     * <p>运行期一律走 {@link #NodeInstance(String, String, WorkflowNodeType)}，
+     * 本构造仅由仓储在载入历史实例时使用，勿在引擎链路中调用。</p>
+     */
+    @JsonCreator
+    public NodeInstance(@JsonProperty("nodeId") String nodeId,
+                        @JsonProperty("nodeName") String nodeName,
+                        @JsonProperty("type") WorkflowNodeType type,
+                        @JsonProperty("status") NodeStatus status,
+                        @JsonProperty("input") VariableScope input,
+                        @JsonProperty("output") VariableScope output,
+                        @JsonProperty("startedAt") long startedAt,
+                        @JsonProperty("endedAt") long endedAt,
+                        @JsonProperty("error") String error) {
+        this.nodeId = nodeId;
+        this.nodeName = nodeName;
+        this.type = type;
+        this.status = (status == null) ? NodeStatus.PENDING : status;
+        this.input = (input == null) ? new VariableScope() : input;
+        this.output = (output == null) ? new VariableScope() : output;
+        this.startedAt = startedAt;
+        this.endedAt = endedAt;
+        this.error = error;
     }
 
     public void markRunning() {

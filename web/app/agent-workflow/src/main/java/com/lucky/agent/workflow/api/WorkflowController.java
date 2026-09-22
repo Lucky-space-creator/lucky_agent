@@ -2,10 +2,12 @@ package com.lucky.agent.workflow.api;
 
 import com.lucky.agent.workflow.domain.WorkflowDef;
 import com.lucky.agent.workflow.domain.WorkflowInstance;
+import com.lucky.agent.workflow.dto.NodeTypeMeta;
 import com.lucky.agent.workflow.dto.TriggerRequest;
 import com.lucky.agent.workflow.event.WorkflowEvent;
 import com.lucky.agent.workflow.event.WorkflowEventBus;
 import com.lucky.agent.workflow.exception.WorkflowException;
+import com.lucky.agent.workflow.service.NodeTypeCatalog;
 import com.lucky.agent.workflow.service.WorkflowService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -99,6 +101,17 @@ public class WorkflowController {
                 "startNodeId", compiled.startNodeId(),
                 "nodeCount", compiled.nodes().size(),
                 "topologicalOrder", compiled.topologicalOrder());
+    }
+
+    /**
+     * 节点类型元数据：前端画布的组件面板与属性表单据此动态渲染。
+     *
+     * <p>与 {@code /instances} 同理，字面量路径优先于 {@code /{id}} 匹配，
+     * 不会被 {@link #get(String)} 吞掉。</p>
+     */
+    @GetMapping("/node-types")
+    public List<NodeTypeMeta> nodeTypes() {
+        return NodeTypeCatalog.catalog();
     }
 
     // ---------------- 触发与运行 ----------------
