@@ -22,14 +22,14 @@ public class CommandSplitter {
             return new ArrayList<>();
         }
         List<String> result = new ArrayList<>();
-        // 先按换行拆，再按 shell 连接符拆
+        // 先按换行拆，再按 shell 连接符拆（连接符作为整体字符类，避免被拆成单字符）
         String[] lines = command.split("[\r\n]+");
         for (String line : lines) {
             String trimmedLine = line.trim();
             if (trimmedLine.isEmpty() || trimmedLine.startsWith("#")) {
                 continue;
             }
-            for (String part : line.split("\\|\\||\\|&&||\\|;||\\||\\|&|\\|\\n")) {
+            for (String part : line.split("[\\r\\n|&;]+")) {
                 String p = part.trim();
                 if (!p.isEmpty() && !p.startsWith("#")) {
                     result.add(p);

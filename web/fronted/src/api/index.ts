@@ -236,7 +236,16 @@ export const workflowApi = {
   list: () => http.get<WorkflowDef[]>('/api/workflows'),
   /** 获取单个工作流定义。 */
   get: (id: string) => http.get<WorkflowDef>(`/api/workflows/${id}`),
-  /** 创建/更新工作流定义（后端校验：必须含 1 个 START + 至少 1 个 END 节点）。 */
+  /**
+   * 新建工作流定义（恒定 POST）。
+   *
+   * <p><b>为什么不能复用 {@link #save}：</b>save 按「有无 id」分流 PUT/POST，而新建时前端
+   * 已自造 id，于是被判为「更新」→ 后端 {@code PUT /{id}} 走 {@code update}，
+   * 查不到记录直接抛「工作流不存在」。后端 {@code WorkflowDef} 又强制 id 非空、
+   * {@code create} 不生成 id，因此新建必须由前端带 id 且恒定 POST。</p>
+   */
+  create: (def: Partial<WorkflowDef>) => http.post<WorkflowDef>('/api/workflows', def),
+  /** 更新工作流定义（后端校验：必须含 1 个 START + 至少 1 个 END 节点）。 */
   save: (def: Partial<WorkflowDef>) =>
     def.id ? http.put<WorkflowDef>(`/api/workflows/${def.id}`, def) : http.post<WorkflowDef>('/api/workflows', def),
   remove: (id: string) => http.del<{ removed: boolean }>(`/api/workflows/${id}`),

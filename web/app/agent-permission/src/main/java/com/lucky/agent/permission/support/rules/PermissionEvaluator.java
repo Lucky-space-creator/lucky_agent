@@ -138,6 +138,27 @@ public class PermissionEvaluator {
         return PermissionDecision.ASK;
     }
 
+    /**
+     * 命令是否触碰 OS 沙箱红线（仅做危险语义拦截，不含权限策略 / ASK 决策）。
+     *
+     * <p>供执行臂 {@code EXEC} 路径在真正运行命令前做最后一道硬边界兜底：确保
+     * 「格式化 / 关机 / 清除系统 / 触碰系统目录」等不可逆动作，即便在 {@code FULL}（完全自主）模式下
+     * 也绝不执行。该方法与权限级别完全解耦——红线命中即拦截，不论上层如何决策。
+     * 复合命令按 {@link CommandSplitter} 拆分后逐段检测，任一越线即整体拦截。</p>
+     *
+     * @param command 原始命令文本（可为 null）
+     * @return true 命中红线，应拦截
+     */
+    public boolean commandViolatesRedLine(String command) {
+        List<String> parts = new CommandSplitter().split(command);
+        for (String part : parts) {
+            if (osSandbox.violates(part)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private PermissionDecision evaluateByLevel(FileOp op, PermissionLevel level) {
         boolean write = switch (op.opType()) {
             case WRITE, DELETE, RENAME, MKDIR, EXEC -> true;

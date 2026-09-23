@@ -183,6 +183,12 @@ cd web/app && mvn -o test
 安全阀(N): 最大迭代/回合/token → 强制结束并总结
 ```
 
+### 核心执行流程图（薄循环 + 厚护甲）
+
+给定一个复杂流程时，Agent 从入口到终态的完整执行流如下：`ConversationManager` 入口 → `RuntimeSessionFactory.open` 装配厚护甲（四级预算 + 运行时上下文 + 中间件链）→ `Orchestrator` 外层收敛循环（安全阀 + PLAN）→ 按规划分支执行（直跑 ACT / 隔离子代理 / 步骤级 retry·backoff）→ 每步进入 `ReactEngine` 薄主循环（调模型 → 工具派发，读并行写串行）→ 客观验证 → 达成度判定 → 未达成则五级压缩 + 记忆沉淀后带 `continueGoal` 回环，直到达成或安全阀强制收束。
+
+![薄循环 + 厚护甲：复杂流程执行流](docs/thin-loop-execution-flow.png)
+
 ### 薄主循环 + 厚运行时（`core.orchestrator-mode=thin`）
 
 在保留上述主回环语义的前提下，提供「薄主循环」模式：主循环只保留三步 —— **调 LLM → 执行工具/子代理 → 回填观察**；拆解、调度、验证、记忆、预算、安全阀全部下沉到可插拔运行时（`com.lucky.agent.core.runtime`）：

@@ -156,7 +156,7 @@ async function createWorkflow() {
       ],
       edges: [{ source: 'start', target: 'end' }],
     }
-    const saved = await workflowApi.save(def)
+    const saved = await workflowApi.create(def)
     workflows.value = [saved, ...workflows.value]
     creating.value = false
     newName.value = ''

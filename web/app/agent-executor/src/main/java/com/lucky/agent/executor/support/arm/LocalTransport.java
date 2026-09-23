@@ -87,8 +87,13 @@ public class LocalTransport implements ExecutorClient {
             return Mono.just(ExecResult.failure(op.opType(), op.requestId(), "高危操作需用户确认"));
         }
 
-        // EXEC 走沙箱
+        // EXEC 走沙箱：先过 OS 沙箱红线（硬边界，与权限模式解耦，FULL 也绝不跳过）
         if (op.opType() == FileOp.OpType.EXEC) {
+            String command = op.args() == null ? null : (String) op.args().get("command");
+            if (evaluator.commandViolatesRedLine(command)) {
+                log.warn("命令触及 OS 沙箱红线，已拦截：wid={} command={}", op.workspaceId(), command);
+                return Mono.just(ExecResult.failure(op.opType(), op.requestId(), "命令触及安全红线，已拦截"));
+            }
             Path root = workspaceRoot(op);
             return Mono.just(cmdSandbox.run(op, root));
         }
