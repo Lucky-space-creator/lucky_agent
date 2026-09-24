@@ -6,6 +6,7 @@ import com.lucky.agent.core.config.CoreProperties;
 import com.lucky.agent.core.runtime.budget.BudgetLevel;
 import com.lucky.agent.core.runtime.budget.BudgetManager;
 import com.lucky.agent.core.runtime.budget.BudgetScope;
+import com.lucky.agent.core.runtime.budget.RunOverrides;
 import com.lucky.agent.core.runtime.contract.RuntimeContext;
 import com.lucky.agent.core.runtime.contract.TraceContext;
 import com.lucky.agent.core.runtime.loop.AgentRuntime;
@@ -29,16 +30,21 @@ public class RuntimeSessionFactory {
 
     /**
      * 开启一次编排会话：建立全局预算与上下文，并触发中间件链的循环开始钩子。
+     *
+     * <p>预算与回合上限统一经 {@link RunOverrides#from(ConversationCtx, CoreProperties)} 解析
+     * （支持通道按次覆盖），并把解析结果同时绑到 {@link RuntimeSession#turnLimit()}，
+     * 使主环的回合安全阀与预算作用域同源、不可能分叉。</p>
      */
     public RuntimeSession open(SessionRef ref, ConversationCtx ctx, AgentEventPublisher publisher,
                                AgentRuntime runtime) {
+        RunOverrides overrides = RunOverrides.from(ctx, properties);
         BudgetScope global = new BudgetScope(BudgetLevel.GLOBAL,
-                properties.runMaxBudget(), 0L, properties.runMaxTurns());
+                overrides.maxBudget(), 0L, overrides.turnLimit());
         RuntimeContext context = new RuntimeContext(ref, ctx, publisher, TraceContext.root(),
                 new BudgetManager(global));
         MiddlewareContext loopContext = new MiddlewareContext(context);
         runtime.onLoopStart(loopContext);
-        return new RuntimeSession(global, context, loopContext);
+        return new RuntimeSession(global, context, loopContext, overrides.turnLimit());
     }
 
     /** 结束一次编排会话：触发中间件链的循环结束钩子（保证日志/快照/指标收尾）。 */

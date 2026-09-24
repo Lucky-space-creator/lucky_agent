@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
-import com.lucky.agent.core.config.CoreProperties;
 import com.lucky.agent.core.util.runtime.AgentEventPublisher;
 import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import dev.langchain4j.data.message.AiMessage;
@@ -127,9 +126,7 @@ class SessionRepositoryReplayTest {
     /** 走真实回放路径：新建 ConversationStateManager，其 session(ref) 会从磁盘回灌上下文。 */
     private List<ChatMessage> restoredMessages() {
         ConversationStateManager manager = new ConversationStateManager(
-                new AgentEventPublisher(), new CoreProperties(
-                        0, 0, 0, 0L, false, 0, 0L, 0, 0, null, null, 0L, 0L, 0.0),
-                repository);
+                new AgentEventPublisher(), repository);
         return manager.session(SessionRef.of(SESSION, "u1", "w1")).messages();
     }
 

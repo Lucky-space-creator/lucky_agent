@@ -3,7 +3,6 @@ package com.lucky.agent.core.util.runtime;
 import com.lucky.agent.common.constant.Phase;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
-import com.lucky.agent.core.config.CoreProperties;
 import com.lucky.agent.core.repository.SessionRepository;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -34,21 +33,18 @@ import lombok.extern.slf4j.Slf4j;
 public class ConversationStateManager {
 
     private final AgentEventPublisher publisher;
-    private final CoreProperties properties;
     private final SessionRepository sessionRepository;
     private final ConcurrentMap<String, SessionState> sessions = new ConcurrentHashMap<>();
 
-    public ConversationStateManager(AgentEventPublisher publisher, CoreProperties properties,
-                                    SessionRepository sessionRepository) {
+    public ConversationStateManager(AgentEventPublisher publisher, SessionRepository sessionRepository) {
         this.publisher = publisher;
-        this.properties = properties;
         this.sessionRepository = sessionRepository;
     }
 
     /** 获取（或创建）会话状态；新建时从磁盘回灌持久化历史（P1-2）。 */
     public SessionState session(SessionRef ref) {
         return sessions.computeIfAbsent(ref.sessionId(), k -> {
-            SessionState state = new SessionState(ref, properties);
+            SessionState state = new SessionState(ref);
             restoreFromPersistence(state, ref.sessionId());
             return state;
         });
@@ -130,7 +126,6 @@ public class ConversationStateManager {
     public static class SessionState {
         private final SessionRef ref;
         private final List<ChatMessage> messages = new CopyOnWriteArrayList<>();
-        private final RunBudget budget;
         /** 会话内已注入的记忆条目锚点集合（预取去重，readFileState 等价物）。 */
         private final Set<String> prefetchedIds = ConcurrentHashMap.newKeySet();
         private volatile Phase phase;
@@ -139,14 +134,10 @@ public class ConversationStateManager {
         private volatile boolean cancelRequested;
 
         /**
-         * @param ref        会话引用
-         * @param properties 核心配置（安全阀 maxTurns / maxBudget 来源，避免硬编码）
+         * @param ref 会话引用
          */
-        public SessionState(SessionRef ref, CoreProperties properties) {
+        public SessionState(SessionRef ref) {
             this.ref = ref;
-            this.budget = properties == null
-                    ? new RunBudget(30, -1)
-                    : new RunBudget(properties.runMaxTurns(), properties.runMaxBudget());
         }
 
         public SessionRef ref() {
@@ -219,10 +210,6 @@ public class ConversationStateManager {
                     messages.removeLast();
                 }
             }
-        }
-
-        public RunBudget budget() {
-            return budget;
         }
 
         public Phase phase() {

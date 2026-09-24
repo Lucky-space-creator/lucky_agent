@@ -21,6 +21,7 @@ import com.lucky.agent.core.util.planactask.Replanner;
 import com.lucky.agent.common.contract.SubAgentSpec;
 import com.lucky.agent.core.util.runtime.AgentEventPublisher;
 import com.lucky.agent.core.util.runtime.ConversationStateManager;
+import com.lucky.agent.core.runtime.budget.RunOverrides;
 import com.lucky.agent.core.util.runtime.RunBudget;
 import com.lucky.agent.core.util.subagent.TaskProgressTracker;
 import com.lucky.agent.core.util.subagent.TaskScheduler;
@@ -128,7 +129,8 @@ public class Orchestrator implements AgentOrchestrator {
         int maxIter = properties.orchestratorMaxIterations();
         StringBuilder accumulated = new StringBuilder();
         // P1-2：每次编排独立预算，不跨多轮 submit 累积（会话可无限叠加，靠压缩+新窗口）
-        RunBudget budget = new RunBudget(properties.runMaxTurns(), properties.runMaxBudget());
+        // 经 RunOverrides 统一取值：支持通道按次覆盖回合/预算，且与 thin/langgraph 主环同源（不各自读 properties）
+        RunBudget budget = RunOverrides.from(ctx, properties).toRunBudget();
         // 循环守卫：记录上一轮未达成结论的归一化文本，连续两轮一致判定为死循环/重复
         String lastSummaryNorm = null;
         // 同上，但针对「用户实际看到的回答文本」：验证结论 summary 常含易变动的证据文本，

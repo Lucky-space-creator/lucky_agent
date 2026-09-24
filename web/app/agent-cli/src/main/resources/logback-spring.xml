@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CLI 专用日志配置。与 Web 端（agent-web）不同的核心一点：**日志走 stderr，不走 stdout**。
+
+  为什么必须这样（契约级，勿改回 stdout）：
+  headless 模式的契约是「stdout 只有正文、stderr 放进度」。Spring Boot 默认的 logback 控制台
+  appender 目标是 System.out —— 于是一条 WARN/ERROR 日志就会混进
+  `lucky -p "..." > answer.txt` 的结果文件里，把「干净的答案」这个承诺直接打穿。
+  重定向 stdout 的脚本消费方（管道、CI）拿到的将是「正文 + 日志」的混合物。
+
+  编码：CliApplication 在 Spring 启动前已把 System.err 换成强制 UTF-8 的流，本 appender 的
+  target=System.err 在初始化时捕获该流，故中文日志不会出现 GBK 乱码。
+  级别不在这里写死：仍由 Spring 的 logging.level.* 控制（默认 WARN 由 CliApplication 设定），
+  便于排障时用环境变量临时放开，不必改这个文件。
+-->
+<configuration>
+    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
+        <encoder>
+            <charset>UTF-8</charset>
+            <!-- 不用默认的带颜色/带 PID 的长格式：终端里一排日志会挤掉提示符 -->
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{28} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="WARN">
+        <appender-ref ref="STDERR"/>
+    </root>
+</configuration>

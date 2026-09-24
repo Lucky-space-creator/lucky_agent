@@ -83,6 +83,8 @@ public class AgentEvent {
     // ---------- payload 字段常量 ----------
 
     public static final String KEY_CONTENT = "content";
+    /** 正文流式增量（{@code content_delta} 事件）。 */
+    public static final String KEY_DELTA = "delta";
     public static final String KEY_TOOL = "tool";
     public static final String KEY_ARGS = "args";
     public static final String KEY_RISK = "risk";
@@ -132,7 +134,7 @@ public class AgentEvent {
 
     /** 最终回复正文流式增量（前端逐字追加到消息内容）。 */
     public static AgentEvent contentDelta(String sessionId, String delta) {
-        return of(AgentEventType.CONTENT_DELTA, sessionId, mapOf("delta", delta));
+        return of(AgentEventType.CONTENT_DELTA, sessionId, mapOf(KEY_DELTA, delta));
     }
 
     public static AgentEvent action(String sessionId, String callId, String tool,

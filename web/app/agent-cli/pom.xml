@@ -14,6 +14,15 @@
     <name>agent-cli</name>
     <description>CLI Agent（复用同一内核、配置、记忆与执行臂，消费同一 Flux&lt;AgentEvent&gt;）</description>
 
+    <properties>
+        <!-- 终端行编辑：JLine 3 是唯一可行的选择（原生命令行编辑/历史/补全/ANSI 无法手写）。
+             使用聚合 jar（内含 jline-reader/terminal/native 与 Windows 原生库），避免多制品对齐。 -->
+        <jline.version>3.30.17</jline.version>
+        <!-- 启动参数解析：单 jar、零传递依赖。仅用于「启动期」参数，REPL 内的 / 命令由手写分发器承担。 -->
+        <picocli.version>4.7.7</picocli.version>
+        <maven-enforcer-plugin.version>3.5.0</maven-enforcer-plugin.version>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.lucky.agent</groupId>
@@ -47,9 +56,38 @@
             <groupId>com.lucky.agent</groupId>
             <artifactId>agent-persona</artifactId>
         </dependency>
+        <!-- P0-5：补 skill / mcp，使 CLI 与 Web 的能力装配一致（缺这两个模块时
+             内核 ToolRegistry 收不到 skill.*/mcp.* 工具，终端永远看不到相关事件）。
+             两者只依赖 agent-common/executor 与 spring-boot-starter，不引入 Web 容器。 -->
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-skill</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.lucky.agent</groupId>
+            <artifactId>agent-mcp</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline</artifactId>
+            <version>${jline.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>info.picocli</groupId>
+            <artifactId>picocli</artifactId>
+            <version>${picocli.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
@@ -66,6 +104,52 @@
                         <goals>
                             <goal>repackage</goal>
                         </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              依赖禁用规则（CLI 方案 v2 §3.2）。
+
+              为什么只在 agent-cli 模块内配置、而不放到父 POM：
+              `bannedDependencies` 是「本模块及其传递依赖不得包含 X」。父 POM 的插件配置会被
+              agent-web 继承，而 agent-web 自身就依赖 spring-boot-starter-web —— 一旦提到父级，
+              agent-web 会自己违规导致全仓库构建失败。
+
+              为什么必须禁这三项：
+                1. agent-workflow —— 决策 1 明确「CLI 不接工作流」。若某天有人顺手加了这个依赖，
+                   工作流引擎的 Bean 会被 CLI 上下文扫描到，CLI 会开始启动工作流相关组件
+                   （含调度与宿主适配器），这属于产品边界漂移，必须在构建期拦住。
+                2. spring-boot-starter-web / -tomcat —— 决策 D11「CLI 与 Web 共用同一内核，
+                   只是交互外壳不同」。CLI 进程若拉起 Web 容器，既浪费启动时间（实测 3.11s），
+                   又会让 headless 模式的管道输出混入容器日志。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>${maven-enforcer-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>ban-cli-forbidden-deps</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <searchTransitive>true</searchTransitive>
+                                    <excludes>
+                                        <exclude>com.lucky.agent:agent-workflow</exclude>
+                                        <exclude>org.springframework.boot:spring-boot-starter-web</exclude>
+                                        <exclude>org.springframework.boot:spring-boot-starter-tomcat</exclude>
+                                    </excludes>
+                                    <message>
+                                        agent-cli 禁止依赖工作流引擎与 Web 容器（CLI 方案 v2 §3.2 / 决策 D11）。
+                                        若确实需要，请先修改决策文档，不要在模块内私放行。
+                                    </message>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>

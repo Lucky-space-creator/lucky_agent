@@ -2,7 +2,6 @@ package core.support.memory;
 
 import com.lucky.agent.common.dto.ConversationCtx;
 import com.lucky.agent.common.dto.SessionRef;
-import com.lucky.agent.core.config.CoreProperties;
 import com.lucky.agent.core.util.memory.MemoryPrefetcher;
 import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import com.lucky.agent.memory.config.MemoryMdProperties;
@@ -41,9 +40,7 @@ class MemoryPrefetcherTest {
     }
 
     private ConversationStateManager.SessionState state() {
-        return new ConversationStateManager.SessionState(
-                new SessionRef("s-1", "u-1", "ws-1"), new CoreProperties(
-                12, 30, 30, -1, false, 4, 300, 3, 2, "reactor", true, 120, 500, 0.3));
+        return new ConversationStateManager.SessionState(new SessionRef("s-1", "u-1", "ws-1"));
     }
 
     @Test

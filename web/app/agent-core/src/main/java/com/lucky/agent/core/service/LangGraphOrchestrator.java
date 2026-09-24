@@ -507,9 +507,9 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
         if (iter > maxIter) {
             reason = "max_iterations";
             detail = "已达最大迭代次数（" + maxIter + "）";
-        } else if (turns >= properties.runMaxTurns()) {
+        } else if (turns >= session.turnLimit()) {
             reason = "max_turns";
-            detail = "已达最大回合数（" + properties.runMaxTurns() + "）";
+            detail = "已达最大回合数（" + session.turnLimit() + "）";
         } else if (session.global().tokensExhausted()) {
             reason = "max_budget";
             detail = "已耗尽 token 预算（" + session.global().usedTokens() + " tokens）";

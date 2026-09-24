@@ -1,5 +1,9 @@
 package com.lucky.agent.common.dto;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /**
  * AgentEvent 类型枚举，与契约定义 §1 的 JSON type 字段一一对应。
  *
@@ -55,11 +59,38 @@ public enum AgentEventType {
 
     private final String jsonValue;
 
+    /** jsonValue → 枚举 的只读索引（枚举常量在类初始化后不再变化）。 */
+    private static final Map<String, AgentEventType> BY_JSON_VALUE;
+
+    static {
+        Map<String, AgentEventType> index = new LinkedHashMap<>();
+        for (AgentEventType t : values()) {
+            index.put(t.jsonValue, t);
+        }
+        BY_JSON_VALUE = Collections.unmodifiableMap(index);
+    }
+
     AgentEventType(String jsonValue) {
         this.jsonValue = jsonValue;
     }
 
     public String jsonValue() {
         return jsonValue;
+    }
+
+    /**
+     * 按 JSON 值反查枚举类型。
+     *
+     * <p><b>为什么需要这个方法</b>：{@link AgentEvent#type()} 返回的是 {@code jsonValue()} 字符串，
+     * 而 Java 的 {@code switch} 标签必须是编译期常量，无法写成
+     * {@code case AgentEventType.THOUGHT.jsonValue() -> ...}。消费端若改用字符串字面量做分支，
+     * 就会在契约新增事件类型时静默漏渲染（CLI 早期实现即因此漏掉 4 类事件，其中
+     * {@code options} 被吞会导致会话直接卡死）。故统一经本方法反查后再 switch。</p>
+     *
+     * @param jsonValue 事件 JSON type 值
+     * @return 对应枚举；未知值返回 {@code null}，由调用方走兜底渲染（<b>不得静默丢弃</b>）
+     */
+    public static AgentEventType fromJsonValue(String jsonValue) {
+        return jsonValue == null ? null : BY_JSON_VALUE.get(jsonValue);
     }
 }

@@ -14,6 +14,7 @@ import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.dto.UserInput;
 import com.lucky.agent.core.repository.SessionRepository;
+import com.lucky.agent.core.runtime.budget.RunOverrides;
 import com.lucky.agent.core.models.dto.EngineRunResult;
 import com.lucky.agent.core.config.PresetResolver;
 import com.lucky.agent.core.util.engine.OptionsBlockParser;
@@ -483,7 +484,7 @@ public class ConversationManager {
 
             // 确认续跑时以最近用户目标作为执行目标，避免以空文本重跑
             String goal = isConfirm ? lastUserGoal(state) : content;
-            ConversationCtx ctx = buildCtx(ref, goal, modelIdOf(input));
+            ConversationCtx ctx = buildCtx(ref, goal, input);
             publisher.publish(ref.sessionId(), AgentEvent.progress(ref.sessionId(),
                     isConfirm ? "已确认，继续执行…" : "收到你的请求：" + content));
 
@@ -858,10 +859,27 @@ public class ConversationManager {
         return t.length() <= 24 ? t : t.substring(0, 24);
     }
 
-    private ConversationCtx buildCtx(SessionRef ref, String content, String modelId) {
+    /**
+     * 组装会话上下文。
+     *
+     * <p>{@code extra} 只承载两类内容：① 本次运行的模型选择（{@code modelId}）；
+     * ② {@link RunOverrides#PASSTHROUGH_KEYS} 白名单内的安全阀调节参数（回合上限 / token 预算），
+     * 由通道按次透传。白名单刻意极窄：它是 run 级参数进入内核的唯一入口，
+     * 权限级别、规则链、沙箱与并发等禁止覆盖项一律不在此列（见 CLI 方案 §2.5）。</p>
+     */
+    private ConversationCtx buildCtx(SessionRef ref, String content, UserInput input) {
         Map<String, Object> extra = new HashMap<>();
+        String modelId = modelIdOf(input);
         if (modelId != null && !modelId.isBlank()) {
             extra.put(MODEL_ID_KEY, modelId);
+        }
+        if (input != null && input.extra() != null) {
+            for (String key : RunOverrides.PASSTHROUGH_KEYS) {
+                Object v = input.extra().get(key);
+                if (v != null) {
+                    extra.put(key, v);
+                }
+            }
         }
         return ConversationCtx.builder()
                 .sessionRef(ref)

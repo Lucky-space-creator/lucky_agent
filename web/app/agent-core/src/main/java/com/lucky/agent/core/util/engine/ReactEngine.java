@@ -644,6 +644,11 @@ public class ReactEngine implements Engine {
         }
     }
 
+    /** {@code null} 与空白一视同仁（思考链可能为 null，直接 isBlank 会 NPE）。 */
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
     /** 单轮模型调用结果：{@code streamed=true} 表示正文已由流式实时推送（同步回退为 false）。
      *  {@code tokenUsage} 为模型响应携带的真实用量（部分流式端点不下发时为 null，回退估算）。 */
     private record TurnOutcome(String text, String thinking, AiMessage ai, boolean streamed,
@@ -754,6 +759,16 @@ public class ReactEngine implements Engine {
             streamChunked(ctx, text, publisher);
         }
         String thinking = thinkBuf.length() > 0 ? thinkBuf.toString() : thinkingOf(ai);
+        // 思考链回传（必须补写，勿删）：推理模型在请求携带 tools 时要求历史所有轮 assistant 消息
+        // 原样带上 reasoning_content，缺失即 HTTP 400（The `reasoning_content` in the thinking mode
+        // must be passed back to the API.）。流式路径下思考是经 onPartialThinking 增量回调送达的，
+        // 框架收尾构造的 AiMessage 带回的是 null（实测），于是「上下文里的 assistant 消息」
+        // 缺 reasoning_content，下一次调用（同轮 ACT、或下一轮 PLAN）带 tools 就被厂商直接拒绝。
+        // 这里把已缓冲的思考补写到 AiMessage 上，让「写回会话的消息」与「已展示的思考」一致；
+        // 只补写「框架没给」的情形，不覆盖框架已给的值。thinking 可能为 null，判空不可省。
+        if (isBlank(ai.thinking()) && !isBlank(thinking)) {
+            ai = ai.toBuilder().thinking(thinking).build();
+        }
         return new TurnOutcome(text, thinking, ai, shownStreamed[0], usageRef.get());
     }
 
