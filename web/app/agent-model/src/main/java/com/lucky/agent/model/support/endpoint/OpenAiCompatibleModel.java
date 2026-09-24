@@ -68,7 +68,8 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
                 .apiKey(config.apiKey())
                 .modelName(config.modelName())
                 .timeout(CALL_TIMEOUT)
-                // 推理深度：OFF 明确关闭思考，其余档位开启并映射 effort
+                // 推理深度：OFF 不发送该参数（注意不是「关闭思考」——DeepSeek 默认开思考且 effort=high、
+                // Qwen3.8 默认 xhigh，不发送即沿用其默认高档位），其余档位映射 effort
                 .reasoningEffort(resolveReasoningEffort(inferenceDepth))
                 // 思考链回传：与推理深度解耦，恒为 true。
                 // 1) 模型本身是推理模型时（deepseek-reasoner 等）无论 effort 都会返回 reasoning_content，
@@ -229,8 +230,12 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
     }
 
     /**
-     * 推理深度映射为 reasoning_effort：OFF 关闭；QUICK→low、BALANCED→medium、
-     * DEEP/MAXIMUM→high。仅对支持推理参数的模型生效，普通模型会忽略未知参数。
+     * 推理深度映射为 reasoning_effort：OFF 返回 null（不发送该参数，<b>不等于关闭思考</b>，
+     * 厂商会落回自身默认档）；QUICK→low、BALANCED→medium、DEEP/MAXIMUM→high。
+     *
+     * <p>已知局限：本映射未区分厂商取值域——DeepSeek 把 medium 映射为 high，
+     * 导致 BALANCED/DEEP/MAXIMUM 三档在 DeepSeek 上落点相同；Qwen3.8 把 high 映射为 xhigh，
+     * 导致 DEEP/MAXIMUM 落点相同。档位归一化需端点能力元数据，尚未接入。</p>
      */
     private String resolveReasoningEffort(InferenceDepth inferenceDepth) {
         return switch (inferenceDepth) {

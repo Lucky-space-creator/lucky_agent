@@ -58,15 +58,35 @@ public class SessionRepository {
         }
     }
 
-    /** 追加一条消息到会话（checkpointIds 为该消息执行期间产生的检查点，可空）。 */
+    /** 追加一条消息到会话（checkpointIds 为该消息执行期间产生的检查点，可空；不落思考链）。 */
     public synchronized void appendMessage(String sessionId, String role, String content, String ts,
                                            List<String> checkpointIds) {
+        appendMessage(sessionId, role, content, ts, checkpointIds, null);
+    }
+
+    /**
+     * 追加一条消息到会话，并可选落盘思考链（assistant 专用）。
+     *
+     * <p><b>为什么必须存 thinking</b>：DeepSeek 等推理模型的思考模式规定——请求<b>携带 tools</b> 时，
+     * 历史所有轮的 {@code reasoning_content} 必须原样回传，缺失即被拒（HTTP 400
+     * {@code The `reasoning_content` in the thinking mode must be passed back to the API.}）。
+     * 若磁盘只留正文，跨进程回放必然重建出没有思考链的 assistant 消息，带工具重放即触发该错误。</p>
+     *
+     * @param checkpointIds 该消息执行期间产生的检查点 id（可空）
+     * @param thinking      思考链（reasoning_content）；空或空白则不写入该字段，
+     *                      普通模型返回 null，因此对非推理模型零影响、零额外落盘
+     */
+    public synchronized void appendMessage(String sessionId, String role, String content, String ts,
+                                           List<String> checkpointIds, String thinking) {
         try {
             Files.createDirectories(sessionsDir);
             Map<String, Object> record = new java.util.LinkedHashMap<>();
             record.put("role", role);
             record.put("content", content == null ? "" : content);
             record.put("ts", ts);
+            if (thinking != null && !thinking.isBlank()) {
+                record.put("thinking", thinking);
+            }
             if (checkpointIds != null && !checkpointIds.isEmpty()) {
                 record.put("checkpointIds", checkpointIds);
             }
@@ -76,9 +96,9 @@ public class SessionRepository {
         }
     }
 
-    /** 兼容旧调用（无检查点）。 */
+    /** 兼容旧调用（无检查点、无思考链）。 */
     public void appendMessage(String sessionId, String role, String content, String ts) {
-        appendMessage(sessionId, role, content, ts, null);
+        appendMessage(sessionId, role, content, ts, null, null);
     }
 
     /** 加载会话历史。 */
@@ -98,6 +118,41 @@ public class SessionRepository {
                     String.valueOf(m.getOrDefault("content", "")),
                     String.valueOf(m.getOrDefault("ts", "")),
                     checkpointIds);
+        });
+    }
+
+    /**
+     * 回放用消息（含思考链）。
+     *
+     * <p>仅用于内部重建内存上下文，<b>刻意不进通道 DTO</b>（{@link SessionSnapshot.MessageRecord}）：
+     * 思考链属于内部推理产物，不应经快照接口外泄给前端。</p>
+     *
+     * @param role     角色：user / assistant
+     * @param content  正文
+     * @param thinking 思考链（reasoning_content），无则 null
+     */
+    public record ReplayMessage(String role, String content, String thinking) {
+    }
+
+    /**
+     * 加载用于内存上下文重建的消息（含 assistant 思考链）。
+     *
+     * <p>与 {@link #loadMessages(String)} 同源同序，仅多带 {@code thinking} 字段，
+     * 供 {@code ConversationStateManager} 回放出带思考链的 assistant 消息；
+     * 通道侧的历史展示仍走 {@link #loadMessages(String)}，两者互不影响。</p>
+     */
+    public List<ReplayMessage> loadForReplay(String sessionId) {
+        Path file = messageFile(sessionId);
+        if (!Files.exists(file)) {
+            return List.of();
+        }
+        return JsonlUtil.readAll(file, line -> {
+            Map<String, Object> m = JsonlUtil.parseLine(line, Map.class);
+            Object thinking = m.get("thinking");
+            return new ReplayMessage(
+                    String.valueOf(m.getOrDefault("role", "unknown")),
+                    String.valueOf(m.getOrDefault("content", "")),
+                    thinking == null ? null : String.valueOf(thinking));
         });
     }
 

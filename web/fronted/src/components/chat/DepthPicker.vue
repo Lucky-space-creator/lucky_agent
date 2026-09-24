@@ -95,7 +95,7 @@ onUnmounted(() => {
             :class="{ 'dp__tick--on': i === draft }"
           >{{ o.short }}</span>
         </div>
-        <p class="dp__hint">作用于后续模型请求（Anthropic thinking / OpenAI reasoning_effort）</p>
+        <p class="dp__hint">作用于后续模型请求（Anthropic thinking / OpenAI reasoning_effort）；各厂商取值域不同，部分档位落点相同</p>
       </div>
     </Transition>
   </div>

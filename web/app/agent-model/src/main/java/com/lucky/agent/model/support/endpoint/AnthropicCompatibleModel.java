@@ -47,7 +47,8 @@ public class AnthropicCompatibleModel implements ChatModel, StreamingChatModel {
         this.config = config;
         this.usageTracker = usageTracker;
         Integer maxTokens = config.maxTokens() == null ? 4096 : config.maxTokens();
-        // 推理深度：OFF 不启用扩展思考；其余档位映射 thinking 预算
+        // 推理深度：OFF 传 thinkingType=null —— Anthropic 默认即不思考，故此处是「真关闭」；
+        // 其余档位映射 thinking 预算（与 OpenAI 兼容端点不同，后者 OFF 只是不发参数）
         int thinkingBudget = resolveThinkingBudget(inferenceDepth, maxTokens);
 
         AnthropicChatModel.AnthropicChatModelBuilder builder = AnthropicChatModel.builder()

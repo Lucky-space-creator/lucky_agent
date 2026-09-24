@@ -530,8 +530,10 @@ public class ConversationManager {
                         .toList();
                 // 复用前端传入的 assistantTs 作为落盘定位键，保证回退时前后端 ts 一致命中
                 String assistantTs = tsFromExtra(input, "assistantTs", Instant.now().toString());
+                // 落盘带上思考链：推理模型要求「请求带 tools 时」历史所有轮 reasoning_content 原样回传，
+                // 只存正文会让跨进程回放重建出无思考链的 assistant 消息，带工具重放即 400。
                 sessionRepository.appendMessage(ref.sessionId(), "assistant", result.finalText(),
-                        assistantTs, newCheckpoints);
+                        assistantTs, newCheckpoints, lastAssistantThinking(state));
                 memoryStore.appendUser(ref.userId(), ref.workspaceId(), result.finalText(), 0.7, "observation");
             }
             if (result.error() != null) {
@@ -731,6 +733,26 @@ public class ConversationManager {
             }
         }
         return "";
+    }
+
+    /**
+     * 取会话状态中<b>最近一条</b> assistant 消息的思考链（reasoning_content），用于落盘回放。
+     *
+     * <p>只认最后一条 assistant：它就是本轮最终回答对应的消息（引擎在
+     * {@code lastAi.toBuilder().text(finalText).build()} 时已保留 thinking）。
+     * 若它本身没有思考链则返回 null——<b>不向前回溯</b>，否则会把上一轮的思考链
+     * 错误地挂到本轮正文上。普通模型该值恒为 null，落盘行为与改动前一致。</p>
+     */
+    private String lastAssistantThinking(ConversationStateManager.SessionState state) {
+        if (state == null || state.messages() == null) {
+            return null;
+        }
+        for (int i = state.messages().size() - 1; i >= 0; i--) {
+            if (state.messages().get(i) instanceof AiMessage ai) {
+                return ai.thinking();
+            }
+        }
+        return null;
     }
 
     private void handleConfirm(SessionRef ref, UserInput input) {

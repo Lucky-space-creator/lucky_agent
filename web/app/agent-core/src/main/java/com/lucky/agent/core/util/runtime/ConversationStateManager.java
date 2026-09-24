@@ -93,21 +93,32 @@ public class ConversationStateManager {
     /** 从磁盘持久化消息回灌新建的内存态（P1-2：重启后上下文不丢失）。 */
     private void restoreFromPersistence(SessionState state, String sessionId) {
         try {
-            List<SessionSnapshot.MessageRecord> records = sessionRepository.loadMessages(sessionId);
+            List<SessionRepository.ReplayMessage> records = sessionRepository.loadForReplay(sessionId);
             if (records == null || records.isEmpty()) {
                 return;
             }
-            for (SessionSnapshot.MessageRecord r : records) {
+            int restoredThinking = 0;
+            for (SessionRepository.ReplayMessage r : records) {
                 String content = r.content() == null ? "" : r.content();
                 String role = r.role() == null ? "" : r.role();
                 if ("user".equals(role)) {
                     state.appendMessage(UserMessage.from(content));
                 } else if ("assistant".equals(role)) {
-                    state.appendMessage(AiMessage.from(content));
+                    // 恢复思考链：推理模型在「请求携带 tools」时要求历史所有轮的
+                    // reasoning_content 原样回传，仅用 AiMessage.from(content) 重建会丢掉思考链，
+                    // 导致带工具重放时被模型侧拒绝（HTTP 400 must be passed back）。
+                    String thinking = r.thinking();
+                    if (thinking != null && !thinking.isBlank()) {
+                        restoredThinking++;
+                        state.appendMessage(AiMessage.builder().text(content).thinking(thinking).build());
+                    } else {
+                        state.appendMessage(AiMessage.from(content));
+                    }
                 }
                 // 其余角色（observation/tool 等）不重建：磁盘仅持久化 user/assistant 文本
             }
-            log.info("进程重启恢复会话上下文：session={} 回灌 {} 条", sessionId, state.messages().size());
+            log.info("进程重启恢复会话上下文：session={} 回灌 {} 条（含思考链 {} 条）",
+                    sessionId, state.messages().size(), restoredThinking);
         } catch (Exception e) {
             log.warn("会话上下文回灌失败（以空上下文继续）：session={} err={}", sessionId, e.getMessage());
         }

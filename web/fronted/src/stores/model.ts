@@ -12,7 +12,7 @@ export interface DepthOption {
 }
 
 export const depthOptions: DepthOption[] = [
-  { value: 'OFF', label: '快速直答', short: '直答', desc: '关闭扩展思考，响应最快、最省 token' },
+  { value: 'OFF', label: '模型默认', short: '默认', desc: '不发送思考参数，沿用模型自身默认（DeepSeek·Qwen 默认即开启思考）' },
   { value: 'QUICK', label: '轻量思考', short: '轻量', desc: '轻量推理，适合简单问答' },
   { value: 'BALANCED', label: '标准思考', short: '标准', desc: '均衡推理（默认）' },
   { value: 'DEEP', label: '深度思考', short: '深入', desc: '深度思考，适合复杂任务' },

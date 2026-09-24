@@ -8,13 +8,20 @@ import java.util.Locale;
 /**
  * 全局推理深度枚举（配置文件中存枚举名，如 {@code "BALANCED"}）。
  *
- * <p>深度由低到高：关闭 / 快速 / 标准 / 深入 / 极致，接入模型请求时映射为
+ * <p>深度由低到高：模型默认 / 快速 / 标准 / 深入 / 极致，接入模型请求时映射为
  * OpenAI {@code reasoning_effort} 与 Anthropic {@code thinking} 预算。
  * 兼容旧版数字 1–5 的反序列化（settings.json 曾以整数存储）。</p>
  */
 public enum InferenceDepth {
 
-    /** 关闭扩展推理：最省 token、响应最快。 */
+    /**
+     * 不指定思考参数：交由模型自身默认决定，<b>并非「关闭思考」</b>。
+     *
+     * <p>实现上不发送 {@code reasoning_effort} / {@code thinking}。注意各厂商默认值不同：
+     * DeepSeek 思考模式默认开启且 effort 默认 high，Qwen3.8 默认 xhigh；因此在
+     * OpenAI 兼容端点上本档仍会思考，只是档位不由框架指定。真正关闭需厂商专用开关
+     * （{@code thinking:{"type":"disabled"}} / {@code enable_thinking:false}），当前未接入。</p>
+     */
     OFF(1),
 
     /** 快速：轻量推理，适合简单问答。 */
