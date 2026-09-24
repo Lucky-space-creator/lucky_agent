@@ -4,32 +4,40 @@
  *
  * <p>vue-flow 通过 node.type 选择渲染器，因此 7 种节点类型统一注册到本组件，
  * 视觉差异由 type 决定，而不是各写一个组件 —— 避免 7 份近似模板各自漂移。</p>
+ *
+ * <p><b>运行态来自注入的标记表</b>（{@link WF_RUN_MARKS}），不写进 node.data：
+ * 写 data 需要整体替换 nodes 数组，会打断拖拽且每次刷新重渲染整块画布。
+ * 详见 graph.ts 中该注入键的说明。</p>
  */
-import { computed } from 'vue'
+import { computed, inject } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 import type { NodeProps } from '@vue-flow/core'
 import Icon from '@/components/common/Icon.vue'
+import { WF_RUN_MARKS } from './graph'
+import { configSummary, fmtMs, nodeView } from './format'
 
-const props = defineProps<NodeProps<{ label?: string; subtitle?: string }>>()
+const props = defineProps<NodeProps<{ label?: string; config?: Record<string, any> }>>()
 
-/** type → 图标与色调；label 由后端元数据下发后写入 data.label，缺失时回落到此处。 */
-const VIEW: Record<string, { icon: string; tone: string; label: string }> = {
-  START: { icon: 'play', tone: 'ok', label: '开始' },
-  END: { icon: 'check', tone: 'ok', label: '结束' },
-  LLM: { icon: 'sparkles', tone: 'accent', label: 'LLM 生成' },
-  TOOL: { icon: 'terminal', tone: 'teal', label: '工具调用' },
-  CONDITION: { icon: 'gitBranch', tone: 'warn', label: '条件判断' },
-  CODE: { icon: 'command', tone: 'violet', label: '命令执行' },
-  SUBFLOW: { icon: 'layers', tone: 'accent', label: '子流程' },
+const STATUS_TEXT: Record<string, string> = {
+  PENDING: '待执行',
+  WAITING: '等待',
+  RUNNING: '执行中',
+  COMPLETED: '完成',
+  FAILED: '失败',
+  SKIPPED: '跳过',
 }
 
-const view = computed(() => VIEW[props.type] ?? { icon: 'box', tone: 'muted', label: props.type })
+const view = computed(() => nodeView(props.type))
 const label = computed(() => props.data?.label || view.value.label)
 const isStart = computed(() => props.type === 'START')
 const isEnd = computed(() => props.type === 'END')
+const summary = computed(() => configSummary(props.type, props.data?.config))
 
-/** 运行态标记：由运行实例回填（data.runStatus = RUNNING/SUCCESS/FAILED）。 */
-const runStatus = computed(() => (props.data as any)?.runStatus as string | undefined)
+const marks = inject(WF_RUN_MARKS, null)
+const mark = computed(() => marks?.value?.[props.id] ?? null)
+const runStatus = computed(() => mark.value?.status)
+const statusText = computed(() => (runStatus.value ? (STATUS_TEXT[runStatus.value] ?? runStatus.value) : ''))
+const runMs = computed(() => mark.value?.ms)
 </script>
 
 <template>
@@ -42,20 +50,25 @@ const runStatus = computed(() => (props.data as any)?.runStatus as string | unde
     <Handle v-if="!isEnd" type="source" :position="Position.Right" />
 
     <div class="wfn__top">
-      <span class="wfn__icon"><Icon :name="view.icon" :size="12" /></span>
+      <span class="wfn__icon"><Icon :name="view.icon" :size="13" /></span>
       <span class="wfn__label">{{ label }}</span>
-      <span v-if="runStatus" class="wfn__dot" />
+      <span v-if="runStatus" class="wfn__chip" :class="`wfn__chip--${runStatus}`">{{ statusText }}</span>
     </div>
-    <div class="wfn__type mono">{{ type }}</div>
+
+    <div class="wfn__meta">
+      <span class="wfn__type mono">{{ type }}</span>
+      <span v-if="runMs !== undefined" class="wfn__ms mono">{{ fmtMs(runMs) }}</span>
+    </div>
+
+    <div v-if="summary" class="wfn__sum" :title="summary">{{ summary }}</div>
   </div>
 </template>
 
 <style scoped>
 .wfn {
   --tone: var(--text-2);
-  min-width: 170px;
-  max-width: 240px;
-  padding: 8px 10px;
+  width: 186px;
+  padding: 7px 9px;
   background: var(--bg-0);
   border: 1px solid var(--border-strong);
   border-left: 3px solid var(--tone);
@@ -109,19 +122,57 @@ const runStatus = computed(() => (props.data as any)?.runStatus as string | unde
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.wfn__dot {
+.wfn__chip {
   margin-left: auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--accent);
   flex-shrink: 0;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-strong);
+  color: var(--text-3);
+  background: var(--bg-1);
+}
+.wfn__chip--RUNNING {
+  color: var(--accent-text);
+  border-color: var(--accent-border);
+  background: var(--accent-dim);
+}
+.wfn__chip--COMPLETED {
+  color: #2ea043;
+  border-color: #2ea04344;
+  background: #2ea0431a;
+}
+.wfn__chip--FAILED {
+  color: var(--danger-text);
+  border-color: var(--danger-dim);
+  background: var(--danger-dim);
+}
+.wfn__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
 }
 .wfn__type {
-  margin-top: 3px;
-  font-size: var(--fs-10);
+  font-size: 9px;
   letter-spacing: 0.08em;
   color: var(--text-3);
+}
+.wfn__ms {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--text-3);
+}
+.wfn__sum {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--fs-10);
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .wfn--run-RUNNING {
   border-color: var(--accent);

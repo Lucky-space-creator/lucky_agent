@@ -136,7 +136,10 @@ public class WorkflowController {
     /** SSE：订阅指定实例的执行事件流（WebFlux 响应式）。 */
     @GetMapping(value = "/instances/{instanceId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<WorkflowEvent>> events(@PathVariable String instanceId) {
-        // 多播 sink：事件总线回调 → Flux 下游；缓冲少量事件以容忍订阅前的瞬时缺口
+        // 多播 sink：事件总线回调 → Flux 下游。
+        // ⚠️ multicast() 不补发历史事件！订阅之前 tryEmitNext 的事件对后到的订阅者是丢失的
+        // （注释里若写「缓冲以容忍订阅前缺口」是错的：要补发必须用 replay().limit(n) 或自建环形缓冲）。
+        // 这正是前端必须「订阅 + 立即拉一次实例快照 + 兜底轮询」的原因 —— 快照是事实源，事件只是推进信号。
         Sinks.Many<WorkflowEvent> sink = Sinks.many().multicast().onBackpressureBuffer();
         Consumer<WorkflowEvent> listener = event -> {
             if (instanceId.equals(event.instanceId())) {

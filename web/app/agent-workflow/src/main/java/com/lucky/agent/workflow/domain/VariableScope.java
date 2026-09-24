@@ -30,7 +30,23 @@ public class VariableScope {
         }
     }
 
+    /**
+     * 写入变量。
+     *
+     * <p><b>为何 null 视为「删除」而非报错：</b>底层 {@link ConcurrentHashMap} 禁止 null 值，
+     * 裸 {@code put(key, null)} 会抛 <b>消息为 null 的 NPE</b> —— 这种异常最难排查。
+     * 而 null 在映射语义里是合法结果：{@code MappingEvaluator.resolve} 明确约定
+     * 「未命中返回 null」，即输入映射引用了一个当前作用域中尚不存在的变量。
+     * 若在此处抛错，一条「节点引用了还没产出的变量」就会让整条工作流以
+     * {@code error=null} 收场（见 {@code AbstractWorkflowEngine.safeExecute}），
+     * 用户在界面上只看到「失败」二字、没有任何原因。
+     * 语义因此定为：{@code null} ⇒ 该键不存在。</p>
+     */
     public void set(String key, Object value) {
+        if (value == null) {
+            data.remove(key);
+            return;
+        }
         data.put(key, value);
     }
 

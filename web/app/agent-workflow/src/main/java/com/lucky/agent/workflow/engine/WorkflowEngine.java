@@ -86,6 +86,7 @@ public class WorkflowEngine extends AbstractWorkflowEngine {
 
             if (!result.isSuccess() && result.status() != com.lucky.agent.workflow.domain.enums.NodeStatus.SKIPPED) {
                 stateMachine.transition(instance, WorkflowStatus.FAILED, result.error());
+                persistProgress(instance);
                 publish(instance, nodeId, WorkflowEventType.WORKFLOW_FAILED, "工作流失败");
                 return;
             }
@@ -94,6 +95,7 @@ public class WorkflowEngine extends AbstractWorkflowEngine {
         }
 
         stateMachine.transition(instance, WorkflowStatus.COMPLETED);
+        persistProgress(instance);
         publish(instance, null, WorkflowEventType.WORKFLOW_COMPLETED, "工作流执行完成: " + definition.name());
     }
 

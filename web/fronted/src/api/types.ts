@@ -428,4 +428,35 @@ export interface WorkflowInstance {
   error?: string
 }
 
+/** 工作流执行事件类型（对应后端 {@code WorkflowEventType}）。 */
+export type WorkflowEventType =
+  | 'WORKFLOW_STARTED'
+  | 'NODE_STARTED'
+  | 'NODE_COMPLETED'
+  | 'NODE_FAILED'
+  | 'NODE_SKIPPED'
+  | 'VARIABLE_UPDATED'
+  | 'WORKFLOW_COMPLETED'
+  | 'WORKFLOW_FAILED'
+
+/**
+ * 工作流运行事件（SSE 帧载荷）。
+ *
+ * <p><b>重要约束：</b>后端引擎 {@code publish} 走的是 5 参重载，
+ * {@code data} 恒为空对象 —— 事件里<b>没有</b>变量快照。
+ * 需要节点的入参/产出时必须回查 {@code GET /api/workflows/instances/{id}}，
+ * 事件流只用于「推进时机 + 节点状态 + 人类可读描述」。</p>
+ */
+export interface WorkflowEvent {
+  instanceId: string
+  workflowId: string
+  /** 相关节点 ID；流程级事件（WORKFLOW_*）可能为空。 */
+  nodeId?: string | null
+  type: WorkflowEventType
+  /** 毫秒时间戳。 */
+  timestamp: number
+  message?: string
+  data?: Record<string, any>
+}
+
 

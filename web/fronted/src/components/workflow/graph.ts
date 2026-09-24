@@ -10,7 +10,21 @@
  * <p>字段含义与后端 {@code NodeDef} / {@code EdgeDef} 对应，转换逻辑见
  * {@code defToGraph} / {@code graphToDef}。</p>
  */
+import type { ComputedRef, InjectionKey } from 'vue'
 import type { WorkflowDef, WorkflowEdgeDef, WorkflowNodeDef, WorkflowNodeType } from '@/api/types'
+import type { RunMark } from './useWorkflowRun'
+
+/**
+ * 运行标记的注入键：{@code WorkflowCanvas} 下发 → {@code WfNode} 读取。
+ *
+ * <p><b>为什么用 provide/inject 而不是写进 node.data：</b>运行期每秒都在刷新
+ * 「当前节点耗时」，若把标记写进 {@code data} 就必须整体替换 nodes 数组
+ * （Vue 的响应式要求新引用），而 vue-flow 的 v-model 会因此重建节点对象 ——
+ * 正在拖拽节点时这会打断拖拽，且每次刷新都要重渲染整块画布。
+ * 注入一份只读的标记表，只有节点卡片自身重新渲染。</p>
+ */
+export const WF_RUN_MARKS: InjectionKey<ComputedRef<Record<string, RunMark>>> =
+  Symbol('wf-run-marks')
 
 /** 节点在 {@code data} 中携带的业务载荷。 */
 export interface WfNodeData {
@@ -21,8 +35,6 @@ export interface WfNodeData {
   /** 输入/输出连接器（对应 NodeDef.inputs/outputs，通常为空）。 */
   inputs?: any
   outputs?: any
-  /** 最近一次运行的节点状态（临时标记，不落盘）。 */
-  runStatus?: string
 }
 
 export interface WfGraphNode {
@@ -42,10 +54,21 @@ export interface WfGraphEdge {
   label?: string
   /** 分支路由表达式与展示标签（对应 EdgeDef.condition / label）。 */
   data?: { condition?: string; label?: string }
-  /** vue-flow 运行时字段：连线箭头。 */
+  /**
+   * vue-flow 运行时字段：连线箭头。
+   *
+   * <p>以下 {@code label*} 字段只被 vue-flow 用于渲染边标签，
+   * {@link graphToDef} 一律从 {@code data} 取值 —— 展示与持久化解耦，
+   * 因此这里可以安全地放入「标签或条件」的合成文本。</p>
+   */
   markerEnd?: any
   animated?: boolean
   selected?: boolean
+  labelStyle?: Record<string, any>
+  labelBgStyle?: Record<string, any>
+  labelShowBg?: boolean
+  labelBgPadding?: [number, number]
+  labelBgBorderRadius?: number
 }
 
 /** autoLayout 的输入（只依赖 id 与边，便于脱离画布单测）。 */
@@ -140,15 +163,25 @@ export function defToGraph(
   }))
   // 边 id 用「端点 + 序号」合成：同一对节点之间允许存在多条条件出边，
   // 只用 source->target 会撞 id，导致其中一条在画布上被覆盖。
-  const edges: WfGraphEdge[] = def.edges.map((e, i) => ({
-    id: e.id || `${e.source}->${e.target}#${i}`,
-    source: e.source,
-    target: e.target,
-    type: 'smoothstep',
-    markerEnd: 'arrowclosed',
-    label: e.label || undefined,
-    data: { condition: e.condition ?? '', label: e.label ?? '' },
-  }))
+  const edges: WfGraphEdge[] = def.edges.map((e, i) => {
+    const cond = (e.condition ?? '').trim()
+    return {
+      id: e.id || `${e.source}->${e.target}#${i}`,
+      source: e.source,
+      target: e.target,
+      type: 'smoothstep',
+      markerEnd: 'arrowclosed',
+      // 展示文本优先取标签；无标签但有分支条件时把条件顶上去 ——
+      // 否则 CONDITION 的分流在画布上完全不可见，必须点开属性面板才知道走哪条。
+      label: e.label || cond || undefined,
+      labelShowBg: true,
+      labelBgStyle: { fill: 'var(--bg-0)', fillOpacity: 0.94 },
+      labelStyle: { fill: 'var(--text-2)', fontSize: '10px', fontFamily: 'var(--font-mono)' },
+      labelBgPadding: [4, 2],
+      labelBgBorderRadius: 4,
+      data: { condition: e.condition ?? '', label: e.label ?? '' },
+    }
+  })
   return { nodes, edges }
 }
 

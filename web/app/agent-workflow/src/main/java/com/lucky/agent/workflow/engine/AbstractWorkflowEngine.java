@@ -120,11 +120,11 @@ public abstract class AbstractWorkflowEngine implements SubflowInvoker {
             execute(definition, instance);
         } catch (WorkflowException e) {
             // 编译期静态校验失败（结构/环/端点）：属于「定义非法」，必须向调用方抛出
-            markFailed(instance, e.getMessage());
+            markFailed(instance, describe(e));
             throw e;
         } catch (Exception e) {
             log.error("工作流执行异常: {}", definition.id(), e);
-            markFailed(instance, e.getMessage());
+            markFailed(instance, describe(e));
         } finally {
             instanceRepository.save(instance);
         }
@@ -138,6 +138,45 @@ public abstract class AbstractWorkflowEngine implements SubflowInvoker {
         }
     }
 
+    /**
+     * 把异常转成「一定非空且可读」的失败原因。
+     *
+     * <p><b>为何不能直接用 {@code e.getMessage()}：</b>NPE、部分 {@code IndexOutOfBoundsException}
+     * 的 message 本身就是 null，直接透传会让实例的 {@code error} 字段为 null ——
+     * 执行面板只能显示「失败」而给不出任何原因，用户无法自查。此处兜底为异常类型名。</p>
+     */
+    private static String describe(Throwable e) {
+        String message = e.getMessage();
+        if (message != null && !message.isBlank()) {
+            return e.getClass().getSimpleName() + ": " + message;
+        }
+        return e.getClass().getSimpleName() + "（无详细信息，请查看后端日志）";
+    }
+
+    /**
+     * 把当前实例快照刷到仓储 —— 节点状态变更后、发布对应事件之前调用。
+     *
+     * <p><b>为何必须按节点落盘（而非只在起止落一次）：</b>SSE 事件只携带类型与文案，
+     * 不含变量快照；订阅方收到事件后必须回查 {@code GET /instances/{id}} 才能渲染
+     * 节点耗时、入参与产出。若引擎只在开头（此时 {@code nodeInstances} 尚为空）
+     * 与 {@code finally} 各落一次，则整个运行期间的回查都只能看到空列表，
+     * 执行面板要等流程全部结束才一次性出现 —— 这正是「执行界面看着像没在跑」的根因。</p>
+     *
+     * <p><b>成本与边界：</b>按「节点状态变更」而非「每轮迭代」落盘，写入量与节点数同阶，
+     * 与 LLM token 数无关。落盘失败只告警不抛出：进度记录属旁路，不应让一次磁盘抖动
+     * 打断正在执行的流程（终态快照由 {@link #safeExecute} 的 finally 兜底重试）。</p>
+     */
+    protected void persistProgress(WorkflowInstance instance) {
+        if (instanceRepository == null) {
+            return;
+        }
+        try {
+            instanceRepository.save(instance);
+        } catch (Exception e) {
+            log.warn("工作流进度落盘失败（不影响执行）: {} - {}", instance.getInstanceId(), e.getMessage());
+        }
+    }
+
     /** 由子类实现的具体调度。 */
     protected abstract void execute(WorkflowDef definition, WorkflowInstance instance) throws Exception;
 
@@ -148,10 +187,26 @@ public abstract class AbstractWorkflowEngine implements SubflowInvoker {
         NodeInstance ni = instance.node(node.id(), node.name(), node.type());
         ni.markRunning();
         instance.setCurrentNodeId(node.id());
-        publish(instance, node.id(), WorkflowEventType.NODE_STARTED, "节点开始: " + node.name());
 
-        VariableScope input = mappingEvaluator.resolveInputs(node.inputs(), global);
+        // 入参解析必须先于落盘：LLM 节点可能跑几十秒，若首次快照里没有入参，
+        // 执行面板在整个「运行中」窗口的「入参」列都只能是空白 —— 而用户最想看的正是
+        // 「到底喂给模型的是什么」。故解析 → 落盘 → 发事件，一次写入同时覆盖「运行中 + 入参」。
+        VariableScope input;
+        try {
+            input = mappingEvaluator.resolveInputs(node.inputs(), global);
+        } catch (Exception e) {
+            // 映射解析失败属节点级问题：只判该节点失败，不炸整条工作流 ——
+            // 否则用户只看到工作流 FAILED，却不知道哪个节点、哪条映射出的问题
+            String reason = "输入映射解析失败: " + describe(e);
+            ni.markFailed(reason);
+            persistProgress(instance);
+            publish(instance, node.id(), WorkflowEventType.NODE_FAILED,
+                    "节点失败: " + node.name() + " - " + reason);
+            return NodeResult.failure(reason);
+        }
         ni.setInput(input);
+        persistProgress(instance);
+        publish(instance, node.id(), WorkflowEventType.NODE_STARTED, "节点开始: " + node.name());
 
         NodeResult result = executeNode(node, input, global, instance);
         if (result == null) {
@@ -161,12 +216,15 @@ public abstract class AbstractWorkflowEngine implements SubflowInvoker {
         if (result.isSuccess()) {
             ni.markCompleted(result.output());
             applyOutputs(node, result.output(), global);
+            persistProgress(instance);
             publish(instance, node.id(), WorkflowEventType.NODE_COMPLETED, "节点完成: " + node.name());
         } else if (result.status() == NodeStatus.SKIPPED) {
             ni.markSkipped();
+            persistProgress(instance);
             publish(instance, node.id(), WorkflowEventType.NODE_SKIPPED, "节点跳过: " + node.name());
         } else {
             ni.markFailed(result.error());
+            persistProgress(instance);
             publish(instance, node.id(), WorkflowEventType.NODE_FAILED,
                     "节点失败: " + node.name() + " - " + result.error());
         }
@@ -177,6 +235,7 @@ public abstract class AbstractWorkflowEngine implements SubflowInvoker {
     protected void skipNode(NodeDef node, WorkflowInstance instance, String reason) {
         NodeInstance ni = instance.node(node.id(), node.name(), node.type());
         ni.markSkipped();
+        persistProgress(instance);
         publish(instance, node.id(), WorkflowEventType.NODE_SKIPPED, "节点跳过（" + reason + "）: " + node.name());
     }
 

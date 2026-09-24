@@ -7,13 +7,21 @@
  * {@link applyDef} 转换。编辑器中不再保留第二份 WorkflowDef 副本，
  * 避免「改了 A 忘了同步 B」这类隐性漂移。两个转换是 graph.ts 中的纯函数，
  * 可脱离画布单测。</p>
+ *
+ * <p><b>运行期约定：</b>运行态一律经 {@code useWorkflowRun} 获取（ASYNC 触发 +
+ * SSE 事件流 + 实例快照对齐），本视图只负责「选中态、面板开关、按钮禁用」，
+ * 不自己拼运行数据。画布节点上的运行标记由 WorkflowCanvas 经 provide 下发，
+ * 视图不参与（避免整体替换 nodes 数组打断拖拽）。</p>
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/common/Icon.vue'
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas.vue'
 import NodeInspector from '@/components/workflow/NodeInspector.vue'
-import { defToGraph, graphToDef } from '@/components/workflow/graph'
+import WfRunPanel from '@/components/workflow/WfRunPanel.vue'
+import { autoLayout, defToGraph, graphToDef } from '@/components/workflow/graph'
 import type { WfGraphEdge, WfGraphNode } from '@/components/workflow/graph'
+import { fmtMs } from '@/components/workflow/format'
+import { useWorkflowRun } from '@/components/workflow/useWorkflowRun'
 import { workflowApi } from '@/api'
 import type {
   WorkflowDef,
@@ -29,7 +37,7 @@ const toast = useToastStore()
 const loading = ref(false)
 const workflows = ref<WorkflowDef[]>([])
 const instances = ref<WorkflowInstance[]>([])
-const runningId = ref<string | null>(null)
+const triggeringId = ref<string | null>(null)
 const creating = ref(false)
 const newName = ref('')
 const newDesc = ref('')
@@ -49,9 +57,45 @@ const edges = ref<WfGraphEdge[]>([])
 const selectedId = ref<string | null>(null)
 const dirty = ref(false)
 const saving = ref(false)
-const running = ref(false)
-const runResult = ref<WorkflowInstance | null>(null)
-const showRuns = ref(false)
+
+// ---------------- 运行变量（触发时写入工作流作用域） ----------------
+
+/** 按工作流 id 记忆在这台机器的浏览器里：是「这台机器上的调试参数」，不是流程定义。 */
+const VARS_KEY = (id: string) => `lucky.wf.vars.${id}`
+const showVars = ref(false)
+const varsText = ref('{}')
+const varsErr = ref('')
+
+function loadVars(id?: string) {
+  varsErr.value = ''
+  if (!id) {
+    varsText.value = '{}'
+    return
+  }
+  try {
+    varsText.value = localStorage.getItem(VARS_KEY(id)) ?? '{}'
+  } catch {
+    varsText.value = '{}'
+  }
+}
+
+/** 解析运行变量；返回 null 表示非法（错误写在 varsErr，由调用方提示）。 */
+function parseVars(): Record<string, any> | null {
+  const t = varsText.value.trim()
+  if (!t) return {}
+  try {
+    const o = JSON.parse(t)
+    if (o === null || typeof o !== 'object' || Array.isArray(o)) {
+      varsErr.value = '必须是一个 JSON 对象，例如 {"content": "..."}'
+      return null
+    }
+    varsErr.value = ''
+    return o as Record<string, any>
+  } catch (e: any) {
+    varsErr.value = 'JSON 解析失败：' + (e?.message ?? e)
+    return null
+  }
+}
 
 const statusClass = (s?: WorkflowInstanceStatus) =>
   ({
@@ -60,15 +104,6 @@ const statusClass = (s?: WorkflowInstanceStatus) =>
     FAILED: 'wf-badge--err',
     SUSPENDED: 'wf-badge--warn',
   })[s ?? 'RUNNING'] ?? 'wf-badge--run'
-
-const NODE_STATUS_CLASS: Record<string, string> = {
-  COMPLETED: 'wf-badge--ok',
-  FAILED: 'wf-badge--err',
-  RUNNING: 'wf-badge--run',
-  SKIPPED: 'wf-badge--off',
-  PENDING: 'wf-badge--off',
-  WAITING: 'wf-badge--warn',
-}
 
 const triggerLabel = (t?: WorkflowDef['trigger']) => {
   if (!t || !t.enabled) return '手动'
@@ -121,16 +156,39 @@ async function remove(wf: WorkflowDef) {
   }
 }
 
+/**
+ * 列表页直接触发：提交后跳进编辑器并跟踪这次执行。
+ *
+ * <p>为什么不是「留在列表刷新一下」：列表页没有观测面，ASYNC 提交后唯一能看到的
+ * 只有一个 RUNNING 徽标，等于把「不知道跑到哪了」的问题原样保留。跳进调试台
+ * 才是这个按钮该有的语义。</p>
+ */
 async function trigger(wf: WorkflowDef) {
-  runningId.value = wf.id
+  triggeringId.value = wf.id
   try {
-    const inst = await workflowApi.trigger(wf.id)
+    const inst = await workflowApi.trigger(wf.id, {}, 'ASYNC')
     instances.value = [inst, ...instances.value].slice(0, 20)
-    toast.success(`已触发：${inst.instanceId.slice(0, 8)} · ${inst.status}`)
+    const def = workflows.value.find((w) => w.id === wf.id) ?? (await workflowApi.get(wf.id))
+    openEditor(def)
+    showRun.value = true
+    await attachRun(inst.instanceId)
+    toast.success(`已提交执行：${inst.instanceId.slice(0, 8)}`)
   } catch (e: any) {
     toast.error('触发失败：' + (e?.message ?? e))
   } finally {
-    runningId.value = null
+    triggeringId.value = null
+  }
+}
+
+/** 打开一次历史运行的只读回放（终态实例不会订阅事件流）。 */
+async function openRunDetail(inst: WorkflowInstance) {
+  try {
+    const def = workflows.value.find((w) => w.id === inst.workflowId) ?? (await workflowApi.get(inst.workflowId))
+    openEditor(def)
+    showRun.value = true
+    await attachRun(inst.instanceId)
+  } catch (e: any) {
+    toast.error('打开运行详情失败：' + (e?.message ?? e))
   }
 }
 
@@ -186,12 +244,16 @@ function toDef(): WorkflowDef {
   return graphToDef(editing.value!, nodes.value, edges.value)
 }
 
+const showRun = ref(false)
+
 function openEditor(def: WorkflowDef) {
   applyDef(def)
   selectedId.value = null
   dirty.value = false
-  runResult.value = null
-  showRuns.value = false
+  showVars.value = false
+  loadVars(def.id)
+  resetRun()
+  showRun.value = false
   view.value = 'edit'
 }
 
@@ -202,7 +264,9 @@ function backToList() {
   nodes.value = []
   edges.value = []
   selectedId.value = null
-  runResult.value = null
+  showVars.value = false
+  resetRun()
+  showRun.value = false
   load()
 }
 
@@ -276,6 +340,19 @@ const nodeLabel = (id: string) => {
   return n ? ((n.data as any)?.label || id) : id
 }
 
+/**
+ * nodeId → 节点定义 config，供执行面板在「节点未声明输入映射」时兜底展示。
+ * 用 computed 而非函数 prop：面板只需在节点变化时重算，不必每次渲染都遍历 nodes。
+ */
+const nodeConfigs = computed<Record<string, Record<string, unknown>>>(() => {
+  const out: Record<string, Record<string, unknown>> = {}
+  for (const n of nodes.value) {
+    const cfg = (n.data as any)?.config
+    if (cfg && typeof cfg === 'object') out[n.id] = cfg as Record<string, unknown>
+  }
+  return out
+})
+
 const outEdges = computed(() => {
   if (!selectedId.value) return []
   return edges.value
@@ -313,10 +390,61 @@ function setEdge(p: { id: string; patch: { condition?: string; label?: string } 
   edges.value = edges.value.map((e) => {
     if (e.id !== p.id) return e
     const d = { ...(e.data ?? {}), ...p.patch }
-    return { ...e, data: d, label: d.label || undefined }
+    // 展示文本与持久化解耦（graphToDef 只读 data）：标签缺失时用条件顶上，
+    // 否则 CONDITION 的分支在画布上会「有边无字」。
+    return { ...e, data: d, label: d.label || d.condition || undefined }
   })
   dirty.value = true
 }
+
+/** 自动布局：坐标计算走 graph.ts 的纯函数，画布负责重新适应视口。 */
+function autoArrange() {
+  const pos = autoLayout({ nodes: nodes.value, edges: edges.value })
+  nodes.value = nodes.value.map((n) => ({ ...n, position: pos[n.id] ?? n.position }))
+  dirty.value = true
+}
+
+// ---------------- 运行态 ----------------
+
+const {
+  triggering: runTriggering,
+  running: wfRunning,
+  watching: wfWatching,
+  instance: runInstance,
+  track: runTrack,
+  marks: runMarks,
+  counts: runCounts,
+  elapsedMs: runElapsed,
+  workflowMessage: runMessage,
+  mode: runMode,
+  firstFailedNodeId,
+  start: startRun,
+  attach: attachRun,
+  stop: stopWatch,
+  reset: resetRun,
+} = useWorkflowRun({
+  workflowId: () => editing.value?.id,
+  nameOf: (id) => nodeLabel(id),
+  orderOf: (id) => {
+    const i = nodes.value.findIndex((n) => n.id === id)
+    return i < 0 ? Number.MAX_SAFE_INTEGER : i
+  },
+  // 轨迹分母取「定义里的节点总数」，使运行中途的 x/y 与画布上的节点数始终一致
+  defNodeIds: () => nodes.value.map((n) => n.id),
+})
+
+/** 失败时自动定位到首个失败节点，省掉用户自己找错在哪一步。 */
+watch(firstFailedNodeId, (id) => {
+  if (id && !selectedId.value) selectedId.value = id
+})
+
+/** 列表里的运行记录随执行推进同步刷新（否则回到列表看到的还是提交那一刻的状态）。 */
+watch(runInstance, (inst) => {
+  if (!inst) return
+  const i = instances.value.findIndex((x) => x.instanceId === inst.instanceId)
+  if (i >= 0) instances.value[i] = inst
+  else instances.value = [inst, ...instances.value].slice(0, 20)
+})
 
 // ---------------- 保存 / 校验 / 运行 ----------------
 
@@ -359,64 +487,44 @@ async function validateCurrent() {
   }
 }
 
-function applyRun(inst: WorkflowInstance) {
-  const ni = inst.nodeInstances ?? {}
-  nodes.value = nodes.value.map((n) => ({
-    ...n,
-    data: { ...(n.data ?? {}), runStatus: ni[n.id]?.status },
-  }))
-}
-
 async function runCurrent() {
   if (!editing.value) return
-  running.value = true
+  const vars = parseVars()
+  if (vars === null) {
+    showVars.value = true
+    toast.error('运行变量不是合法 JSON，已展开输入框')
+    return
+  }
+  // 后端执行的是落盘定义 —— 先保存再跑，否则「改完点运行」跑的是旧图
+  if (dirty.value && !(await save())) return
+  showRun.value = true
   try {
-    // 后端执行的是落盘定义 —— 先保存再跑，否则「改完点运行」跑的是旧图
-    if (dirty.value && !(await save())) return
-    const inst = await workflowApi.trigger(editing.value.id, {}, 'SYNC')
-    runResult.value = inst
-    applyRun(inst)
-    showRuns.value = true
-    instances.value = [inst, ...instances.value].slice(0, 20)
-    if (inst.status === 'COMPLETED') toast.success('运行完成')
-    else toast.error(`运行 ${inst.status}${inst.error ? '：' + inst.error : ''}`)
+    localStorage.setItem(VARS_KEY(editing.value.id), varsText.value)
+  } catch {
+    // 无痕模式等场景写入失败不影响运行
+  }
+  try {
+    await startRun(vars)
+    toast.success('已提交执行，正在跟踪运行')
   } catch (e: any) {
     toast.error('运行失败：' + (e?.message ?? e))
-  } finally {
-    running.value = false
   }
 }
 
-function clearRunMark() {
-  runResult.value = null
-  nodes.value = nodes.value.map((n) => {
-    const d = { ...(n.data ?? {}) }
-    delete d.runStatus
-    return { ...n, data: d }
-  })
+function closeRunPanel() {
+  showRun.value = false
+  resetRun()
+  selectedId.value = null
 }
 
-/** 运行结果里点节点 → 画布选中同一节点，便于定位失败点。 */
-function focusNode(id: string) {
-  selectedId.value = id
-}
-
-const runNodes = computed(() => {
-  const ni = runResult.value?.nodeInstances ?? {}
-  return Object.values(ni).map((n) => ({
-    id: n.nodeId,
-    name: n.nodeName || nodeLabel(n.nodeId),
-    status: n.status ?? 'PENDING',
-    error: n.error,
-    duration:
-      n.startedAt && n.endedAt ? Math.round((n.endedAt - n.startedAt) / 100) / 10 + 's' : '—',
-  }))
-})
+// ---------------- 列表渲染辅助 ----------------
 
 const fmtTime = (ts?: number) => (ts ? new Date(ts).toLocaleString() : '—')
-const duration = (i: WorkflowInstance) => {
-  const d = (i.endedAt ?? Date.now()) - (i.startedAt ?? Date.now())
-  return d > 0 ? Math.round(d / 1000) + 's' : '—'
+/** 运行中实例的 endedAt 为 0（不是 null），必须显式判 >0，否则会算出负耗时显示 "—"。 */
+const instDuration = (i: WorkflowInstance) => {
+  if (!i.startedAt) return '—'
+  const end = i.endedAt && i.endedAt > 0 ? i.endedAt : Date.now()
+  return fmtMs(Math.max(0, end - i.startedAt))
 }
 
 onMounted(() => {
@@ -431,7 +539,7 @@ onMounted(() => {
       <span class="mono wf__label">工作流</span>
       <template v-if="view === 'list'">
         <span class="wf__sub">本地编排（agent-workflow）· DAG 驱动的多节点执行</span>
-        <button class="wf__new" @click="creating = true">
+        <button class="wf__new wf__new--primary" @click="creating = true">
           <Icon name="plus" :size="13" />
           新建工作流
         </button>
@@ -451,9 +559,44 @@ onMounted(() => {
           <button class="wf__new" :disabled="saving" @click="saveCurrent">
             <Icon name="download" :size="13" />{{ saving ? '保存中…' : '保存' }}
           </button>
-          <button class="wf__new wf__new--primary" :disabled="running" @click="runCurrent">
-            <Icon :name="running ? 'loader' : 'play'" :size="13" />{{ running ? '运行中' : '运行' }}
-          </button>
+
+          <!-- 运行 + 运行变量（变量按工作流 id 记忆在本机浏览器） -->
+          <div class="wf__run-wrap">
+            <button
+              class="wf__new wf__new--primary"
+              :disabled="runTriggering || wfWatching"
+              @click="runCurrent"
+            >
+              <Icon :name="runTriggering || wfWatching ? 'loader' : 'play'" :size="13" />
+              {{ runTriggering ? '提交中' : wfWatching ? '运行中' : '运行' }}
+            </button>
+            <button
+              class="wf__new wf__vars-btn"
+              :class="{ 'wf__vars-btn--on': showVars }"
+              title="运行变量（JSON，触发时写入工作流作用域）"
+              @click="showVars = !showVars"
+            >
+              <Icon name="sliders" :size="12" />
+            </button>
+            <div v-if="showVars" class="wf__vars-pop">
+              <div class="wf__vars-head">
+                运行变量
+                <button class="wf__vars-x" @click="showVars = false"><Icon name="x" :size="11" /></button>
+              </div>
+              <textarea
+                v-model="varsText"
+                class="wf__vars-area mono"
+                rows="6"
+                spellcheck="false"
+                placeholder='{ "content": "要处理的内容" }'
+              />
+              <p class="wf__vars-hint">
+                LLM 节点里的 <code>${content}</code> 这类占位会在这里取值；START 节点把整份对象透传进作用域。
+                变量按工作流存在本机浏览器，不随定义落盘。
+              </p>
+              <p v-if="varsErr" class="wf__vars-err">{{ varsErr }}</p>
+            </div>
+          </div>
         </div>
       </template>
     </header>
@@ -489,9 +632,9 @@ onMounted(() => {
                 <Icon name="sliders" :size="12" />
                 编排
               </button>
-              <button class="wf__btn" :disabled="runningId === wf.id" @click="trigger(wf)">
-                <Icon :name="runningId === wf.id ? 'loader' : 'play'" :size="12" />
-                {{ runningId === wf.id ? '运行中' : '运行' }}
+              <button class="wf__btn" :disabled="triggeringId === wf.id" @click="trigger(wf)">
+                <Icon :name="triggeringId === wf.id ? 'loader' : 'play'" :size="12" />
+                {{ triggeringId === wf.id ? '提交中' : '运行' }}
               </button>
               <button class="wf__btn" @click="toggle(wf)">{{ wf.enabled ? '停用' : '启用' }}</button>
               <button class="wf__btn wf__btn--danger" @click="remove(wf)">
@@ -503,18 +646,18 @@ onMounted(() => {
       </section>
 
       <section class="wf__col wf__col--side">
-        <div class="wf__col-head">最近运行（{{ instances.length }}）</div>
+        <div class="wf__col-head">最近运行（{{ instances.length }}）· 点击查看详情</div>
         <div v-if="!instances.length" class="wf__empty wf__empty--sm">
           <p>尚无运行记录。</p>
         </div>
         <ul class="wf__runs">
-          <li v-for="i in instances" :key="i.instanceId" class="wf__run">
+          <li v-for="i in instances" :key="i.instanceId" class="wf__run wf__run--click" @click="openRunDetail(i)">
             <span class="wf-badge" :class="statusClass(i.status)">{{ i.status }}</span>
             <div class="wf__run-info mono">
               <div>{{ i.instanceId.slice(0, 12) }}</div>
-              <div class="wf__run-sub">{{ fmtTime(i.startedAt) }} · {{ duration(i) }}</div>
+              <div class="wf__run-sub">{{ fmtTime(i.startedAt) }} · {{ instDuration(i) }}</div>
             </div>
-            <span v-if="i.error" class="wf__run-err" :title="i.error">⚠</span>
+            <Icon name="chevronRight" :size="12" class="wf__run-go" />
           </li>
         </ul>
       </section>
@@ -534,9 +677,12 @@ onMounted(() => {
           v-model:nodes="nodes"
           v-model:edges="edges"
           :metas="metas"
+          :marks="runMarks"
+          :selected-id="selectedId"
           @select="selectedId = $event"
           @add-node="addNode"
           @changed="dirty = true"
+          @auto-layout="autoArrange"
         />
         <div v-else class="wf__editor-wait">
           <Icon name="loader" :size="16" /> 正在获取节点类型…
@@ -554,30 +700,24 @@ onMounted(() => {
         />
       </div>
 
-      <!-- 运行结果 -->
-      <div v-if="runResult" class="wf__result">
-        <div class="wf__result-head">
-          <span class="wf-badge" :class="statusClass(runResult.status)">{{ runResult.status }}</span>
-          <span class="mono wf__result-id">{{ runResult.instanceId.slice(0, 12) }} · {{ duration(runResult) }}</span>
-          <span v-if="runResult.error" class="wf__result-err">{{ runResult.error }}</span>
-          <button class="wf__result-toggle" @click="showRuns = !showRuns">
-            <Icon :name="showRuns ? 'chevronDown' : 'chevronUp'" :size="12" />
-            节点明细
-          </button>
-          <button class="wf__result-toggle" @click="clearRunMark">
-            <Icon name="x" :size="12" />
-            清除标记
-          </button>
-        </div>
-        <ul v-if="showRuns" class="wf__result-list">
-          <li v-for="n in runNodes" :key="n.id" class="wf__result-item" @click="focusNode(n.id)">
-            <span class="wf-badge" :class="NODE_STATUS_CLASS[n.status] ?? 'wf-badge--off'">{{ n.status }}</span>
-            <span class="wf__result-name">{{ n.name }}</span>
-            <span class="mono wf__result-dim">{{ n.duration }}</span>
-            <span v-if="n.error" class="wf__result-err" :title="n.error">{{ n.error }}</span>
-          </li>
-        </ul>
-      </div>
+      <WfRunPanel
+        v-if="showRun"
+        :instance="runInstance"
+        :track="runTrack"
+        :marks="runMarks"
+        :counts="runCounts"
+        :running="wfRunning"
+        :watching="wfWatching"
+        :mode="runMode"
+        :elapsed-ms="runElapsed"
+        :selected-id="selectedId"
+        :workflow-message="runMessage"
+        :configs="nodeConfigs"
+        @select="selectedId = $event"
+        @close="closeRunPanel"
+        @rerun="runCurrent"
+        @stop-watch="stopWatch"
+      />
     </div>
 
     <!-- 新建弹窗 -->
@@ -620,6 +760,7 @@ onMounted(() => {
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
   min-height: 46px;
+  flex-wrap: wrap;
 }
 .wf__label {
   font-size: 10px;
@@ -645,6 +786,7 @@ onMounted(() => {
   margin-left: auto;
   display: flex;
   gap: 6px;
+  align-items: center;
 }
 .wf__new {
   display: flex;
@@ -670,6 +812,82 @@ onMounted(() => {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ---------- 运行 + 变量输入 ---------- */
+.wf__run-wrap {
+  position: relative;
+  display: flex;
+  gap: 4px;
+}
+.wf__vars-btn {
+  padding: 6px 8px;
+}
+.wf__vars-btn--on {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.wf__vars-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 340px;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-8);
+  background: var(--bg-0);
+  box-shadow: var(--shadow-2);
+  z-index: 20;
+}
+.wf__vars-head {
+  display: flex;
+  align-items: center;
+  font-size: var(--fs-12);
+  color: var(--text-1);
+  margin-bottom: 8px;
+}
+.wf__vars-x {
+  margin-left: auto;
+  display: flex;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.wf__vars-area {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-6);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: var(--fs-12);
+  line-height: 1.6;
+  resize: vertical;
+}
+.wf__vars-area:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--glow-accent);
+}
+.wf__vars-hint {
+  margin: 6px 0 0;
+  font-size: var(--fs-10);
+  color: var(--text-3);
+  line-height: 1.6;
+}
+.wf__vars-hint code {
+  font-family: var(--font-mono);
+  background: var(--bg-2);
+  padding: 0 3px;
+  border-radius: var(--r-4);
+}
+.wf__vars-err {
+  margin: 6px 0 0;
+  font-size: var(--fs-11);
+  color: var(--danger-text);
+}
+
 .wf__body {
   flex: 1;
   display: grid;
@@ -799,6 +1017,16 @@ onMounted(() => {
   border-radius: var(--r-6);
   background: var(--bg-1);
 }
+.wf__run--click {
+  cursor: pointer;
+}
+.wf__run--click:hover {
+  border-color: var(--accent);
+}
+.wf__run-go {
+  color: var(--text-3);
+  flex-shrink: 0;
+}
 .wf__run-info {
   flex: 1;
   min-width: 0;
@@ -807,9 +1035,6 @@ onMounted(() => {
 }
 .wf__run-sub {
   color: var(--text-3);
-}
-.wf__run-err {
-  color: var(--danger);
 }
 
 /* ---------- 编辑模式 ---------- */
@@ -851,74 +1076,6 @@ onMounted(() => {
   color: inherit;
   font-size: var(--fs-11);
   cursor: pointer;
-}
-.wf__result {
-  border-top: 1px solid var(--border);
-  background: var(--bg-1);
-  max-height: 190px;
-  overflow-y: auto;
-}
-.wf__result-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-}
-.wf__result-id {
-  font-size: var(--fs-11);
-  color: var(--text-3);
-}
-.wf__result-err {
-  font-size: var(--fs-11);
-  color: var(--danger-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 380px;
-}
-.wf__result-toggle {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-6);
-  background: var(--bg-0);
-  color: var(--text-2);
-  font-size: var(--fs-11);
-  cursor: pointer;
-}
-.wf__result-toggle + .wf__result-toggle {
-  margin-left: 0;
-}
-.wf__result-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 16px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.wf__result-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  border-radius: var(--r-6);
-  cursor: pointer;
-}
-.wf__result-item:hover {
-  background: var(--bg-2);
-}
-.wf__result-name {
-  font-size: var(--fs-12);
-  color: var(--text-1);
-}
-.wf__result-dim {
-  margin-left: auto;
-  font-size: var(--fs-11);
-  color: var(--text-3);
 }
 
 /* ---------- 徽标 ---------- */

@@ -1,4 +1,6 @@
 import { http } from './http'
+import { connectWorkflowSse } from './workflowSse'
+import type { WorkflowSseHandlers } from './workflowSse'
 import type {
   AgentPreset,
   AgentPresetBundle,
@@ -278,4 +280,13 @@ export const workflowApi = {
    * 由后端 NodeTypeCatalog 下发，避免前端硬编码 config schema 造成两端漂移。
    */
   nodeTypes: () => http.get<WorkflowNodeTypeMeta[]>('/api/workflows/node-types'),
+  /**
+   * 订阅实例执行事件流（SSE），返回幂等关闭函数。
+   *
+   * <p>用法约束（详见 {@link connectWorkflowSse}）：事件流不重放、不自动关闭，
+   * 必须配合 {@link instance} 快照对齐，并在终态后由调用方关闭。
+   * 直接使用请优先走 {@code useWorkflowRun}，它已封装这套时序。</p>
+   */
+  events: (instanceId: string, handlers: WorkflowSseHandlers) =>
+    connectWorkflowSse(instanceId, handlers),
 }

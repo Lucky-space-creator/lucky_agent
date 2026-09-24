@@ -93,10 +93,12 @@ public class LangGraphWorkflowEngine extends AbstractWorkflowEngine {
 
         if (finalState.failed()) {
             stateMachine.transition(instance, WorkflowStatus.FAILED, finalState.error());
+            persistProgress(instance);
             publish(instance, null, WorkflowEventType.WORKFLOW_FAILED, "工作流失败: " + finalState.error());
             return;
         }
         stateMachine.transition(instance, WorkflowStatus.COMPLETED);
+        persistProgress(instance);
         publish(instance, null, WorkflowEventType.WORKFLOW_COMPLETED, "工作流执行完成: " + definition.name());
     }
 
