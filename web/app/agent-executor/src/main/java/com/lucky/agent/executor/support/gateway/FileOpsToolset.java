@@ -43,7 +43,7 @@ public class FileOpsToolset {
             return ToolResult.error("操作超时");
         }
         if (!r.ok()) {
-            if (r.error() != null && r.error().contains("需用户确认")) {
+            if (r.error() != null && r.error().contains(ExecResult.ASK_REQUIRED)) {
                 return ToolResult.suspended(r.error());
             }
             return ToolResult.error(r.error());

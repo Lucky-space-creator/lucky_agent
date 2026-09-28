@@ -108,7 +108,7 @@ public class LlmJudgeVerifier implements ObjectiveVerifier {
 
         String judgeGoal = "【原始目标】" + goal
                 + "\n【各子任务执行结果】" + execLog
-                + (evidenceText.length() == 0 ? "" : "\n【客观验证证据】" + evidenceText)
+                + (evidenceText.isEmpty() ? "" : "\n【客观验证证据】" + evidenceText)
                 + (objectiveFailures.isBlank() ? "" : "\n【客观验证未通过项（必须修复）】" + objectiveFailures);
 
         return judgeOnce(ctx, goal, judgeGoal, objectiveFailures);
@@ -165,7 +165,7 @@ public class LlmJudgeVerifier implements ObjectiveVerifier {
         if (done) {
             return new VerificationVerdict(true, summary, goal, all);
         }
-        String continueGoal = goal + "\n【需补齐事项】" + (missing == null ? "" : missing)
+        String continueGoal = goal + "\n【需补齐事项】" + missing
                 + (objectiveFailures == null || objectiveFailures.isBlank() ? "" : "\n【客观验证未通过项】\n" + objectiveFailures);
         return new VerificationVerdict(false, summary, continueGoal, all);
     }

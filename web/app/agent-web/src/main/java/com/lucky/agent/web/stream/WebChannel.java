@@ -6,8 +6,8 @@ import com.lucky.agent.common.dto.RunResult;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.dto.UserInput;
-import com.lucky.agent.core.util.runtime.AgentEventPublisher;
 import com.lucky.agent.core.util.runtime.ConversationStateManager;
+import com.lucky.agent.core.util.runtime.SessionCancellation;
 import com.lucky.agent.core.service.ConversationManager;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -37,20 +37,13 @@ public class WebChannel implements AgentChannel {
         return conversationManager.submit(session, input);
     }
 
+    /**
+     * 取消当前运行：与 CLI 通道共用同一内核原语 {@link SessionCancellation#cancel}
+     * （置取消标志 → 补发 {@code stop} 收尾 → 销毁 sink），通道不各自实现。
+     */
     @Override
     public Mono<Void> cancel(SessionRef session) {
-        return Mono.fromRunnable(() -> {
-            // 置位会话取消标志：编排/引擎在循环边界检查并尽早退出，
-            // 不再开启新轮次/新工具调用（此前仅移除 sink，执行线程仍在跑）
-            stateManager.find(session.sessionId()).ifPresent(s -> s.requestCancel());
-            // 先向仍连接的 SSE 客户端发一个终止事件：前端收到 stop 即关闭流、
-            // 不会因连接被服务器端完成而自动重连（重连会立即收到引擎后续增量，表现成
-            // 「点了停止还在不断发消息」）；随后才移除 sink 收尾。
-            AgentEventPublisher publisher = stateManager.publisher();
-            publisher.publish(session.sessionId(),
-                    AgentEvent.stop(session.sessionId(), "cancelled", "已取消，停止本轮执行。"));
-            publisher.remove(session.sessionId());
-        });
+        return Mono.fromRunnable(() -> SessionCancellation.cancel(stateManager, session));
     }
 
     @Override

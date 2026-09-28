@@ -1,9 +1,7 @@
 package com.lucky.agent.cli.session;
 
-import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.core.repository.SessionRepository;
-import com.lucky.agent.core.service.ConversationManager;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -11,10 +9,9 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 
 /**
- * CLI 会话服务：在既有 {@link SessionRepository}（JSONL append-only）之上做「查找 / 列举 / 删除」，
+ * CLI 会话服务：在既有 {@link SessionRepository}（JSONL append-only）之上做「查找 / 列举」，
  * <b>不引入任何新的存储</b>。
  *
  * <p>职责边界：本类只做会话定位与读取；运行本身仍由内核负责
@@ -42,16 +39,9 @@ public class CliSessionService {
     private static final String NO_TITLE = "(无标题)";
 
     private final SessionRepository repository;
-    private final ConversationManager conversationManager;
 
-    public CliSessionService(SessionRepository repository, ConversationManager conversationManager) {
+    public CliSessionService(SessionRepository repository) {
         this.repository = repository;
-        this.conversationManager = conversationManager;
-    }
-
-    /** 新建会话 ID。 */
-    public String newSessionId() {
-        return UUID.randomUUID().toString();
     }
 
     /** 某用户的会话列表（按更新时间倒序）。 */
@@ -62,7 +52,7 @@ public class CliSessionService {
     /** 最近一次会话（{@code --continue} 语义）。 */
     public Optional<SessionRepository.SessionMeta> latest(String userId) {
         List<SessionRepository.SessionMeta> all = list(userId);
-        return all.isEmpty() ? Optional.empty() : Optional.of(all.get(0));
+        return all.isEmpty() ? Optional.empty() : Optional.of(all.getFirst());
     }
 
     /**
@@ -93,7 +83,7 @@ public class CliSessionService {
         }
         List<SessionRepository.SessionMeta> prefix = all.stream()
                 .filter(m -> m.sessionId() != null && m.sessionId().startsWith(s)).toList();
-        return prefix.size() == 1 ? Optional.of(prefix.get(0)) : Optional.empty();
+        return prefix.size() == 1 ? Optional.of(prefix.getFirst()) : Optional.empty();
     }
 
     /** 判定选择器是否命中多条（用于给出「有歧义」的准确提示）。 */
@@ -112,11 +102,6 @@ public class CliSessionService {
     /** 会话历史（按落盘顺序；不含思考链）。 */
     public List<SessionSnapshot.MessageRecord> history(String sessionId) {
         return repository.loadMessages(sessionId);
-    }
-
-    /** 删除会话（元数据 + 消息 + 内存态 + 事件流）。 */
-    public boolean delete(SessionRef ref) {
-        return conversationManager.destroy(ref);
     }
 
     /** 把会话元数据格式化为列表行（序号 / 时间 / 标题 / ID 前缀）。 */

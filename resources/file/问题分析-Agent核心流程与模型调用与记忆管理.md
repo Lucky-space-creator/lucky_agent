@@ -6,6 +6,48 @@
 
 ---
 
+## 〇、2026-09-28 复核状态总览（文档与实现同步）
+
+> 下文各问题条目保留原始分析（历史事实），状态以本表为准。
+> 本表由 **代码逐条实证** 得出（非文档转述）：每条「已修复」都给出当前真实文件与行号；行号随代码演进，定位以方法名为准。
+> 复核方式与命令见本节末「复核可溯源记录」。
+
+| 编号 | 问题 | 状态 | 代码实证（当前实现） |
+|---|---|---|---|
+| P0-1 | 意图解析指令从未发给模型 | ✅ 已修复 | ConversationManager.execute 内 `parseIntent(ref, content, modelIdOf(input))`（L611）改为**直接调用轻量模型解析**，不再经引擎轮、不再把指令塞进 `ctx.goal`；`IntentParse` 为返回记录 |
+| P0-2 | 解析轮正文/stop 透传 SSE | ✅ 已修复 | 解析不再走 ReactEngine 轮 → 无正文增量、无 stop；编排期统一 `suppressStop`（Orchestrator.buildCtx L642 / LangGraphOrchestrator L562 / ThinAgentLoop L160），收尾 stop 由会话层 L652 发布 |
+| P0-3 | judge 轮污染会话状态 | ✅ 已修复 | LlmJudgeVerifier.judgeOnce **直接同步调用模型**（L117-L128：`model.chat(request)`，只传 System+judgeGoal），**不写会话状态、不推事件流**；类注释 L36 明示「不追加合成用户消息到会话状态」 |
+| P0-4 | 每轮 3 次记忆 LLM 阻塞 SSE 收尾 | ✅ 已修复（含本次残余修复） | ① 阻塞：收尾改异步 `Schedulers.boundedElastic().schedule(...)`（ConversationManager L705-L712，位于 `publisher.complete` L714 之前但不再阻塞）；② **残余（transcript 无界）本次修复**：`transcriptOf` 增加 12000 字上限（保留首部 3000 + 尾部，L718-L738，常量 L68-L77），长会话不再把全量 transcript 塞进记忆模型导致超上下文 |
+| P1-1 | 内层引擎复位 running，并发闸打穿 | ✅ 已修复 | ReactEngine 进入时保存 `boolean wasRunning = state.running()`（L154）并在 finally **还原** `state.running(wasRunning)`（L340），嵌套轮不再把外层并发闸清成 false |
+| P1-2 | 进程重启后会话上下文丢失 | ✅ 已修复 | **正确落点**：ConversationStateManager.session()（L44-L51）建状态时调 `restoreFromPersistence`（L89-L121），按磁盘 `loadForReplay` 回灌 user/assistant 文本并**恢复思考链**（thinking，L106-L112）。注：原表误标为 ConversationManager L257（那处是 rollback 截断后的内存重建） |
+| P1-3 | 引擎压缩结果不回写会话状态 | ✅ 已修复 | ReactEngine L177-L185：`maybeCompact` 后取非 System 历史，`if (compactedHistory.size() < historySize) state.replaceMessages(...)`，注释「P1-3 fix」；`ConversationStateManager.replaceMessages` 已存在（L193） |
+| P1-4 | API Key 明文落盘（违反 D8） | ✅ 已修复 | ModelConfigStore L20-L22「D8 / P1-4 fix」：`SettingsKeyCipher`（AES-GCM，随机 32B 主密钥存 `<frameworkRoot>/.settings-key`，L28-L45），读侧解密、历史明文下次保存自动迁移密文 |
+| P1-5 | 记忆专用端点（role=memory）永远不生效 | ✅ 已修复 | ModelRouterImpl 新增**专用通道** `memoryModelId()`（L107-L110）与 `resolveMemory()`（L117-L130，走 `accessCenter.memory()`，不受 `configOf` 过滤影响，端点不可达回退备用）；消费侧 LlmMemorySummaryModel L37-L38 使用，ConversationManager L961 亦走 `resolveMemory()` |
+| P1-6 | 流式超时回退（未取消+回退文本不展示） | ⚠️ 部分修复 | ① 展示一致性已修：超时/失败置 `cancelled` 门禁阻止迟到增量（L686-L744），回退文本不再静默丢弃（syncTurn L793-L800，非前缀时提示后完整输出）；② 残留：**原流式 HTTP 请求本身仍无法取消**（LangChain4j `StreamingChatModel.chat` 无取消 API），超时即同轮双调，双倍成本属已知权衡，需接真实模型时评估 |
+| P1-7 | 双套记忆并行写、召回互斥 | ✅ 已修复 | ReactEngine.assembleSystemPrompt L411-L429：md 轨（`buildMdMemory`）与 JSONL 轨（`memoryRetriever.recall(userId, workspaceId, goal, 5)`）**并行注入**，JSONL 以「### 补充记忆」追加，不再「md 非空即跳过 JSONL」，注释「P1-7/1-8」 |
+| P1-8 | JSONL 记忆不按项目分组（跨项目串扰） | ✅ 已修复 | WorkspaceMemoryPaths 按**工作空间物理全路径转义**命名目录（含存量迁移+双目录兜底）；`UserMemoryStore` 按该目录组织，`recallUser(userId, workspaceId, ...)` 过滤（MemoryRetrieverImpl L72-L77） |
+| P1-9 | 记忆无界增长/做梦机制未接线 | ✅ 已修复 | MemorySweeper：`@Scheduled sweep`（默认 6h，衰减+遗忘+单项目 200 条上限）、`@Scheduled dream`（默认 24h + 新增会话门控 + 单实例锁，LLM 分类去重、矛盾时间近优先）；召回侧接入时间衰减 `decayManager.apply` + `shouldForget`，同分时间近优先（MemoryRetrieverImpl L92-L105） |
+| P2-1 | 子代理工具参数未展平 | ✅ 已修复 | SubAgentExecutor.parseArgs（L133-L157）：单键 `args` 对象则**展平**（含 String 内嵌 JSON 解包），与 ReactEngine.unwrapArgs 语义一致，注释「P2-1」 |
+| P2-2 | 子代理权限/超时/空摘要 | ✅ 已修复 | SubAgentExecutor：① 注入 `permissionLevel(workspaceConfig.permissionLevelOf(workspaceId).orElse(default))`（L78-L84，注释「P2-2」）；② 步数耗尽无产出 → 返回 `success=false` 并带原因（L108-L115）；③ `.timeout(properties.subagentTaskTimeoutSec())` 真正接线（L120-L125） |
+| P2-3 | stuck 判定可绕过/误杀 | ⚠️ 部分修复 | Orchestrator.normalize 已去标点/空白（L423-L430，「P2-3」），`isAskingReply` 短路「索取信息型结论」避免反复提问（L437+）；runtime LoopController 具备独立卡死守卫（L82-L93）。仍属启发式（措辞差异可绕过 / 多轮相近措辞可能误杀），由 `maxIter` + ASK 兜底 |
+| P2-4 | token 统计平方级虚高 | ✅ 已修复 | ReactEngine L227-L241：优先取模型响应真实 `TokenUsage`，按**增量**累计 `callTokens = Math.max(0, inputTokens - lastInput) + outputTokens`；maybeCompact **不再**发布全量估算 token（L358-L360 显式说明） |
+| P2-5 | LangGraphOrchestrator 死代码/双实现 | ✅ 现状明确 | LangGraphOrchestrator L74 `@ConditionalOnProperty(prefix="core", name="orchestrator-mode", havingValue="langgraph")`——默认 reactor 不加载，配置即启用（非死代码）；「三实现按 D33 收敛」仍是演进事项，非缺陷 |
+| P2-6 | 内部轮次全部计入监控指标 | ✅ 已修复（口径收敛） | 全工程 `reportModelCall` / `AgentEvent.token` **仅**在 ReactEngine L229/L238 调用；意图解析、judge 均改为**直连模型**不再上报，故指标 = 真实引擎轮（PLAN/ACT）模型调用，语义自洽（前端如需区分内部轮可后续加口径标签） |
+| P2-7 | 用户原文进记忆文件 | ✅ 设计知情项 | 零托管本机存储定位使然，建议设置页明示（见 §三 保留） |
+
+**复核结论**：文档列出的历史 P0/P1 与 P2 批次问题**均已随 ConversationManager 重写、Key 加密、记忆分组与做梦调度、子代理重构而关闭**；本次复核新增修复 1 项（P0-4 残余：记忆总结 transcript 无界）。剩余两项为**已知权衡/演进项**而非缺陷：P1-6 流式原请求不可取消（LangChain4j 无取消 API，双调成本）、P2-3 stuck 启发式（由 maxIter/ASK 兜底）。
+
+### 复核可溯源记录（2026-09-28）
+
+- **复核方法**：逐条读当前源码定位问题点（不依赖文档转述），再以编译 + 测试作客观验证。
+- **本次代码变更（唯一）**：`ConversationManager` 新增 `MEMORY_TRANSCRIPT_MAX_CHARS` / `MEMORY_TRANSCRIPT_HEAD_CHARS` 常量与 `transcriptOf` 截断逻辑（首部+尾部保留），修复 P0-4 残余。其余问题经实证已是修复态，未再改动代码。
+- **验证证据**：
+  - `mvn -pl agent-core -am compile` → **BUILD SUCCESS**（JDK 21）。
+  - `mvn -pl agent-core test` → **Tests run: 98, Failures: 0, Errors: 0, Skipped: 0**（含 OrchestratorTest / RuntimeAcceptanceTest / VerificationChainTest / TaskSchedulerTest 等）。
+- **待接真实模型时仍需回归**：P1-6 双调成本与"非前缀回退"体验、P2-3 误杀边界、P2-6 前端口径标注。
+
+---
+
 ## 一、Agent 核心流程（编排链路）
 
 ### P0-1 意图解析轮的指令从未发给模型，`parseIntent` 实际失效
@@ -206,6 +248,8 @@
 | md 轨项目分组 | MarkdownMemoryWriter L157-L171 | `memory/md/<workspaceId>/` 已按项目分组 |
 
 ## 优先级建议（修复顺序）
+
+> **状态提示（2026-09-28）**：以下为问题提出时的修复排序，属历史建议。经本次代码复核，1~6 项均已完成（详见 §〇 状态表）；当前仅剩 P1-6 双调成本与 P2-3 stuck 启发式两项待接真实模型时观察。
 
 1. **P0-1/P0-2/P0-3**（意图解析轮三连：指令丢失、SSE 污染、judge 污染上下文）——直接影响每轮对话正确性，建议合并重构：内部轮（解析/判定）统一走「不进会话状态、不推用户事件流、不发布 stop」的轻量通道。
 2. **P0-4**（记忆三连调阻塞收尾）——改为异步 + 增量触发（如仅会话结束或 N 条消息后）。

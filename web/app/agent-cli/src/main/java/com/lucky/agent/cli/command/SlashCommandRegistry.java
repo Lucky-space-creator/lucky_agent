@@ -13,12 +13,17 @@ import com.lucky.agent.core.repository.SessionRepository;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import lombok.extern.slf4j.Slf4j;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 /**
  * slash 命令注册表与内置命令。
@@ -64,9 +69,62 @@ public final class SlashCommandRegistry {
         r.register(new HistoryCommand());
         r.register(new WorkspaceCommand());
         r.register(new TokensCommand());
+        r.register(new CompactCommand());
+        r.register(new UndoCommand());
+        r.register(new SafetyCommand());
+        r.register(new ReloadCommand());
         r.register(new DoctorCommand());
         r.register(new ClearCommand());
         return r;
+    }
+
+    /**
+     * 从指定目录加载自定义命令（{@code commands/*.md}）。
+     *
+     * <p>约定：文件名（去扩展名）即命令名，文件首行非空文本作为 {@code /help} 摘要，
+     * 全文作为提示词模板；调用 {@code /name} 即把正文作为一轮提示词提交给 Agent。
+     * 内置命令同名时不被覆盖；扫描失败（目录不存在/无法读取）静默跳过。</p>
+     *
+     * <p><b>为何此处直接用 {@code Files}</b>：读取的是框架/项目自带的命令模板
+     * （{@code <cwd>/commands}、{@code <frameworkRoot>/commands}），属框架配置而非用户工作区产物，
+     * 不构成「绕过执行臂访问工作区文件」——决策 D2 的硬边界只约束工作区内的用户文件操作。</p>
+     */
+    public void registerCustomCommands(Path... dirs) {
+        for (Path dir : dirs) {
+            if (dir == null || !Files.isDirectory(dir)) {
+                continue;
+            }
+            try (Stream<Path> stream = Files.list(dir)) {
+                stream.filter(p -> p.getFileName() != null
+                                && p.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".md"))
+                        .sorted()
+                        .forEach(p -> {
+                            try {
+                                List<String> lines = Files.readAllLines(p, StandardCharsets.UTF_8);
+                                String name = p.getFileName().toString()
+                                        .replaceAll("(?i)\\.md$", "").toLowerCase(Locale.ROOT);
+                                if (name.isEmpty() || byName.containsKey(name)) {
+                                    return; // 空名或不覆盖内置命令
+                                }
+                                StringBuilder body = new StringBuilder();
+                                String summary = name;
+                                boolean first = true;
+                                for (String ln : lines) {
+                                    if (first && !ln.isBlank()) {
+                                        summary = ln.trim();
+                                        first = false;
+                                    }
+                                    body.append(ln).append("\n");
+                                }
+                                register(new CustomCommand(name, summary, body.toString().strip()));
+                            } catch (IOException ignore) {
+                                // 跳过无法读取的文件
+                            }
+                        });
+            } catch (IOException ignore) {
+                // 跳过无法列举的目录
+            }
+        }
     }
 
     public void register(SlashCommand command) {
@@ -310,8 +368,20 @@ public final class SlashCommandRegistry {
                 return false;
             }
             SessionRepository.SessionMeta meta = found.get();
-            String ws = meta.workspaceId() == null || meta.workspaceId().isBlank()
-                    ? ctx.holder().workspaceId() : meta.workspaceId();
+            String currentWs = ctx.holder().workspaceId();
+            String metaWs = meta.workspaceId() == null || meta.workspaceId().isBlank() ? null : meta.workspaceId();
+            String ws = metaWs == null ? currentWs : metaWs;
+            if (metaWs != null && !metaWs.equals(currentWs)) {
+                // 会话绑定工作空间可能已被删除：存在则提示切换，不存在则回退当前空间并说明，
+                // 避免把内核指向一个不存在的空间导致后续文件操作全部失败
+                var bound = ctx.services().workspaces().getWorkspace(metaWs);
+                if (bound.isPresent()) {
+                    out.println(out.theme().dim("已切换到该会话绑定的工作空间：" + bound.get().name()));
+                } else {
+                    out.println(out.theme().yellow("该会话绑定的工作空间已不存在，本次沿用当前工作空间（历史仍可查看）。"));
+                    ws = currentWs;
+                }
+            }
             ctx.holder().ref(new SessionRef(meta.sessionId(), ctx.holder().userId(), ws));
 
             out.println(out.theme().green("已恢复会话 ") + out.theme().dim(StatusBar.shortId(meta.sessionId()))
@@ -496,7 +566,7 @@ public final class SlashCommandRegistry {
 
         @Override
         public String summary() {
-            return "查看最近一轮的 token / 工具 / 缓存用量";
+            return "查看会话累计 token / 工具 / 缓存用量与上下文窗口占用";
         }
 
         @Override
@@ -504,8 +574,8 @@ public final class SlashCommandRegistry {
             OutputSink out = ctx.out();
             Map<String, Object> snap;
             try {
-                // MetricsCollector#snapshot 对未知会话返回「空指标」而不是 null，
-                // 故不能用 null 判空，只能按「有没有真实调用」判定。
+                // MetricsCollector#snapshot 是会话级累计量（每次模型调用增量累加），
+                // 对未知会话返回「空指标」而不是 null，故不能用 null 判空，按「有没有真实调用」判定。
                 snap = ctx.services().metrics().snapshot(ctx.holder().sessionId()).snapshot();
             } catch (Exception e) {
                 log.debug("读取会话指标失败：{}", e.getMessage());
@@ -515,7 +585,7 @@ public final class SlashCommandRegistry {
                 out.println(out.theme().dim("当前会话还没有运行记录。"));
                 return false;
             }
-            out.println(out.theme().bold("最近一轮用量"));
+            out.println(out.theme().bold("会话累计用量"));
             print(out, "token", snap.get("tokenUsed") + "（输入 " + snap.get("inputTokens")
                     + " / 输出 " + snap.get("outputTokens") + "）");
             print(out, "模型调用", snap.get("modelCalls"));
@@ -525,6 +595,12 @@ public final class SlashCommandRegistry {
             print(out, "Skill/MCP", snap.get("skillInvokes") + " / " + snap.get("mcpInvokes"));
             print(out, "错误", snap.get("errors"));
             print(out, "最近模型", snap.get("lastModel"));
+            Object window = snap.get("contextWindow");
+            if (window instanceof Number w && w.longValue() > 0) {
+                double usage = snap.get("windowUsage") instanceof Number u ? u.doubleValue() : 0d;
+                print(out, "上下文窗口", w.longValue() + " tokens"
+                        + "（已占用 " + String.format("%.1f%%", usage * 100) + "）");
+            }
             Object elapsed = snap.get("elapsedMs");
             if (elapsed instanceof Number n) {
                 print(out, "耗时", StatusBar.formatDuration(n.longValue()));
@@ -593,6 +669,7 @@ public final class SlashCommandRegistry {
             out.println(out.theme().bold("配置来源（命令行 > 环境变量 > 项目配置 > 默认）"));
             row(out, "model", describe(ctx, o.model, "model"));
             row(out, "outputFormat", describe(ctx, o.outputFormat, "outputFormat"));
+            row(out, "plain", describe(ctx, o.plain ? "true" : null, "plain"));
             row(out, "workspace", describe(ctx, o.workspace, "workspace"));
             row(out, "maxTurns", describe(ctx, o.maxTurns, "maxTurns"));
             row(out, "maxBudget", describe(ctx, o.maxBudget, "maxBudget"));
@@ -652,5 +729,183 @@ public final class SlashCommandRegistry {
             }
             return false;
         }
+    }
+
+    /** {@code /compact} —— 手动压缩当前会话上下文（P2-2）。 */
+    private static final class CompactCommand implements SlashCommand {
+        @Override
+        public String name() { return "compact"; }
+        @Override
+        public String summary() { return "手动压缩当前会话上下文（释放 token 占用）"; }
+        @Override
+        public boolean run(CommandContext ctx, List<String> args) {
+            OutputSink out = ctx.out();
+            try {
+                Map<String, Object> r = ctx.services().conversations().compact(ctx.holder().ref()).block();
+                if (r == null) {
+                    out.println(out.theme().red("压缩失败：内核未返回结果。"));
+                    return false;
+                }
+                if (Boolean.TRUE.equals(r.get("busy"))) {
+                    out.println(out.theme().yellow("会话正在运行中，无法压缩，请等待本轮结束后再试。"));
+                    return false;
+                }
+                int before = toInt(r.get("before"));
+                int after = toInt(r.get("after"));
+                if (!Boolean.TRUE.equals(r.get("changed"))) {
+                    out.println(out.theme().dim("上下文无需压缩（当前 " + before + " 条消息）。"));
+                } else {
+                    out.println(out.theme().green("已压缩上下文：" + before + " → " + after + " 条消息。"));
+                }
+            } catch (Exception e) {
+                out.println(out.theme().red("压缩失败：" + e.getMessage()));
+            }
+            return false;
+        }
+    }
+
+    /** {@code /undo} —— 撤销上一轮（双回滚：文件 + 对话）。 */
+    private static final class UndoCommand implements SlashCommand {
+        @Override
+        public String name() { return "undo"; }
+        @Override
+        public String summary() { return "撤销上一轮：恢复文件检查点并截断对话"; }
+        @Override
+        public boolean run(CommandContext ctx, List<String> args) {
+            OutputSink out = ctx.out();
+            try {
+                Map<String, Object> r = ctx.services().conversations().undoLastTurn(ctx.holder().ref()).block();
+                if (r == null) {
+                    out.println(out.theme().red("撤销失败：内核未返回结果。"));
+                    return false;
+                }
+                if (Boolean.TRUE.equals(r.get("busy"))) {
+                    out.println(out.theme().yellow("会话正在运行中，无法撤销，请等待本轮结束后再试。"));
+                    return false;
+                }
+                int files = toInt(r.get("filesRestored"));
+                int msgs = toInt(r.get("messagesRemoved"));
+                if (files == 0 && msgs == 0) {
+                    out.println(out.theme().dim("没有可撤销的内容（当前会话为空或尚无完整回合）。"));
+                } else {
+                    out.println(out.theme().green("已撤销上一轮：移除 " + msgs
+                            + " 条消息，恢复 " + files + " 个文件检查点。"));
+                }
+            } catch (Exception e) {
+                out.println(out.theme().red("撤销失败：" + e.getMessage()));
+            }
+            return false;
+        }
+    }
+
+    /** {@code /safety} —— 展示两轴安全模型与当前生效策略（P2-6）。 */
+    private static final class SafetyCommand implements SlashCommand {
+        @Override
+        public String name() { return "safety"; }
+        @Override
+        public List<String> aliases() { return List.of("sec"); }
+        @Override
+        public String summary() { return "查看两轴安全模型（沙箱 × 审批）与当前生效策略"; }
+        @Override
+        public boolean run(CommandContext ctx, List<String> args) {
+            OutputSink out = ctx.out();
+            out.println(out.theme().bold("两轴安全模型（本地优先 · 零托管）"));
+            out.println();
+            out.println(out.theme().bold("X 轴 · 沙箱（隔离与硬边界）"));
+            out.println("  · 本机优先：会话/记忆/文件只在本机，平台不接触用户内容");
+            out.println("  · 执行臂硬边界：所有文件/命令操作经 realpath 校验，越界即拒");
+            out.println("  · 不托管模型：模型由用户自带 Key/本地模型接入，框架只编排");
+            out.println("  · 不联网服务：纯本机单体，不要求公网 IP / 云服务器");
+            out.println();
+            out.println(out.theme().bold("Y 轴 · 审批（deny > ask > allow）"));
+            out.println("  · 规则链：deny 优先，其次 ask 询问，最后 allow 放行");
+            out.println("  · 权限档：由工作空间权限级别 + 规则链共同决定，LLM 软约束仅作引导");
+            out.println("  · 自动代答：--auto-approve 仅在「需询问时」代答允许一次，不绕过硬边界");
+            out.println("  · 条件选择：--auto-pick 仅自动选「推荐项」，与授权代答相互独立");
+            out.println("  · 危险操作：删除/覆盖/外发等被识别并要求显式确认");
+            out.println();
+            String wsId = ctx.holder().workspaceId();
+            Optional<Workspace> ws = ctx.services().workspaces().getWorkspace(wsId);
+            String perm = ws.flatMap(w -> Optional.ofNullable(w.permissionLevel())).map(p -> p.getLabel()).orElse("(默认)");
+            String auto = ctx.options().autoApprove
+                    ? out.theme().yellow("开启（仅代答一次）") : out.theme().dim("关闭");
+            String autoPick = ctx.options().autoPick
+                    ? out.theme().yellow("开启") : out.theme().dim("关闭");
+            out.println(out.theme().bold("当前会话生效策略"));
+            out.println("  · 工作空间：" + (ws.isPresent() ? ws.get().name() : wsId));
+            out.println("  · 权限档：" + perm);
+            out.println("  · 自动代答：" + auto + "    自动选选项：" + autoPick);
+            out.println(out.theme().dim("  执行臂硬边界与规则链不可被 CLI 参数绕过（决策 D2）。"));
+            return false;
+        }
+    }
+
+    /**
+     * {@code /reload} —— 会话内手动重载项目本地配置（P1-7 / 决策 5）。
+     *
+     * <p>对齐 {@code LUCKY.md}「改完保存即生效」的既有语义：项目配置默认启动时读取一次，
+     * 编辑 {@code <cwd>/.lucky/settings.json} 后执行 {@code /reload} 即可在会话内生效，
+     * 无需重启 CLI。重载同样走键白名单校验（禁止键 → 整文件拒绝）。</p>
+     */
+    private static final class ReloadCommand implements SlashCommand {
+        @Override
+        public String name() { return "reload"; }
+        @Override
+        public String summary() { return "重新读取项目本地配置（<cwd>/.lucky/settings.json），保存即生效"; }
+
+        @Override
+        public boolean run(CommandContext ctx, List<String> args) {
+            OutputSink out = ctx.out();
+            Path cwd = ctx.options().cwd != null && !ctx.options().cwd.isBlank()
+                    ? Path.of(ctx.options().cwd).toAbsolutePath().normalize()
+                    : Path.of(System.getProperty("user.dir"));
+            CliConfigResolver.ProjectConfig p = ctx.services().configResolver()
+                    .loadProjectConfig(cwd, ctx.services().dirs().frameworkRoot());
+            ctx.reloadProject(p);
+            if (p.enabled()) {
+                Path src = p.source();
+                out.println(out.theme().green("已重载项目配置：") + src);
+                if (p.values().isEmpty()) {
+                    out.println(out.theme().dim("  （白名单内无有效键）"));
+                } else {
+                    p.values().forEach((k, v) -> out.println("  " + k + " = " + v));
+                }
+            } else if (!p.rejectedKeys().isEmpty()) {
+                out.println(out.theme().red("项目配置被拒绝加载：含禁止键 " + p.rejectedKeys()));
+                out.println(out.theme().dim("  密钥/权限/路径根类配置不允许写进可能被提交的文件；详见 /doctor。"));
+            } else {
+                out.println(out.theme().dim("未找到项目配置：" + cwd.resolve(CliConfigResolver.PROJECT_CONFIG_RELATIVE)));
+            }
+            return false;
+        }
+    }
+
+    /** 自定义命令（commands/*.md）：把文件正文作为一轮提示词提交。 */
+    private static final class CustomCommand implements SlashCommand {
+        private final String name;
+        private final String summary;
+        private final String body;
+
+        CustomCommand(String name, String summary, String body) {
+            this.name = name;
+            this.summary = summary;
+            this.body = body;
+        }
+
+        @Override
+        public String name() { return name; }
+        @Override
+        public String summary() { return summary; }
+        @Override
+        public boolean run(CommandContext ctx, List<String> args) {
+            if (body != null && !body.isBlank()) {
+                ctx.runPrompt(body);
+            }
+            return false;
+        }
+    }
+
+    private static int toInt(Object v) {
+        return v instanceof Number n ? n.intValue() : 0;
     }
 }

@@ -17,7 +17,6 @@ import com.lucky.agent.common.constant.Phase;
 import com.lucky.agent.common.constant.PermissionLevel;
 import com.lucky.agent.workspace.api.dto.Workspace;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -39,10 +38,8 @@ public final class ReplLoop {
     private final CommandContext ctx;
     private final SlashCommandRegistry registry;
     private final CliTurnLoop turns;
+    private final ApprovalHandler approval;
     private final SessionHolder holder;
-
-    /** 退出标记（由 {@code /exit} 的返回值驱动，这里保留字段便于将来加「外部要求退出」的入口）。 */
-    private volatile boolean exitRequested;
 
     /** 本进程累计 token（跨轮），用于状态栏的累计值。 */
     private long totalTokens;
@@ -64,6 +61,7 @@ public final class ReplLoop {
         this.ctx = ctx;
         this.registry = registry;
         this.holder = holder;
+        this.approval = approval;
         this.turns = new CliTurnLoop(executor, approval, out, this::reportStatus);
         ctx.registry(registry);
     }
@@ -71,7 +69,7 @@ public final class ReplLoop {
     /** 运行 REPL，返回进程退出码。 */
     public int run() {
         printBanner();
-        while (!exitRequested) {
+        while (true) {
             String line;
             try {
                 line = editor.readLine(prompt());
@@ -93,12 +91,17 @@ public final class ReplLoop {
                 if (registry.dispatch(trimmed, ctx) == SlashCommandRegistry.Outcome.EXIT) {
                     break;
                 }
+                // 自定义命令（commands/*.md）可能登记了一个待提交的提示词，分发后作为一轮运行
+                String pending = ctx.consumePendingPrompt();
+                if (pending != null && !pending.isBlank()) {
+                    runTurn(pending);
+                }
                 continue;
             }
-            // ② ! 直执行
+            // ② ! 直执行（高危确认与 Agent 路径共用同一 ApprovalHandler）
             if (ShellPrefix.matches(trimmed)) {
                 ShellPrefix.run(trimmed, holder.workspaceId(), ctx.services().files(),
-                        ctx.services().permissions(), out, editor);
+                        approval, ctx.services().permissions(), out);
                 continue;
             }
             // ③ @ 文件引用
@@ -168,21 +171,15 @@ public final class ReplLoop {
                 .map(PermissionLevel::getLabel).orElse(null);
     }
 
-    /** 基础附加参数：模型与预算覆盖（内核 {@code ConversationManager#buildCtx} 会透传到 {@code ctx.extra}）。 */
+    /**
+     * 基础附加参数：模型与预算覆盖（内核 {@code ConversationManager#buildCtx} 会透传到 {@code ctx.extra}）。
+     *
+     * <p>取值优先级「命令行 &gt; 环境变量 &gt; 项目本地配置」由 {@code CliConfigResolver} 统一裁决 ——
+     * 项目配置因此真正生效（此前只用于 {@code /doctor} 展示，run 路径只看命令行）。</p>
+     */
     private Map<String, Object> baseExtra() {
-        Map<String, Object> extra = new LinkedHashMap<>();
-        if (options.model != null && !options.model.isBlank()) {
-            extra.put("modelId", options.model.trim());
-        }
-        putIfPresent(extra, "maxTurns", options.maxTurns);
-        putIfPresent(extra, "maxBudget", options.maxBudget);
-        return extra;
-    }
-
-    private static void putIfPresent(Map<String, Object> target, String key, String value) {
-        if (value != null && !value.isBlank()) {
-            target.put(key, value.trim());
-        }
+        return ctx.services().configResolver().effectiveRunExtra(
+                options.model, options.maxTurns, options.maxBudget, ctx.project());
     }
 
     /** 条件选择：让用户在终端选一个；返回选项 label（内核以它作为新的用户输入续跑）。 */

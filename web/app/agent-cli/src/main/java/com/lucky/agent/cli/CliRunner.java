@@ -33,6 +33,7 @@ import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -98,6 +99,21 @@ public class CliRunner {
     public int run(CliOptions options) {
         boolean headless = options.headless();
 
+        // 查找起点：--cwd 可覆盖，默认取进程 CWD（决策 5 §5.3）
+        Path startDir = options.cwd != null && !options.cwd.isBlank()
+                ? Path.of(options.cwd).toAbsolutePath().normalize()
+                : Path.of(System.getProperty("user.dir"));
+        // 项目本地配置必须先于终端建立：plain 可能是项目配置项，需参与「是否建终端」的判定
+        CliConfigResolver.ProjectConfig project = configResolver.loadProjectConfig(
+                startDir, dirs.frameworkRoot());
+        // 输出形态同样走三级解析（命令行 > 环境变量 > 项目本地）；
+        // 命令行未给出时 --output-format 为 null，故不会被缺省值顶掉项目配置层
+        String resolvedOutputFormat = configResolver
+                .resolve(options.outputFormat, "outputFormat", project).orElse(null);
+        boolean plain = options.plain || configResolver
+                .resolve(options.plain ? "true" : null, "plain", project)
+                .map(Boolean::parseBoolean).orElse(false);
+
         // 输出通道：headless 双通道（正文 stdout、进度 stderr）；交互式单通道
         TerminalSession terminal = null;
         OutputSink out;
@@ -106,18 +122,24 @@ public class CliRunner {
             out = OutputSink.of(OutputSink.utf8Stdout(), Theme.plain());
             errSink = OutputSink.of(OutputSink.utf8Stderr(), Theme.plain());
         } else {
-            terminal = TerminalSession.open(options.plain);
+            // 交互式历史落 <frameworkRoot>/agent/cli-history（D4 目录规范，路径唯一定义处见 LineEditor.historyFile）
+            terminal = TerminalSession.open(plain, LineEditor.historyFile(dirs.frameworkRoot()));
             out = terminal.sink();
             errSink = out;
         }
 
         try {
-            CliConfigResolver.ProjectConfig project = configResolver.loadProjectConfig(
-                    Path.of(System.getProperty("user.dir")), dirs.frameworkRoot());
             warnRejectedProjectConfig(project, errSink);
-            warnUnknownOutputFormat(options, errSink);
+            warnUnknownOutputFormat(resolvedOutputFormat, errSink);
 
-            Optional<Workspace> picked = pickWorkspace(options, terminal == null ? null : terminal.editor(), out);
+            // 非交互（非 TTY / --plain / 管道）下不传 editor，让工作空间歧义时直接报用法错误并退出
+            // （exit 2），而不是阻塞在 readLine。交互式 TTY 才把 editor 传给 pickWorkspace 让其询问。
+            LineEditor workspaceEditor =
+                    (terminal == null || !terminal.interactive()) ? null : terminal.editor();
+            // 工作空间选择器同样走三级解析：命令行 -w > 环境变量 > 项目本地配置（决策 5）
+            String workspaceSelector = configResolver.resolve(options.workspace, "workspace", project)
+                    .orElse(null);
+            Optional<Workspace> picked = pickWorkspace(workspaceSelector, workspaceEditor, out);
             if (picked.isEmpty()) {
                 return CliExitCode.USAGE;
             }
@@ -126,6 +148,13 @@ public class CliRunner {
             if (options.listSessions) {
                 printSessions(out);
                 return CliExitCode.SUCCESS;
+            }
+
+            // 交互式 REPL 必须真有 TTY：非交互环境不会有键盘输入，强行跑 REPL 只会卡在 readLine。
+            if (!headless && (terminal == null || !terminal.interactive())) {
+                errSink.println(errSink.theme().red(
+                        "需要交互式终端才能进入 REPL；非 TTY 请用 -p <提示词> 做一次性执行（或 --list-sessions 查看会话）。"));
+                return CliExitCode.USAGE;
             }
 
             SessionRef ref;
@@ -149,16 +178,22 @@ public class CliRunner {
 
             if (headless) {
                 OutputFormatter formatter = new OutputFormatter(
-                        OutputFormatter.Mode.parse(options.outputFormat), out, errSink,
-                        options.showThinking);
+                        OutputFormatter.Mode.parse(CliOptions.normalizeOutputFormat(resolvedOutputFormat)),
+                        out, errSink, options.showThinking);
                 channel.attachRenderer(formatter);
                 CliTurnLoop turns = new CliTurnLoop(executor, approval, errSink, null);
-                return new PrintModeRunner(options, turns, formatter, errSink, holder)
+                Map<String, Object> runExtra = configResolver.effectiveRunExtra(
+                        options.model, options.maxTurns, options.maxBudget, project);
+                return new PrintModeRunner(options, turns, formatter, errSink, holder, runExtra)
                         .run(options.promptText());
             }
 
             channel.attachRenderer(new EventRenderer(out, options.showThinking));
             SlashCommandRegistry registry = SlashCommandRegistry.withBuiltins();
+            // 自定义命令：<cwd>/commands 与 <frameworkRoot>/commands 下的 *.md（文件名即命令名）
+            registry.registerCustomCommands(
+                    startDir.resolve("commands"),
+                    dirs.frameworkRoot().resolve("commands"));
             CommandContext ctx = new CommandContext(out, services, options, project, holder, () -> {
             });
             installCompleter(editor, registry);
@@ -196,8 +231,8 @@ public class CliRunner {
      * <p>多候选时：交互式问用户选哪个；headless 直接报用法错误 —— 不猜。
      * 「猜一个」在这种场景下代价很高：Agent 会在错误的目录里读写文件，而用户毫无察觉。</p>
      */
-    private Optional<Workspace> pickWorkspace(CliOptions options, LineEditor editor, OutputSink out) {
-        WorkspaceResolver.Result result = WorkspaceResolver.resolve(workspaces, options.workspace);
+    private Optional<Workspace> pickWorkspace(String selector, LineEditor editor, OutputSink out) {
+        WorkspaceResolver.Result result = WorkspaceResolver.resolve(workspaces, selector);
         switch (result.status()) {
             case OK -> {
                 return Optional.of(result.workspace());
@@ -209,7 +244,7 @@ public class CliRunner {
             }
             case NOT_FOUND -> {
                 out.println(out.theme().red("未找到匹配的工作空间："
-                        + (options.workspace == null ? "(未指定)" : options.workspace)));
+                        + (selector == null ? "(未指定)" : selector)));
                 out.println(out.theme().dim("  用 -w <ID|名称|路径> 指定；不带 -w 会列出全部候选。"));
                 return Optional.empty();
             }
@@ -257,6 +292,10 @@ public class CliRunner {
 
     private SessionRef resolveSession(CliOptions options, Workspace workspace, OutputSink out) {
         if (options.resume != null && !options.resume.isBlank()) {
+            // -r 与 -c 同时给出时，此前会静默以 -r 为准，用户无从得知自己的 -c 被忽略
+            if (options.continueLast) {
+                out.println(out.theme().yellow("同时指定了 -r 与 -c，按 -r 指定的会话恢复（-c 已忽略）。"));
+            }
             var found = sessions.resolve(options.resume, LOCAL_USER);
             if (found.isEmpty()) {
                 String hint = sessions.isAmbiguous(options.resume, LOCAL_USER)
@@ -323,9 +362,9 @@ public class CliRunner {
         err.println(err.theme().dim("  本次将忽略该文件，其余配置与默认值照常生效。"));
     }
 
-    private void warnUnknownOutputFormat(CliOptions options, OutputSink err) {
-        if (!options.outputFormatValid()) {
-            err.println(err.theme().yellow("未知的输出格式「" + options.outputFormat + "」，已回落为 text。"));
+    private void warnUnknownOutputFormat(String resolved, OutputSink err) {
+        if (!CliOptions.outputFormatValid(resolved)) {
+            err.println(err.theme().yellow("未知的输出格式「" + resolved + "」，已回落为 text。"));
         }
     }
 }

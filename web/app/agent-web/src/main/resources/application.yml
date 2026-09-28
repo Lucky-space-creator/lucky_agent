@@ -78,6 +78,15 @@ lucky:
       # 引擎实现：legacy=自研 Kahn 调度（默认）；langgraph=LangGraph4j 状态图。
       # 两者执行契约一致，切换对 REST/SSE/前端透明。
       engine: legacy
+    sandbox:
+      # 命令（CODE）节点沙箱：默认关闭，需显式授权后才允许执行命令。
+      # 开启后命令不再由工作流模块自行 ProcessBuilder 执行，而是收口到本机执行臂，
+      # 与 Agent 工具调用同一链路（权限裁决 deny>ask>allow + realpath 硬边界 + OS 红线 + 断路器）。
+      # 注意：执行臂返回的 ASK/拒绝一律按拦截处理——工作流在后台运行，无人能应答确认。
+      enabled: false
+      # 命令归入的工作空间 ID。留空 = 回退内置默认工作空间（<user.home>/.lucky_agent/workspace）。
+      # 执行臂按工作空间解析权限级别与 realpath 根，生产环境建议显式指定。
+      workspace-id: ""
 
 # Skill（渐进披露式技能加载）
 skill:

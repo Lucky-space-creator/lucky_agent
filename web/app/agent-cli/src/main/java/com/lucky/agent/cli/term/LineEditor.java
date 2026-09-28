@@ -1,6 +1,7 @@
 package com.lucky.agent.cli.term;
 
 import com.lucky.agent.cli.channel.OutputSink;
+import com.lucky.agent.common.constant.WorkspaceDirs;
 import org.jline.reader.Completer;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.History;
@@ -15,6 +16,8 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * 读一行输入。交互式走 JLine（历史 / 补全 / 行编辑），非交互式走缓冲读取。
@@ -35,6 +38,14 @@ public final class LineEditor implements InputReader, Closeable {
     /** 提示符处按 Ctrl+C 且这是连续第二次中断时返回，表示「用户想退出」。 */
     public static final String EXIT = "\u0000__EXIT__";
 
+    /**
+     * 交互式历史文件名（落在 {@code <frameworkRoot>/agent/} 下，纳入 D4 目录规范）。
+     *
+     * <p>必须显式指定，不能依赖 JLine 默认：{@code DefaultHistory} 不设默认路径，
+     * 未绑定 {@code history-file} 变量时历史完全不落盘（见 {@link #jline}）。</p>
+     */
+    public static final String HISTORY_FILE_NAME = "cli-history";
+
     private final OutputSink out;
     private final LineReader reader;
     private final BufferedReader plainIn;
@@ -52,15 +63,44 @@ public final class LineEditor implements InputReader, Closeable {
         this.completer = completer;
     }
 
-    /** JLine 分支：具备历史 / 补全 / 行编辑。 */
-    static LineEditor jline(Terminal terminal, OutputSink out) {
+    /**
+     * 解析交互式历史文件路径：{@code <frameworkRoot>/agent/cli-history}（D4 目录规范）。
+     *
+     * <p>唯一定义处：历史落盘位置属目录规范，不允许散落在调用方。</p>
+     */
+    public static Path historyFile(Path frameworkRoot) {
+        return frameworkRoot.resolve(WorkspaceDirs.AGENT).resolve(HISTORY_FILE_NAME);
+    }
+
+    /**
+     * JLine 分支：具备历史 / 补全 / 行编辑。
+     *
+     * @param historyFile 历史文件路径（{@code <frameworkRoot>/agent/cli-history}）；为 {@code null} 时为纯内存历史
+     */
+    static LineEditor jline(Terminal terminal, OutputSink out, Path historyFile) {
         MutableCompleter completer = new MutableCompleter();
         History history = new DefaultHistory();
-        LineReader reader = LineReaderBuilder.builder()
+        LineReaderBuilder builder = LineReaderBuilder.builder()
                 .terminal(terminal)
                 .history(history)
-                .completer(completer)
-                .build();
+                .completer(completer);
+        // 历史文件位置必须显式绑定：JLine 3.30 的 DefaultHistory 无默认路径，getPath() 读的是
+        // reader 的 history-file 变量，未设置时返回 null，save() 随即空操作 —— 历史根本不落盘。
+        // 构建期 variables 会先于 setHistory 注入（LineReaderImpl 构造即接收 variables、随后 attach
+        // 触发 load），故此处绑定同时覆盖「启动加载既有历史」与「退出 save 落盘」两端。
+        if (historyFile != null) {
+            Path file = historyFile.toAbsolutePath().normalize();
+            try {
+                Path dir = file.getParent();
+                if (dir != null) {
+                    Files.createDirectories(dir);
+                }
+            } catch (IOException ignored) {
+                // 目录创建失败不阻断 CLI，save() 自会降级为空操作
+            }
+            builder.variable(LineReader.HISTORY_FILE, file);
+        }
+        LineReader reader = builder.build();
         return new LineEditor(out, reader, null, completer);
     }
 

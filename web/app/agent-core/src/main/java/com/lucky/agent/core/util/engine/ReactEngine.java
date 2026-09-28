@@ -208,8 +208,12 @@ public class ReactEngine implements Engine {
                 AiMessage ai;
                 TurnOutcome outcome;
                 try {
+                    // 思考链回传契约归一化（案例 K 残余）：推理模型要求「请求携带 tools」时历史所有
+                    // assistant 消息原样带 reasoning_content，否则 HTTP 400。若某轮模型未产出思考，
+                    // 该消息与其余带思考消息不一致 —— 此处对「发往模型」的副本做归一化（不改内存态/落盘）：
+                    // 纯文本无思考 assistant 剔除；含 tool_calls 的无思考 assistant 补最小占位以保住配对。
                     ChatRequest request = ChatRequest.builder()
-                            .messages(messages)
+                            .messages(ThinkingConsistency.normalizeForThinkingMode(messages))
                             .toolSpecifications(tools)
                             .build();
                     // 流式：整轮实时推送正文增量，工具请求在完成回调中返回；同步：整段返回后伪流式补齐

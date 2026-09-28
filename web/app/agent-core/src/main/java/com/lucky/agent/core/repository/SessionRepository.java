@@ -5,6 +5,10 @@ import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.util.JsonlUtil;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -13,6 +17,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
@@ -237,6 +243,76 @@ public class SessionRepository {
         List<String> kept = new ArrayList<>(lines.subList(0, cut + 1));
         JsonlUtil.rewrite(file, kept);
         return lines.size() - kept.size();
+    }
+
+    /**
+     * 整文件重写会话消息（用于 /compact 等手动压缩后写回）。
+     *
+     * <p>仅持久化 user / assistant / system 三类可重建消息；tool 类消息为瞬态、不落盘。
+     * 通过「角色 + 正文」与旧记录对齐，尽量保留原 ts 与 assistant 消息的检查点引用
+     * （压缩摘要为新正文，无检查点，符合预期）。</p>
+     */
+    public synchronized void replaceMessages(String sessionId, List<ChatMessage> messages) {
+        try {
+            Files.createDirectories(sessionsDir);
+            Path file = messageFile(sessionId);
+            Map<String, SessionSnapshot.MessageRecord> byKey = new HashMap<>();
+            for (SessionSnapshot.MessageRecord r : loadMessages(sessionId)) {
+                byKey.put(r.role() + "" + r.content(), r);
+            }
+            List<String> lines = new ArrayList<>();
+            long base = System.nanoTime();
+            for (int i = 0; i < messages.size(); i++) {
+                ChatMessage m = messages.get(i);
+                String role;
+                String content;
+                if (m instanceof UserMessage um) {
+                    role = "user";
+                    content = um.singleText();
+                } else if (m instanceof AiMessage am) {
+                    role = "assistant";
+                    content = am.text();
+                } else if (m instanceof SystemMessage sm) {
+                    role = "system";
+                    content = sm.text();
+                } else {
+                    continue; // 跳过无法持久化的瞬态类型
+                }
+                if (content == null) {
+                    content = "";
+                }
+                Map<String, Object> rec = new LinkedHashMap<>();
+                SessionSnapshot.MessageRecord orig = byKey.get(role + "" + content);
+                String ts = orig != null ? orig.ts() : String.valueOf(base + i);
+                rec.put("role", role);
+                rec.put("content", content);
+                rec.put("ts", ts);
+                if (orig != null && orig.checkpointIds() != null && !orig.checkpointIds().isEmpty()) {
+                    rec.put("checkpointIds", orig.checkpointIds());
+                }
+                lines.add(objectMapper.writeValueAsString(rec));
+            }
+            JsonlUtil.rewrite(file, lines);
+        } catch (Exception e) {
+            log.warn("重写会话消息失败：{}", sessionId, e);
+        }
+    }
+
+    /** 清空会话全部消息（/undo 撤销到首条时调用）。返回被清空的条数。 */
+    public synchronized int clearMessages(String sessionId) {
+        Path file = messageFile(sessionId);
+        if (!Files.exists(file)) {
+            return 0;
+        }
+        List<String> lines = JsonlUtil.readLines(file);
+        int n = 0;
+        for (String l : lines) {
+            if (!l.isBlank()) {
+                n++;
+            }
+        }
+        JsonlUtil.rewrite(file, List.of());
+        return n;
     }
 
     /** 加载会话元数据�?*/

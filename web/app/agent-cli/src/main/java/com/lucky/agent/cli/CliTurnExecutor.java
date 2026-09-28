@@ -10,6 +10,7 @@ import reactor.core.Disposable;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -120,10 +121,25 @@ public final class CliTurnExecutor {
                 System.currentTimeMillis() - started);
     }
 
-    /** {@code Mono#block(Duration)} 超时抛出的固定文案，据此区分「超时」与「运行失败」。 */
+    /**
+     * 判定是否为「等待超时」。
+     *
+     * <p>{@code Mono#block(Duration)} 超时抛 {@link IllegalStateException}，文案形如
+     * {@code "Timeout on blocking read for ..."}。此处做两点稳健化：① 大小写不敏感匹配
+     * （不依赖 Reactor 的精确拼写）；② 沿 {@code cause} 链查找（响应式栈可能把原始异常包一层）。
+     * 刻意仍限定 {@link IllegalStateException}，避免把模型侧连接超时（{@code TimeoutException}）
+     * 误判为「本轮等待超时」而改变退出码语义。</p>
+     */
     private static boolean isTimeout(Throwable e) {
-        return e instanceof IllegalStateException
-                && e.getMessage() != null && e.getMessage().contains("Timeout");
+        for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause()) {
+            if (t instanceof IllegalStateException) {
+                String msg = t.getMessage();
+                if (msg != null && msg.toLowerCase(Locale.ROOT).contains("timeout")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

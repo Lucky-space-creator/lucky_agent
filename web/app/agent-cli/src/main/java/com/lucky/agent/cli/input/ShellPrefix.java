@@ -1,14 +1,14 @@
 package com.lucky.agent.cli.input;
 
+import com.lucky.agent.cli.approval.ApprovalHandler;
 import com.lucky.agent.cli.channel.OutputSink;
-import com.lucky.agent.cli.term.InputReader;
 import com.lucky.agent.common.dto.ExecResult;
 import com.lucky.agent.common.dto.FileOp;
 import com.lucky.agent.executor.api.FileService;
 import com.lucky.agent.permission.service.PermissionService;
 
 import java.time.Duration;
-import java.util.Locale;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -20,11 +20,13 @@ import java.util.Map;
  * 而 Agent 自己跑同一条命令却会被拦。走 {@code FileService#exec} 意味着
  * 「权限裁决 → realpath 硬边界 → 命令拆分 + 沙箱红线 → 断路器」全部生效，与 Agent 调用完全同一条链路。</p>
  *
- * <p><b>ASK 的处理</b>：{@code FileService#exec} 的返回是同构的（成功 / 失败 / 需确认），
- * 这里对「需用户确认」做一次终端交互 —— 用户同意则用 {@code allowOnce} 放行<b>形状完全相同</b>的
- * {@link FileOp}（{@code EXEC} + {@code workspaceId} + {@code path=null} + {@code args.command}），
- * 然后重试一次。这个形状必须与 {@code LocalFileService#exec} 内部构造的完全一致，否则放行键对不上、
- * 重试会再次被拦。</p>
+ * <p><b>ASK 的处理（收口到 {@link ApprovalHandler}）</b>：{@code FileService#exec} 的返回是同构的
+ * （成功 / 失败 / 需确认），命中「需确认」（{@link ExecResult#ASK_REQUIRED}）时<b>不再自建一套
+ * y/N 提示</b>，而是调用与 Agent 触发的高危确认完全相同的 {@link ApprovalHandler#ask} —— 四档语义
+ * （仅本次 / 本会话 / 持久规则 / 拒绝）、提示文案、审计行全部一致。用户同意后，用
+ * {@code allowOnce} 放行<b>形状完全相同</b>的 {@link FileOp}（{@code EXEC} + {@code workspaceId}
+ * + {@code path=null} + {@code args.command}），然后重试一次；该形状必须与
+ * {@code LocalFileService#exec} 内部构造的完全一致，否则放行键对不上、重试会再次被拦。</p>
  */
 public final class ShellPrefix {
 
@@ -45,10 +47,11 @@ public final class ShellPrefix {
     /**
      * 执行一行 {@code !} 命令。
      *
+     * @param approval 高危确认裁决器（与 Agent 路径共用同一套四档语义与提示）
      * @return 是否真的执行了（false 表示用法错误，调用方无需额外处理）
      */
     public static boolean run(String line, String workspaceId, FileService fileService,
-                              PermissionService permissionService, OutputSink out, InputReader reader) {
+                              ApprovalHandler approval, PermissionService permissionService, OutputSink out) {
         String command = line.substring(1).trim();
         if (command.isEmpty()) {
             out.println(out.theme().yellow("用法：!<命令>，例如 !git status"));
@@ -65,34 +68,31 @@ public final class ShellPrefix {
         }
 
         if (result.ok()) {
-            String text = result.content() != null ? result.content()
-                    : (result.summary() == null ? "（无输出）" : result.summary());
-            out.println(text.stripTrailing());
+            printContent(out, result);
             return true;
         }
 
         if (needsApproval(result)) {
-            if (reader == null) {
-                out.println(out.theme().yellow("该命令需用户确认，当前为非交互环境 → 不执行。"));
+            if (approval == null) {
+                out.println(out.theme().yellow("该命令需用户确认，但当前没有可用的授权交互 → 不执行。"));
                 return true;
             }
-            out.println(out.theme().danger(" ⚠️ 该命令被判定为高危 ") + " " + command);
-            String answer = reader.readLine("是否执行？(y/N): ");
-            if (!isYes(answer)) {
+            ApprovalHandler.Verdict verdict = approval.ask(askOp(command), workspaceId);
+            if (!verdict.allowed()) {
                 out.println(out.theme().dim("已取消。"));
                 return true;
             }
-            FileOp op = new FileOp(FileOp.OpType.EXEC).workspaceId(workspaceId)
-                    .args(Map.of("command", command));
-            permissionService.allowOnce(op);
+            if (permissionService == null) {
+                out.println(out.theme().red("权限服务不可用，无法放行执行。"));
+                return true;
+            }
+            permissionService.allowOnce(allowOnceOp(workspaceId, command));
             ExecResult retry = exec(fileService, workspaceId, command, out);
             if (retry == null) {
                 return true;
             }
             if (retry.ok()) {
-                String text = retry.content() != null ? retry.content()
-                        : (retry.summary() == null ? "（无输出）" : retry.summary());
-                out.println(text.stripTrailing());
+                printContent(out, retry);
             } else {
                 out.println(out.theme().red("执行失败：" + safeError(retry)));
             }
@@ -101,6 +101,12 @@ public final class ShellPrefix {
 
         out.println(out.theme().red("执行失败：" + safeError(result)));
         return true;
+    }
+
+    private static void printContent(OutputSink out, ExecResult r) {
+        String text = r.content() != null ? r.content()
+                : (r.summary() == null ? "（无输出）" : r.summary());
+        out.println(text.stripTrailing());
     }
 
     private static ExecResult exec(FileService fileService, String workspaceId, String command, OutputSink out) {
@@ -112,14 +118,28 @@ public final class ShellPrefix {
         }
     }
 
-    private static boolean needsApproval(ExecResult r) {
-        String err = r.error();
-        return err != null && (err.contains("需用户确认") || err.toLowerCase(Locale.ROOT).contains("confirm"));
+    /**
+     * 构造「待裁决的操作」——形状与内核 {@code ReactEngine#publishAsk} 一致：
+     * EXEC 无 {@code path} 参数时，把 {@code command} 放进 {@code path}，{@code args} 原样带上。
+     * 这决定了 {@code a}/{@code r} 两档的匹配键，必须与内核产出的 ask 完全同形。
+     */
+    private static Map<String, Object> askOp(String command) {
+        Map<String, Object> op = new HashMap<>();
+        op.put("opType", "EXEC");
+        op.put("path", command);
+        op.put("args", Map.of("command", command));
+        return op;
     }
 
-    private static boolean isYes(String answer) {
-        String a = answer == null ? "" : answer.trim().toLowerCase(Locale.ROOT);
-        return "y".equals(a) || "yes".equals(a);
+    /** 放行用的 op：形状必须与 {@code LocalFileService#exec} 构造的完全一致（path=null）。 */
+    private static FileOp allowOnceOp(String workspaceId, String command) {
+        return new FileOp(FileOp.OpType.EXEC).workspaceId(workspaceId)
+                .args(Map.of("command", command));
+    }
+
+    private static boolean needsApproval(ExecResult r) {
+        String err = r.error();
+        return err != null && err.contains(ExecResult.ASK_REQUIRED);
     }
 
     private static String safeError(ExecResult r) {

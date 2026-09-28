@@ -187,3 +187,23 @@ agent-memory
 - [ ] 写入一条"高噪声"输入，噪声过滤后不进入 `mem.jsonl`。
 - [ ] 写入与已有记忆冲突的新事实，旧条置信度下降（融合排序时排序靠后）。
 - [ ] 召回结果中用户偏好项排在平台建议前（FORCE 项除外），且均带 `track` 标记。
+
+---
+
+## 九、实现现状补充（文档-代码同步，2026-09-28）
+
+> 上文为设计稿，本章记录实际实现；代码为事实源。实际包：`com.lucky.agent.memory.{api,config,repository,service,support,util}`。
+
+### 9.1 实际存储组织（双轨 + 项目分组）
+- **JSONL 轨**：`UserMemoryStore`（写入走 NoiseFilter → Cleaner → FactExtractor → DecayManager 管线，含容量上限与时间因子）。
+- **md 轨（分层）**：`MarkdownMemoryWriter`（会话总结 → 项目合并 → 整体合并）+ `MemoryIndex`（索引）+ `HierarchyMemoryRetriever`（分层召回）。
+- **项目分组（修复跨项目串扰）**：`WorkspaceMemoryPaths.dirName` 按**工作空间物理全路径转义**命名目录（对标 Claude Code `projects/<路径转义>/`），含存量旧命名迁移与读取侧双目录兜底——JSONL 与 md 两轨均按项目分组（不再按 userId 全局混存）。
+- 平台轨：`PlatformMemoryStore`（只读保护）。
+
+### 9.2 做梦机制（对标 Claude Auto Dream）已落地
+- `MemorySweeper`（@Component + @Scheduled）：
+  - `sweep()`：默认每 6h，JSONL 衰减/遗忘 + 单项目条目上限 200（`MAX_ENTRIES_PER_SCOPE`）。
+  - `dream()`：默认每 24h + 新增会话数门控 + 单实例锁，扫描 `mdroot/<workspace>/sessions/*.md` 新增会话 → 按工作空间聚合 → `mdWriter.consolidateDir` LLM 分类去重、**矛盾以时间近者优先** → 索引上限兜底；与收尾总结共享写锁互斥。
+
+### 9.3 记忆收尾避免阻塞（P0-4 修复）
+- 会话收尾记忆总结改为**异步**（`ConversationManager` 在 SSE 收尾处 `Schedulers.boundedElastic().schedule(...)`），失败仅告警不阻断主流程。

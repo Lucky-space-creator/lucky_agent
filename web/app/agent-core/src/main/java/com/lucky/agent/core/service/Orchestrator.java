@@ -360,7 +360,7 @@ public class Orchestrator implements AgentOrchestrator {
 
             // 循环守卫：增强为「回答文本 OR 验证结论」任一连续两轮一致即提前终止，
             // 防止结论措辞略变但回答一字不差的重复回答（Issue 1 根因）
-            String thisAnswer = roundLog == null ? "" : roundLog.toString().trim();
+            String thisAnswer = roundLog.toString().trim();
             if (iter >= 3 && stuckLoop(iter, lastAnswerNorm, thisAnswer)) {
                 publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【安全阀】连续两轮回答内容一致，判定为重复回答，提前结束本轮。"));
@@ -565,7 +565,7 @@ public class Orchestrator implements AgentOrchestrator {
                 if (r != null && r.error() == null && !isSuspending(r)) {
                     break;
                 }
-                if (r != null && isOptions(r)) {
+                if (isOptions(r)) {
                     // 条件选择：同 ask，中断后续步骤并挂起等待用户选择（选项事件已由引擎发布）
                     taskProgressTracker.progress(sessionId, t.taskId(),
                             AgentEvent.TaskProgressStatus.FAILED, i + 1, size, publisher);

@@ -185,3 +185,25 @@ agent-model
 - [ ] 构造额度耗尽，前端收到明确"额度不足"提示且自动执行暂停，无静默伪造回复。
 - [ ] 主端点返回 429，router 切备用成功返回正常应答（多模型配置下）。
 - [ ] 模拟超时，重试有限次后仍失败，对话不崩、转 ASK 并记日志。
+
+---
+
+## 九、实现现状补充（文档-代码同步，2026-09-28）
+
+> 上文为设计稿，本章记录实际实现；代码为事实源。实际包：`com.lucky.agent.model.{api,config,support}`。
+
+### 9.1 模型兼容适配（与 §6.1 的偏差说明）
+- 当前**直接采用 LangChain4j 官方模型**（`OpenAiCompatibleModel` / `AnthropicCompatibleModel`，实现 `ChatModel` + `StreamingChatModel`），未走 SpringAiModelAdapter 桥接层；D29 允许 Spring AI 仅作辅助接入层，当前实现符合"model 模块不承担编排"边界。
+- 端点适配在 `EndpointAccessCenter.toEndpoint()` → `ModelEndpointImpl.toModel()`，按 URL 格式（`EndpointFormat`）自动识别 OpenAI/Anthropic，**每次调用重建模型**（保证推理深度/配置即时生效）。
+- 推理深度 `InferenceDepth` 映射：OpenAI 映射 `reasoning_effort`（QUICK→low … MAXIMUM→high，OFF→null），Anthropic 映射 thinking budget_tokens；思考链回传（returnThinking + sendThinking `reasoning_content`）已开启。
+
+### 9.2 配置落盘与 Key 加密（D8 / P1-4 修复）
+- `ModelConfigStore` 读写 `<frameworkRoot>/settings.json`（模型端点 + 推理深度 + AgentPreset）。
+- **API Key 不再明文**：`SettingsKeyCipher`（AES-GCM，随机 32B 主密钥存 `<frameworkRoot>/.settings-key`；PBKDF2 派生参数见 `ModelProperties.cipher=PBKDF2`）；历史明文值读侧透传、下次保存自动迁移为密文。
+
+### 9.3 用量统计（模型详情小窗数据源）
+- `ModelUsageTracker`（`support/usage/`）：按端点累计 调用次数/输入输出 token/失败次数/最近时间，`@Scheduled` 每分钟落盘 `<frameworkRoot>/model-usage.json`；模型类在成功/失败/流式 complete 路径统一上报。
+- REST：`GET /api/models/{id}/usage`、`GET /api/models/usage`（ModelController）。
+
+### 9.4 AgentPreset 与全局配置
+- `EndpointAccessCenter.setAgentPreset()` + `AgentPresetController`（GET/POST/DELETE `/agent-preset`）写入 settings.json；`agent-core` 的 `PresetResolver` 读取消费（maxSteps/子代理/验证/压缩阈值/systemPrompt 等）。

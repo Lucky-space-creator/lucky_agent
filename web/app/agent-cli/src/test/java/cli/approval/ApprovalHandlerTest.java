@@ -55,7 +55,7 @@ class ApprovalHandlerTest {
         op.put("path", "old/Report.md");
         op.put("args", Map.of("recursive", true));
 
-        ApprovalHandler.Verdict v = h.ask(op, "确认删除？", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(op, WS);
 
         assertTrue(v.allowed());
         assertSame(op, v.confirm(), "回传必须是同一个 op 对象，不得重建或裁剪字段");
@@ -66,7 +66,7 @@ class ApprovalHandlerTest {
     @DisplayName("缺少 op 时按拒绝处理（不猜一个默认操作）")
     void missingOpIsDenied() {
         ApprovalHandler h = handler(new ScriptedReader("y"), null, false);
-        ApprovalHandler.Verdict v = h.ask(null, "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(null, WS);
         assertFalse(v.allowed());
         assertNull(v.confirm());
         assertEquals(ApprovalHandler.Choice.DENY, v.choice());
@@ -76,7 +76,7 @@ class ApprovalHandlerTest {
     @DisplayName("op 为空 Map 同样拒绝")
     void emptyOpIsDenied() {
         ApprovalHandler h = handler(new ScriptedReader("y"), null, false);
-        assertFalse(h.ask(Map.of(), "?", "HIGH", WS).allowed());
+        assertFalse(h.ask(Map.of(), WS).allowed());
     }
 
     // ------------------------------------------------------------------ 四档
@@ -85,7 +85,7 @@ class ApprovalHandlerTest {
     @DisplayName("直接回车 = 拒绝（默认档是拒绝，不是允许）")
     void blankAnswerDenies() {
         ApprovalHandler h = handler(new ScriptedReader(""), null, false);
-        ApprovalHandler.Verdict v = h.ask(op("WRITE", "a.txt"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(op("WRITE", "a.txt"), WS);
         assertFalse(v.allowed());
         assertEquals(ApprovalHandler.Choice.DENY, v.choice());
     }
@@ -95,7 +95,7 @@ class ApprovalHandlerTest {
     void unknownInputReasks() {
         ScriptedReader reader = new ScriptedReader("lol", "maybe", "y");
         ApprovalHandler h = handler(reader, null, false);
-        ApprovalHandler.Verdict v = h.ask(op("WRITE", "a.txt"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(op("WRITE", "a.txt"), WS);
         assertTrue(v.allowed());
         assertEquals(3, reader.asked(), "应重问两次后再接受 y");
     }
@@ -106,16 +106,16 @@ class ApprovalHandlerTest {
         ScriptedReader reader = new ScriptedReader("a", "y");
         ApprovalHandler h = handler(reader, null, false);
 
-        ApprovalHandler.Verdict first = h.ask(op("WRITE", "a.txt"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict first = h.ask(op("WRITE", "a.txt"), WS);
         assertEquals(ApprovalHandler.Choice.ALLOW_SESSION, first.choice());
 
         // 同 opType + 同 path：不再消耗输入（reader 只有一条剩余答案 "y" 留给后面的 DELETE）
-        ApprovalHandler.Verdict again = h.ask(op("WRITE", "a.txt"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict again = h.ask(op("WRITE", "a.txt"), WS);
         assertTrue(again.allowed());
         assertEquals(1, reader.asked(), "第二次不应再问用户");
 
         // 同 path 但操作类型不同（DELETE）：必须重新询问 —— 否则「允许写」会连带放行「删除」
-        ApprovalHandler.Verdict delete = h.ask(op("DELETE", "a.txt"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict delete = h.ask(op("DELETE", "a.txt"), WS);
         assertTrue(delete.allowed());
         assertEquals(2, reader.asked());
     }
@@ -127,7 +127,7 @@ class ApprovalHandlerTest {
         ApprovalHandler h = handler(reader, null, false);
         Map<String, Object> noType = new HashMap<>();
         noType.put("path", "a.txt");
-        ApprovalHandler.Verdict v = h.ask(noType, "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(noType, WS);
         assertTrue(v.allowed(), "重问后由 y 放行");
         assertEquals(ApprovalHandler.Choice.ALLOW_ONCE, v.choice());
         assertEquals(2, reader.asked());
@@ -139,7 +139,7 @@ class ApprovalHandlerTest {
         ScriptedReader reader = new ScriptedReader("n");
         ApprovalHandler h = handler(reader, null, true);
         Map<String, Object> op = op("EXEC", "rm -rf build");
-        ApprovalHandler.Verdict v = h.ask(op, "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(op, WS);
         assertTrue(v.allowed());
         assertSame(op, v.confirm());
         assertEquals(0, reader.asked(), "自动放行不应再问用户");
@@ -150,7 +150,7 @@ class ApprovalHandlerTest {
     @DisplayName("非交互环境（无输入源）：拒绝，不挂起等待")
     void nonInteractiveDenies() {
         ApprovalHandler h = handler(null, null, false);
-        ApprovalHandler.Verdict v = h.ask(op("DELETE", "a.txt"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(op("DELETE", "a.txt"), WS);
         assertFalse(v.allowed());
         assertFalse(h.interactive());
     }
@@ -167,7 +167,7 @@ class ApprovalHandlerTest {
         ScriptedReader reader = new ScriptedReader("r", "yes");
         ApprovalHandler h = handler(reader, permissions, false);
 
-        ApprovalHandler.Verdict v = h.ask(op("WRITE", "src/Main.java"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(op("WRITE", "src/Main.java"), WS);
         assertEquals(ApprovalHandler.Choice.PERSISTED, v.choice());
         assertTrue(v.allowed());
 
@@ -196,7 +196,7 @@ class ApprovalHandlerTest {
         ScriptedReader reader = new ScriptedReader("r", "y", "y");
         ApprovalHandler h = handler(reader, permissions, false);
 
-        ApprovalHandler.Verdict v = h.ask(op("WRITE", "a.txt"), "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(op("WRITE", "a.txt"), WS);
         assertNull(permissions.saved, "只输入 y（非 yes）不得写入规则文件");
         assertTrue(v.allowed(), "随后改选 y 仍可仅本次放行");
         assertEquals(ApprovalHandler.Choice.ALLOW_ONCE, v.choice());
@@ -208,7 +208,7 @@ class ApprovalHandlerTest {
         RecordingPermissionService permissions = new RecordingPermissionService();
         ApprovalHandler h = handler(new ScriptedReader("r", "yes"), permissions, false);
 
-        h.ask(op("WRITE", "/abs/x.txt"), "?", "HIGH", WS);
+        h.ask(op("WRITE", "/abs/x.txt"), WS);
 
         String pattern = permissions.saved.get(permissions.saved.size() - 1).matcher().pattern();
         // 内核 PermissionEvaluator 会先去掉前导斜杠，再用 workspaceRoot.resolve(...) 求绝对路径；
@@ -223,7 +223,7 @@ class ApprovalHandlerTest {
         RecordingPermissionService permissions = new RecordingPermissionService();
         ApprovalHandler h = handler(new ScriptedReader("r", "yes"), permissions, false);
 
-        h.ask(op("EXEC", "git push origin main"), "?", "HIGH", WS);
+        h.ask(op("EXEC", "git push origin main"), WS);
 
         PermissionRule added = permissions.saved.get(permissions.saved.size() - 1);
         assertEquals(PermissionRule.RuleType.COMMAND, added.type());
@@ -239,7 +239,7 @@ class ApprovalHandlerTest {
         Map<String, Object> empty = new HashMap<>();
         empty.put("opType", "WRITE");
         empty.put("path", "");
-        ApprovalHandler.Verdict v = h.ask(empty, "?", "HIGH", WS);
+        ApprovalHandler.Verdict v = h.ask(empty, WS);
 
         assertNull(permissions.saved);
         assertFalse(v.allowed());

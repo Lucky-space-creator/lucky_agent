@@ -208,11 +208,15 @@ public final class EventRenderer implements EventSink {
     private void renderOptions(Map<String, Object> p) {
         newLineIfMid();
         out.println(out.theme().bold("❓ " + str(p.get(AgentEvent.KEY_QUESTION))));
-        for (Map<String, Object> m : EventPayloads.optionList(p.get(AgentEvent.KEY_OPTIONS))) {
+        List<Map<String, Object>> options = EventPayloads.optionList(p.get(AgentEvent.KEY_OPTIONS));
+        for (int i = 0; i < options.size(); i++) {
+            Map<String, Object> m = options.get(i);
             boolean recommended = Boolean.TRUE.equals(m.get("recommended"));
             String label = str(m.get("label"));
             String detail = str(m.get("detail"));
-            out.println("   " + out.theme().cyan("[" + str(m.get("id")) + "]") + " " + label
+            // 展示「序号」而非内核 id：用户实际只能输入序号（ReplLoop#chooseOption 按 1 起下标取 label），
+            // 显示 id 会造成「照着输却无效」——展示与录入必须用同一套键。
+            out.println("   " + out.theme().cyan("[" + (i + 1) + "]") + " " + label
                     + (recommended ? " " + out.theme().green("（推荐）") : ""));
             if (detail != null && !detail.isEmpty()) {
                 out.println("       " + out.theme().dim(detail));

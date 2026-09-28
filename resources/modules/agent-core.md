@@ -266,3 +266,40 @@ interface Engine {
 - 压缩固定为五级 `CompactionPipeline`，压缩失败必须熔断，不能无限重试。
 - 提示词固定为静态/动态分界 + 五级覆盖优先级。
 - 子代理只回摘要或结构化结果，不提升权限，不绕过 ASK 与执行臂硬边界。
+
+---
+
+## 十、实现现状补充（文档-代码同步，2026-09-28）
+
+> 本章记录实际代码布局与上文的偏差，代码为事实源。
+
+### 10.1 实际包结构（当前代码）
+```
+com.lucky.agent.core
+├── config/            CoreProperties, CoreModuleConfig, PresetResolver（orchestrator-mode 三态：reactor/thin/langgraph）
+├── service/           Orchestrator（默认）、LangGraphOrchestrator（条件启用）、ConversationManager、LoopMemoryManager
+├── support/           engine(ReactEngine) · verify(VerificationChain/LlmJudgeVerifier) · compact · subagent(SubAgentExecutor/TaskScheduler/TaskDecomposer/SubAgentFactory) · gateway(ToolGateway) · metrics(SessionMetrics) · models
+├── repository/        SessionRepository（会话落盘 JSONL）
+├── runtime/           ★ D31 薄主循环+厚运行时全套
+│   ├── loop/          ThinAgentLoop, LoopController
+│   ├── middleware/    RuntimeMiddleware（权限/预算/重试/压缩/召回/快照/日志）
+│   ├── tool/          RuntimeTool（decompose / spawn_sub_agent / verify / memory）
+│   ├── gateway/       ModelGateway, EngineModelGateway, RetryModelGateway, CircuitBreakerModelGateway（D34）
+│   ├── session/       RuntimeSessionFactory, RuntimeSession, RuntimeContext
+│   └── budget/        BudgetManager（四级预算）
+└── util/              各种工具（token、subagent 等）
+```
+设计文档 §二 的树（engine/planactask/hook/compact 平铺）为早期设计稿，实际已重组为 `support/` + `runtime/`；`hook` 以 `HookEventDispatcher` 形式存在（搜索 `service/Hook` 或 `support/hook`）。
+
+### 10.2 主循环三模式（D31/D33）
+- `core.orchestrator-mode`：`reactor`（默认，`matchIfMissing=true`）/ `thin` / `langgraph`，均条件启用同一运行时。
+- **thin 已完整实现未上线**：runtime/** 全量实现并有 `RuntimeAcceptanceTest`（budget/verify/网关/中间件，断言 token 降幅、四级预算、traceId 贯通等 14 项）。默认配置仍是 reactor，需灰度验证后切换。
+- 模型韧性链路（D34）已注入：`AgentRuntimeConfiguration.modelGateway()` = CircuitBreaker(Retry(Engine))，供 thin 运行时与 ActScheduler 消费。
+
+### 10.3 意图解析/确认流程（重写后行为，修复历史 P0-1/P0-2/P0-4）
+- 意图解析：`ConversationManager.parseIntent` 改为**轻量模型直接同步调用**，不再经引擎轮（不产生 SSE 正文、不发 stop）。
+- 自由文本确认：`pendingConfirmGoal` + `isConfirmRequest`，明确否定取消、肯定续跑、新指令走正常解析（消除确认死循环）。
+- 会话回灌：内存态从磁盘记录重建（P1-2 修复）。
+
+### 10.4 子代理（P0-2 现状）
+- `Orchestrator` → `SubAgentSpec` → `task_plan` 事件 → `TaskScheduler.scheduleSerial` → `SubAgentExecutor`（独立 SubAgentRuntime/独立 ref）。**已闭环隔离子代理**；并行 fan-out 未启用（TaskScheduler 支持度待扩展）。

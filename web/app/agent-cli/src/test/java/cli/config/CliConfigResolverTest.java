@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -134,6 +135,48 @@ class CliConfigResolverTest {
         assertTrue(c.enabled());
         assertEquals("json", c.values().get("outputFormat"));
         assertEquals("5", c.values().get("maxTurns"));
+    }
+
+    @Test
+    @DisplayName("effectiveRunExtra：键映射正确，且项目配置真正生效（命令行 > 项目本地）")
+    void effectiveRunExtraAppliesProjectConfig(@TempDir Path dir) throws IOException {
+        write(dir, "{\"model\":\"from-project\",\"maxTurns\":8,\"maxBudget\":5000}");
+        CliConfigResolver.ProjectConfig c = resolver.loadProjectConfig(dir, Path.of("/nonexistent-fw"));
+
+        // 未给命令行 → 全部来自项目配置（此前项目配置不生效，只用于 /doctor 展示）
+        Map<String, Object> fromProject = resolver.effectiveRunExtra(null, null, null, c);
+        assertEquals("from-project", fromProject.get("modelId"), "必须带 modelId 键名（内核按此键读取）");
+        assertEquals("8", fromProject.get("maxTurns"));
+        assertEquals("5000", fromProject.get("maxBudget"));
+
+        // 命令行优先于项目配置
+        Map<String, Object> fromFlag = resolver.effectiveRunExtra("flag-model", "12", "9", c);
+        assertEquals("flag-model", fromFlag.get("modelId"));
+        assertEquals("12", fromFlag.get("maxTurns"));
+        assertEquals("9", fromFlag.get("maxBudget"));
+
+        // 无任何来源 → 空（由内核默认值兜底，不得塞空串占位）
+        CliConfigResolver.ProjectConfig none =
+                resolver.loadProjectConfig(dir.resolve("nope"), Path.of("/nonexistent-fw"));
+        assertTrue(resolver.effectiveRunExtra(null, null, null, none).isEmpty());
+    }
+
+    @Test
+    @DisplayName("outputFormat / plain 走三级解析并真正生效（命令行 > 项目本地，P0-2 回归）")
+    void outputFormatAndPlainResolveFromProject(@TempDir Path dir) throws IOException {
+        write(dir, "{\"outputFormat\":\"json\",\"plain\":true}");
+        CliConfigResolver.ProjectConfig c = resolver.loadProjectConfig(dir, Path.of("/nonexistent-fw"));
+
+        // 命令行未给出（null）→ 取项目配置（此前两键声明可配却不生效）
+        assertEquals("json", resolver.resolve(null, "outputFormat", c).orElseThrow());
+        assertEquals("true", resolver.resolve(null, "plain", c).orElseThrow());
+        // 命令行优先
+        assertEquals("stream-json", resolver.resolve("stream-json", "outputFormat", c).orElseThrow());
+        // 无项目配置且无命令行 → 空（由默认值兜底，绝不能让 --output-format 的缺省值顶掉项目层）
+        CliConfigResolver.ProjectConfig none =
+                resolver.loadProjectConfig(dir.resolve("nope"), Path.of("/nonexistent-fw"));
+        assertTrue(resolver.resolve(null, "outputFormat", none).isEmpty());
+        assertTrue(resolver.resolve(null, "plain", none).isEmpty());
     }
 
     private static String envName(String key) {

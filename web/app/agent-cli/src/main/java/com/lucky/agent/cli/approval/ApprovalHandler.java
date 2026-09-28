@@ -117,19 +117,20 @@ public final class ApprovalHandler {
     /**
      * 就一次高危操作向用户求裁决。
      *
+     * <p><b>本类只做「裁决」，不做「渲染」</b>：{@code ask} 事件的展示（提问文本、操作、参数、风险）
+     * 统一由 {@link com.lucky.agent.cli.channel.EventRenderer} 承担，本类只打印裁决相关的
+     * 提示与结果。此前两处各打印一遍，终端上会看到同样的授权请求出现两次。</p>
+     *
      * @param op          {@code ask} 事件 payload 中的 {@code op}（必须原样）
-     * @param question    内核给出的提问文本
-     * @param risk        风险等级
      * @param workspaceId 当前工作空间（解析相对路径用）
      */
-    public Verdict ask(Map<String, Object> op, String question, String risk, String workspaceId) {
+    public Verdict ask(Map<String, Object> op, String workspaceId) {
         if (op == null || op.isEmpty()) {
             out.println(out.theme().red("⚠️ 内核请求授权但未提供操作详情，出于安全考虑按「拒绝」处理。"));
             return Verdict.deny(null);
         }
         String opType = str(op.get("opType"));
         String path = str(op.get("path"));
-        printRequest(question, risk, op);
 
         if (autoApprove) {
             out.println(out.theme().yellow("⏵ 已开启 --auto-approve，自动放行：") + " " + describe(opType, path));
@@ -305,21 +306,6 @@ public final class ApprovalHandler {
 
     // ------------------------------------------------------------------ 展示
 
-    private void printRequest(String question, String risk, Map<String, Object> op) {
-        out.println();
-        out.println(out.theme().danger(" ⚠️ 需要授权 ") + " "
-                + (question == null || question.isBlank() ? "高危操作需你确认" : question));
-        out.println("   操作：" + out.theme().bold(str(op.get("opType")))
-                + "   路径：" + str(op.get("path")));
-        Object args = op.get("args");
-        if (args != null) {
-            out.println("   参数：" + out.theme().dim(abbreviate(String.valueOf(args), 240)));
-        }
-        if (risk != null && !risk.isBlank()) {
-            out.println("   风险：" + out.theme().yellow(risk));
-        }
-    }
-
     private static String describe(String opType, String path) {
         return (opType == null || opType.isBlank() ? "?" : opType) + " " + (path == null ? "" : path);
     }
@@ -331,11 +317,6 @@ public final class ApprovalHandler {
         }
         String normalized = path == null ? "" : path.replace('\\', '/').toLowerCase(Locale.ROOT).trim();
         return opType.toUpperCase(Locale.ROOT) + "\u0000" + normalized;
-    }
-
-    private static String abbreviate(String text, int limit) {
-        String flat = text.replaceAll("\\s+", " ").trim();
-        return flat.length() <= limit ? flat : flat.substring(0, limit) + "…";
     }
 
     private static String str(Object o) {

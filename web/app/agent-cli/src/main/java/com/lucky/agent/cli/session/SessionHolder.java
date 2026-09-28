@@ -41,11 +41,6 @@ public final class SessionHolder {
         return ref.workspaceId();
     }
 
-    /** 换一个工作空间（保留会话 ID，用于 {@code /workspace} 之外的场景）。 */
-    public void workspaceId(String workspaceId) {
-        this.ref = new SessionRef(ref.sessionId(), ref.userId(), workspaceId);
-    }
-
     /** 会话 ID 短形式（状态栏展示）。 */
     public String shortId() {
         String id = ref.sessionId();

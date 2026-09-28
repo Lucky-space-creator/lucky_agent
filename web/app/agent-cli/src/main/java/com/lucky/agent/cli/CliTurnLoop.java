@@ -92,13 +92,17 @@ public final class CliTurnLoop {
         Set<String> askedOps = new HashSet<>();
 
         while (true) {
-            outcome = executor.execute(ref, current, extra);
-            steps++;
-            report(outcome);
-            if (steps > MAX_STEPS) {
+            // 步数上限在「发起下一次内核往返之前」判定：否则上限会被执行一次后才生效（实际 MAX_STEPS+1）
+            if (steps >= MAX_STEPS) {
                 out.println(out.theme().yellow("已达单次请求的最大往返步数（" + MAX_STEPS + "），停止继续。"));
                 break;
             }
+            outcome = executor.execute(ref, current, extra);
+            if (outcome == null) {
+                break;
+            }
+            steps++;
+            report(outcome);
 
             // ① 内核请求授权
             if (isAsk(outcome)) {
@@ -115,8 +119,7 @@ public final class CliTurnLoop {
                                     + "属于内核侧问题，请据此排查而不是反复授权。"));
                     break;
                 }
-                ApprovalHandler.Verdict verdict = approval.ask(op, outcome.capture().askQuestion(),
-                        outcome.capture().askRisk(), ref.workspaceId());
+                ApprovalHandler.Verdict verdict = approval.ask(op, ref.workspaceId());
                 if (!verdict.allowed()) {
                     askDenied = true;
                     break;

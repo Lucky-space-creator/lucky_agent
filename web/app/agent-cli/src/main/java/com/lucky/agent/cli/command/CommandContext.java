@@ -17,11 +17,15 @@ public final class CommandContext {
     private final OutputSink out;
     private final CliServices services;
     private final CliOptions options;
-    private final CliConfigResolver.ProjectConfig project;
+    /** 项目本地配置：可被 {@code /reload} 在会话内替换（对齐「改完保存即生效」）。 */
+    private CliConfigResolver.ProjectConfig project;
     private final SessionHolder holder;
     private final Runnable exitRequest;
 
     private SlashCommandRegistry registry;
+
+    /** 待提交提示词（自定义命令 {@code commands/*.md} 设置，REPL 分发后消费并作为一轮运行）。 */
+    private String pendingPrompt;
 
     public CommandContext(OutputSink out, CliServices services, CliOptions options,
                           CliConfigResolver.ProjectConfig project, SessionHolder holder,
@@ -51,6 +55,11 @@ public final class CommandContext {
         return project;
     }
 
+    /** 用重新读取的项目本地配置替换当前上下文中的配置（由 {@code /reload} 调用）。 */
+    public void reloadProject(CliConfigResolver.ProjectConfig project) {
+        this.project = project;
+    }
+
     public SessionHolder holder() {
         return holder;
     }
@@ -66,5 +75,20 @@ public final class CommandContext {
 
     public void registry(SlashCommandRegistry registry) {
         this.registry = registry;
+    }
+
+    /**
+     * 登记一个待提交的提示词（自定义命令用）：REPL 在分发结束后会消费它并作为一轮运行。
+     * 与直接运行的区别是——命令本身只负责「产出提示词」，真正的提交仍走统一的单轮执行链路。
+     */
+    public void runPrompt(String text) {
+        this.pendingPrompt = text;
+    }
+
+    /** 取出并清空待提交提示词（REPL 调用一次后失效）。 */
+    public String consumePendingPrompt() {
+        String p = pendingPrompt;
+        pendingPrompt = null;
+        return p;
     }
 }

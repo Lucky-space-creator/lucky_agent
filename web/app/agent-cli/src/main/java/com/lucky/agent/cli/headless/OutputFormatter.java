@@ -154,6 +154,9 @@ public final class OutputFormatter implements EventSink {
         result.put("status", statusOf(outcome));
         result.put("summary", textOf(outcome));
         result.put("error", outcome == null ? "无运行结果" : outcome.errorText());
+        // tokenUsed 与 turnTokens 口径不同，刻意分别输出、不强行对齐：
+        //  · tokenUsed ：取内核 RunResult 的会话级统计（内核视角，含各阶段，可能与事件上报不完全一致）；
+        //  · turnTokens：取本轮 token 事件的 used 累加（事件流视角，与状态栏展示同源）。
         result.put("tokenUsed", outcome == null || outcome.result() == null
                 ? 0L : outcome.result().tokenUsed());
         result.put("model", outcome == null || outcome.result() == null

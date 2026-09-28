@@ -7,8 +7,8 @@ import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.dto.UserInput;
 import com.lucky.agent.core.service.ConversationManager;
-import com.lucky.agent.core.util.runtime.AgentEventPublisher;
 import com.lucky.agent.core.util.runtime.ConversationStateManager;
+import com.lucky.agent.core.util.runtime.SessionCancellation;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -55,19 +55,12 @@ public class CliChannel implements AgentChannel {
     /**
      * 取消当前运行。
      *
-     * <p>语义与 {@code WebChannel#cancel} 完全一致（同一内核原语）：先置位会话取消标记让引擎在
-     * 循环边界尽早退出，再补发一个 {@code stop} 收尾（避免订阅方悬挂等待），最后销毁 sink。
-     * 两处实现刻意保持一致，若后续需再次调整，应将其上提到 {@code agent-core} 统一，而不是各自修改。</p>
+     * <p>与 {@code WebChannel#cancel} 共用同一内核原语 {@link SessionCancellation#cancel}：
+     * 置取消标志 → 补发 {@code stop} 收尾 → 销毁 sink。通道不再各自实现取消逻辑。</p>
      */
     @Override
     public Mono<Void> cancel(SessionRef session) {
-        return Mono.fromRunnable(() -> {
-            stateManager.find(session.sessionId()).ifPresent(s -> s.requestCancel());
-            AgentEventPublisher publisher = stateManager.publisher();
-            publisher.publish(session.sessionId(),
-                    AgentEvent.stop(session.sessionId(), "cancelled", "已取消，停止本轮执行。"));
-            publisher.remove(session.sessionId());
-        });
+        return Mono.fromRunnable(() -> SessionCancellation.cancel(stateManager, session));
     }
 
     @Override

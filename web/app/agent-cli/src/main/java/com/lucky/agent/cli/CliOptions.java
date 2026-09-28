@@ -19,6 +19,10 @@ import java.util.List;
  * <p>刻意没有 {@code --dangerously-skip-permissions} 之类的权限逃逸开关：权限由执行臂硬边界强制
  * （决策 D2），CLI 不提供绕过通道。{@code --auto-approve} 只是在<b>需要询问时</b>代答「允许一次」，
  * 不放宽工作空间权限级别，也不越过 realpath 边界。</p>
+ *
+ * <p><b>授权代答与条件选择是两个独立开关</b>：{@code --auto-approve} 只处理「高危操作授权」，
+ * {@code --auto-pick} 只处理「内核给出的条件选择」。此前二者共用一个开关，导致脚本化放行授权时
+ * 会<b>顺带替用户做条件选择</b> —— 那是两个不相干的安全语义，必须分开，否则无法只放行其一。</p>
  */
 @Command(name = "lucky",
         description = "Lucky Agent CLI —— 本地优先的智能体命令行（复用 Web 端同一内核/记忆/执行臂）")
@@ -45,6 +49,10 @@ public class CliOptions {
             description = "指定工作空间；缺省时自动挑选，多候选则询问")
     public String workspace;
 
+    @Option(names = {"--cwd"}, paramLabel = "<路径>",
+            description = "项目本地配置与自定义命令的查找起点（默认取进程 CWD）")
+    public String cwd;
+
     @Option(names = {"--list-sessions"}, description = "列出历史会话后退出")
     public boolean listSessions;
 
@@ -60,12 +68,16 @@ public class CliOptions {
     public String maxBudget;
 
     @Option(names = {"--auto-approve"},
-            description = "自动代答「允许一次」高危确认（仍受执行臂权限级别与边界约束，请谨慎用于脚本）")
+            description = "自动代答「允许一次」高危授权（仅授权，不涉及条件选择；仍受执行臂权限级别与边界约束，请谨慎用于脚本）")
     public boolean autoApprove;
+
+    @Option(names = {"--auto-pick"},
+            description = "自动选择内核给出的条件选项（取「推荐项」或第一项；与 --auto-approve 相互独立）")
+    public boolean autoPick;
 
     // ---------------------------------------------------------------- 输出形态
 
-    @Option(names = {"--output-format"}, paramLabel = "text|json|stream-json", defaultValue = "text",
+    @Option(names = {"--output-format"}, paramLabel = "text|json|stream-json",
             description = "headless 输出格式：text=仅正文（默认，stdout 为正文、stderr 为进度）；"
                     + "json=结束时输出单个 JSON；stream-json=逐事件 NDJSON")
     public String outputFormat;
@@ -104,39 +116,37 @@ public class CliOptions {
         return promptText() != null;
     }
 
-    /** 输出格式规范化（不合法值回落 text，并在 REPL/headless 启动时提示）。 */
-    public String normalizedOutputFormat() {
-        String f = outputFormat == null ? "text" : outputFormat.trim().toLowerCase(java.util.Locale.ROOT);
+    // 注：run 级附加参数（modelId/maxTurns/maxBudget）的取值与组装统一在
+    // CliConfigResolver#effectiveRunExtra（命令行 > 环境变量 > 项目本地配置），
+    // 本类不再自行派生，避免同一份键映射散落两处。
+
+    /**
+     * 输出格式规范化（不合法值回落 text）。
+     *
+     * <p>刻意做成静态方法：{@code --output-format} 未显式给出时为 {@code null}（不带 defaultValue），
+     * 这样它才能参与「命令行 &gt; 环境变量 &gt; 项目本地配置」三级解析；解析后的字符串再交给本方法
+     * 规范化，避免「命令行缺省值」把项目配置这一层永久顶掉。</p>
+     */
+    public static String normalizeOutputFormat(String raw) {
+        String f = raw == null ? "text" : raw.trim().toLowerCase(java.util.Locale.ROOT);
         return switch (f) {
             case "json", "stream-json", "text" -> f;
             default -> "text";
         };
     }
 
-    /** 输出格式是否为合法取值。 */
-    public boolean outputFormatValid() {
-        return outputFormat == null || outputFormat.isBlank()
-                || normalizedOutputFormat().equals(outputFormat.trim().toLowerCase(java.util.Locale.ROOT));
+    /** 输出格式规范化（基于本实例的命令行取值）。 */
+    public String normalizedOutputFormat() {
+        return normalizeOutputFormat(outputFormat);
     }
 
-    /**
-     * 本轮运行的附加参数（会被内核 {@code ConversationManager#buildCtx} 透传进 {@code ctx.extra}）。
-     *
-     * <p>键名必须与内核侧的读取口径一致：{@code modelId} 由 {@code ConversationManager} 直接读取；
-     * {@code maxTurns}/{@code maxBudget} 由 {@code RunOverrides} 的白名单消费
-     * （{@code extra} 里出现白名单之外的键会被忽略，这是刻意的收敛）。</p>
-     */
-    public java.util.Map<String, Object> runExtra() {
-        java.util.Map<String, Object> extra = new java.util.LinkedHashMap<>();
-        if (model != null && !model.isBlank()) {
-            extra.put("modelId", model.trim());
-        }
-        if (maxTurns != null && !maxTurns.isBlank()) {
-            extra.put("maxTurns", maxTurns.trim());
-        }
-        if (maxBudget != null && !maxBudget.isBlank()) {
-            extra.put("maxBudget", maxBudget.trim());
-        }
-        return extra;
+    /** 给定原始值是否为合法输出格式（null/空白视为合法，走默认）。 */
+    public static boolean outputFormatValid(String raw) {
+        return raw == null || raw.isBlank() || normalizeOutputFormat(raw).equals(raw.trim().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    /** 命令行给出的输出格式是否为合法取值。 */
+    public boolean outputFormatValid() {
+        return outputFormatValid(outputFormat);
     }
 }

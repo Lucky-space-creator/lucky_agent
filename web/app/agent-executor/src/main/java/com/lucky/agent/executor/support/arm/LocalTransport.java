@@ -84,7 +84,7 @@ public class LocalTransport implements ExecutorClient {
             return Mono.just(ExecResult.failure(op.opType(), op.requestId(), "权限拒绝"));
         }
         if (local == PermissionDecision.ASK) {
-            return Mono.just(ExecResult.failure(op.opType(), op.requestId(), "高危操作需用户确认"));
+            return Mono.just(ExecResult.failure(op.opType(), op.requestId(), ExecResult.ASK_REQUIRED));
         }
 
         // EXEC 走沙箱：先过 OS 沙箱红线（硬边界，与权限模式解耦，FULL 也绝不跳过）

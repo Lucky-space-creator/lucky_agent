@@ -122,11 +122,6 @@ public final class OutputSink implements Closeable {
         write("", true);
     }
 
-    /** 行内刷新（进度原地更新）；纯文本分支同样用回车覆盖。 */
-    public void carriageReturn(String text) {
-        write("\r" + (text == null ? "" : text), false);
-    }
-
     public void flush() {
         try {
             if (writer != null) {

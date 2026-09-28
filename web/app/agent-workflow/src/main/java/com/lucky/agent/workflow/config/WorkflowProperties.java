@@ -14,6 +14,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *       enabled: false                    # 命令沙箱默认关闭，需显式授权
  *       timeout-ms: 10000
  *       working-dir: /path/to/dir
+ *       workspace-id: ws-xxx              # 命令归入的工作空间（留空回退内置默认工作空间）
  *     execution:
  *       thread-pool-size: 4
  *       default-mode: SYNC
@@ -59,6 +60,16 @@ public class WorkflowProperties {
         private long timeoutMs = 10_000L;
         private String workingDir;
 
+        /**
+         * 命令归入的工作空间 ID。
+         *
+         * <p><b>为什么需要它：</b>{@link com.lucky.agent.workflow.adapter.SandboxAdapter} 只接收
+         * 命令文本，而执行臂（{@code FileService#exec}）必须按工作空间解析权限级别、realpath 根与
+         * 快照位置。宿主用真实执行臂替换 {@code LocalSandboxAdapter} 后，若拿不到工作空间，
+         * 命令就无法进入权限链与硬边界。留空时由宿主回退到内置默认工作空间。</p>
+         */
+        private String workspaceId;
+
         public boolean isEnabled() {
             return enabled;
         }
@@ -81,6 +92,14 @@ public class WorkflowProperties {
 
         public void setWorkingDir(String workingDir) {
             this.workingDir = workingDir;
+        }
+
+        public String getWorkspaceId() {
+            return workspaceId;
+        }
+
+        public void setWorkspaceId(String workspaceId) {
+            this.workspaceId = workspaceId;
         }
     }
 

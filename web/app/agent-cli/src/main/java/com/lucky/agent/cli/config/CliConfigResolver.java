@@ -115,6 +115,10 @@ public final class CliConfigResolver {
      * <p>若起始目录位于框架根内（例如直接从 {@code ~/.lucky_agent/workspace} 启动），
      * 则跳过项目本地层——避免框架读到自己内部的数据目录。</p>
      *
+     * <p><b>为何直接用 {@code Files}</b>：读取的是项目本地配置文件（{@code <cwd>/.lucky/settings.json}），
+     * 属框架配置而非用户工作区产物，不构成「绕过执行臂访问工作区文件」——决策 D2 的硬边界只约束
+     * 工作区内的用户文件操作；且配置必须在执行臂就绪之前解析（工作空间尚未选定）。</p>
+     *
      * @param startDir     起始目录（一般是进程 CWD）
      * @param frameworkRoot 框架根（{@code ~/.lucky_agent}）
      */
@@ -186,6 +190,22 @@ public final class CliConfigResolver {
         }
         String fromProject = project.values().get(key);
         return fromProject == null || fromProject.isBlank() ? Optional.empty() : Optional.of(fromProject);
+    }
+
+    /**
+     * 计算 run 级附加参数的<b>生效值</b>（命令行 &gt; 环境变量 &gt; 项目本地），键名与内核
+     * {@code ctx.extra} 的读取口径保持一致（{@code modelId}/{@code maxTurns}/{@code maxBudget}）。
+     *
+     * <p>这是「项目本地配置真正生效」的落点：CLI 此前只把项目配置用于 {@code /doctor} 展示，
+     * run 路径只看命令行 —— 配置写了却不生效，正是本项目反复踩的「静默降级」坑。</p>
+     */
+    public Map<String, Object> effectiveRunExtra(String modelFlag, String maxTurnsFlag,
+                                                 String maxBudgetFlag, ProjectConfig project) {
+        Map<String, Object> extra = new LinkedHashMap<>();
+        resolve(modelFlag, "model", project).ifPresent(v -> extra.put("modelId", v));
+        resolve(maxTurnsFlag, "maxTurns", project).ifPresent(v -> extra.put("maxTurns", v));
+        resolve(maxBudgetFlag, "maxBudget", project).ifPresent(v -> extra.put("maxBudget", v));
+        return extra;
     }
 
     /** 取值来源说明（供 {@code /doctor} 与启动回显「这个值从哪来」）。 */

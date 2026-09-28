@@ -18,6 +18,16 @@ import java.util.List;
 @Accessors(chain = true, fluent = true)
 public class ExecResult {
 
+    /**
+     * 「该操作需用户显式授权」的判定文案（执行臂在裁决结果为 ASK 时以此文案回失败）。
+     *
+     * <p>存在意义：{@code ExecResult} 只带 {@code ok/error}，没有结构化的「需授权」标志，
+     * 消费方（{@code FileOpsToolset}、CLI 的 {@code ShellPrefix}）只能按文案判定。
+     * 把文案收敛为唯一常量，可避免生产方与消费方因改字而悄悄失配（失配的后果是
+     * 高危命令不再触发授权确认）。</p>
+     */
+    public static final String ASK_REQUIRED = "高危操作需用户确认";
+
     @JsonProperty("ok")
     private boolean ok;
     @JsonProperty("opType")

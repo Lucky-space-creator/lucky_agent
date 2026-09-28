@@ -15,6 +15,7 @@ import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.common.dto.UserInput;
 import com.lucky.agent.core.repository.SessionRepository;
 import com.lucky.agent.core.runtime.budget.RunOverrides;
+import com.lucky.agent.core.util.compact.CompactionPipeline;
 import com.lucky.agent.core.models.dto.EngineRunResult;
 import com.lucky.agent.core.config.PresetResolver;
 import com.lucky.agent.core.util.engine.OptionsBlockParser;
@@ -31,6 +32,7 @@ import com.lucky.agent.permission.service.PermissionService;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -63,6 +65,17 @@ public class ConversationManager {
     /** 意图解析 JSON 解析复用（ObjectMapper 线程安全）。 */
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    /**
+     * 记忆总结输入 transcript 字符上限（P0-4 残余修复）。
+     * <p>长会话 transcript 无界增长会让「会话总结」这次 LLM 调用本身超出记忆模型上下文，
+     * 导致总结失败并回退为原文追加（记忆质量下降）。超限时保留首部（任务目标）+ 尾部
+     * （最新结论），中间以省略标记替代，保证记忆调用始终有界。</p>
+     */
+    private static final int MEMORY_TRANSCRIPT_MAX_CHARS = 12000;
+
+    /** transcript 超限时保留的首部字符数（含用户最初的任务目标）。 */
+    private static final int MEMORY_TRANSCRIPT_HEAD_CHARS = 3000;
+
     private final ConversationStateManager stateManager;
     private final MemoryStore memoryStore;
     private final WorkspaceConfig workspaceConfig;
@@ -75,6 +88,7 @@ public class ConversationManager {
     private final MarkdownMemoryWriter markdownMemoryWriter;
     private final RollbackService rollbackService;
     private final PresetResolver presetResolver;
+    private final CompactionPipeline compactionPipeline;
     private final ConcurrentMap<String, Boolean> sessionStarted = new ConcurrentHashMap<>();
 
     /** 意图确认问句挂起的目标（sessionId → 待确认意图摘要）；供下一轮自由文本确认消费，打破询问死循环。 */
@@ -101,7 +115,8 @@ public class ConversationManager {
                                MetricsCollector metricsCollector,
                                MarkdownMemoryWriter markdownMemoryWriter,
                                RollbackService rollbackService,
-                               PresetResolver presetResolver) {
+                               PresetResolver presetResolver,
+                               CompactionPipeline compactionPipeline) {
         this.stateManager = stateManager;
         this.memoryStore = memoryStore;
         this.workspaceConfig = workspaceConfig;
@@ -114,6 +129,7 @@ public class ConversationManager {
         this.markdownMemoryWriter = markdownMemoryWriter;
         this.rollbackService = rollbackService;
         this.presetResolver = presetResolver;
+        this.compactionPipeline = compactionPipeline;
     }
 
     /**
@@ -265,6 +281,122 @@ public class ConversationManager {
             sessionRepository.truncateAfter(sessionId, messageTs);
             return Map.of("removed", removed, "busy", false);
         }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /**
+     * 手动压缩当前会话上下文（P2-2 /compact）。
+     *
+     * <p>拒绝运行中会话（压缩改写内存态与持久化，与正在进行的事件流/状态回写冲突）。
+     * 从内存态（若在场）或磁盘回放取 ChatMessage，跑 {@link CompactionPipeline}，
+     * 压缩后写回内存态与磁盘。无任何缩减（如消息本就很少）则视为「无需压缩」，不改写。</p>
+     *
+     * @return 含 before/after（压缩前后消息条数）与 busy（运行中拒绝）的结果
+     */
+    public Mono<Map<String, Object>> compact(SessionRef ref) {
+        return Mono.fromCallable(() -> {
+            if (ref == null || ref.sessionId() == null || ref.sessionId().isBlank()) {
+                return Map.<String, Object>of("before", 0, "after", 0, "busy", false, "changed", false);
+            }
+            String sessionId = ref.sessionId();
+            Optional<ConversationStateManager.SessionState> st = stateManager.find(sessionId);
+            if (st.isPresent() && st.get().running()) {
+                return Map.<String, Object>of("before", 0, "after", 0, "busy", true, "changed", false);
+            }
+            List<ChatMessage> messages = st.isPresent()
+                    ? new ArrayList<>(st.get().messages())
+                    : loadChatMessagesForReplay(sessionId);
+            if (messages.isEmpty()) {
+                return Map.<String, Object>of("before", 0, "after", 0, "busy", false, "changed", false);
+            }
+            int before = messages.size();
+            List<ChatMessage> compacted = compactionPipeline.compact(messages, Map.of());
+            int after = compacted.size();
+            if (after >= before) {
+                return Map.<String, Object>of("before", before, "after", after, "busy", false, "changed", false);
+            }
+            st.ifPresent(sessionState -> sessionState.replaceMessages(compacted));
+            sessionRepository.replaceMessages(sessionId, compacted);
+            return Map.<String, Object>of("before", before, "after", after, "busy", false, "changed", true);
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /**
+     * 撤销上一轮：双回滚 —— 既恢复该轮 Agent 产生的文件检查点，又截断对话历史到该轮之前。
+     *
+     * <p>「双回滚」语义：① 文件回滚——调用既有 {@link #rollbackMessage} 还原该轮 assistant 消息关联的检查点；
+     * ② 对话回滚——调用既有 {@link #rollbackToNode} 截断到「最后一条 user 消息之前」，使本轮问答整体消失。
+     * 运行中会话拒绝（避免与事件流/状态回写冲突）。</p>
+     *
+     * @return 含 filesRestored（恢复的检查点数）/ messagesRemoved（移除的消息数）/ busy 的结果
+     */
+    public Mono<Map<String, Object>> undoLastTurn(SessionRef ref) {
+        return Mono.fromCallable(() -> {
+            String sessionId = ref.sessionId();
+            String workspaceId = ref.workspaceId();
+            List<SessionSnapshot.MessageRecord> records = sessionRepository.loadMessages(sessionId);
+            if (records.isEmpty()) {
+                return Map.<String, Object>of("filesRestored", 0, "messagesRemoved", 0, "busy", false);
+            }
+            Optional<ConversationStateManager.SessionState> st = stateManager.find(sessionId);
+            if (st.isPresent() && st.get().running()) {
+                return Map.<String, Object>of("filesRestored", 0, "messagesRemoved", 0, "busy", true);
+            }
+            int lastUserIdx = -1;
+            for (int i = records.size() - 1; i >= 0; i--) {
+                if ("user".equals(records.get(i).role())) {
+                    lastUserIdx = i;
+                    break;
+                }
+            }
+            if (lastUserIdx < 0) {
+                return Map.<String, Object>of("filesRestored", 0, "messagesRemoved", 0, "busy", false);
+            }
+            // ① 文件回滚：取该轮最后一条带检查点的 assistant 消息
+            String lastAssistantTs = null;
+            for (int i = records.size() - 1; i >= lastUserIdx; i--) {
+                SessionSnapshot.MessageRecord r = records.get(i);
+                if ("assistant".equals(r.role()) && r.checkpointIds() != null && !r.checkpointIds().isEmpty()) {
+                    lastAssistantTs = r.ts();
+                    break;
+                }
+            }
+            int filesRestored = 0;
+            if (lastAssistantTs != null) {
+                Integer restored = rollbackMessage(sessionId, workspaceId, lastAssistantTs).block();
+                filesRestored = restored == null ? 0 : restored;
+            }
+            // ② 对话回滚：截断到「最后一条 user 之前」；若 user 是首条则清空
+            int messagesRemoved;
+            if (lastUserIdx == 0) {
+                messagesRemoved = sessionRepository.clearMessages(sessionId);
+                st.ifPresent(sessionState -> sessionState.truncateTo(0));
+            } else {
+                String anchorTs = records.get(lastUserIdx - 1).ts();
+                Map<String, Object> truncated = rollbackToNode(sessionId, anchorTs).block();
+                messagesRemoved = truncated == null ? 0
+                        : (truncated.get("removed") instanceof Number n ? n.intValue() : 0);
+            }
+            return Map.<String, Object>of("filesRestored", filesRestored, "messagesRemoved", messagesRemoved, "busy", false);
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    /** 从磁盘回放记录重建 ChatMessage（含 assistant 思考链），供手动压缩等内核操作使用。 */
+    private List<ChatMessage> loadChatMessagesForReplay(String sessionId) {
+        List<ChatMessage> msgs = new ArrayList<>();
+        for (SessionRepository.ReplayMessage r : sessionRepository.loadForReplay(sessionId)) {
+            if ("user".equals(r.role())) {
+                msgs.add(UserMessage.from(r.content()));
+            } else if ("assistant".equals(r.role())) {
+                if (r.thinking() != null && !r.thinking().isBlank()) {
+                    msgs.add(AiMessage.builder().text(r.content()).thinking(r.thinking()).build());
+                } else {
+                    msgs.add(AiMessage.from(r.content()));
+                }
+            } else if ("system".equals(r.role())) {
+                msgs.add(SystemMessage.from(r.content()));
+            }
+        }
+        return msgs;
     }
 
     /** 会话元数据 → 列表条目（与 listSessions 共用同一结构）。 */
@@ -570,7 +702,9 @@ public class ConversationManager {
         }
     }
 
-    /** 组装会话完整记录文本（供记忆总结使用，user/assistant 交替）。 */
+    /** 组装会话完整记录文本（供记忆总结使用，user/assistant 交替）。
+     *  <p>P0-4 残余修复：长度超过 {@link #MEMORY_TRANSCRIPT_MAX_CHARS} 时保留首部 + 尾部，
+     *  避免长会话把整段 transcript 塞进记忆模型导致超上下文（记忆总结失败）。</p> */
     private String transcriptOf(SessionRef ref) {
         List<SessionSnapshot.MessageRecord> records = sessionRepository.loadMessages(ref.sessionId());
         if (records == null || records.isEmpty()) {
@@ -580,7 +714,14 @@ public class ConversationManager {
         for (SessionSnapshot.MessageRecord r : records) {
             sb.append(r.role()).append(": ").append(r.content()).append('\n');
         }
-        return sb.toString();
+        String text = sb.toString();
+        if (text.length() <= MEMORY_TRANSCRIPT_MAX_CHARS) {
+            return text;
+        }
+        int tailChars = MEMORY_TRANSCRIPT_MAX_CHARS - MEMORY_TRANSCRIPT_HEAD_CHARS;
+        return text.substring(0, MEMORY_TRANSCRIPT_HEAD_CHARS)
+                + "\n…（中间省略 " + (text.length() - MEMORY_TRANSCRIPT_MAX_CHARS) + " 字）…\n"
+                + text.substring(text.length() - tailChars);
     }
 
     /**

@@ -30,23 +30,26 @@ public final class PrintModeRunner {
     private final OutputFormatter formatter;
     private final OutputSink stderr;
     private final SessionHolder holder;
+    /** run 级附加参数（命令行 > 环境变量 > 项目本地配置，由 CliRunner 统一裁决后传入）。 */
+    private final Map<String, Object> extra;
 
     public PrintModeRunner(CliOptions options, CliTurnLoop turns, OutputFormatter formatter,
-                           OutputSink stderr, SessionHolder holder) {
+                           OutputSink stderr, SessionHolder holder, Map<String, Object> extra) {
         this.options = options;
         this.turns = turns;
         this.formatter = formatter;
         this.stderr = stderr;
         this.holder = holder;
+        this.extra = extra == null ? Map.of() : extra;
     }
 
     /** 执行一次并返回进程退出码。 */
     public int run(String promptText) {
         long started = System.currentTimeMillis();
-        CliTurnLoop.OptionChooser chooser = options.autoApprove ? this::autoPick : null;
+        CliTurnLoop.OptionChooser chooser = options.autoPick ? this::autoPick : null;
         CliTurnLoop.Result result;
         try {
-            result = turns.run(holder.ref(), promptText, options.runExtra(), chooser);
+            result = turns.run(holder.ref(), promptText, extra, chooser);
         } catch (Exception e) {
             log.error("headless 执行失败", e);
             stderr.println(stderr.theme().red("执行失败：" + e.getMessage()));
@@ -72,10 +75,13 @@ public final class PrintModeRunner {
     }
 
     /**
-     * 自动选择（仅 {@code --auto-approve} 时启用）：取推荐项，无推荐取第一项。
+     * 自动选择（仅 {@code --auto-pick} 时启用）：取推荐项，无推荐取第一项。
      *
      * <p>与内核「条件选择超时自动选优」保持同一口径（{@code ConversationManager#autoPickOnTimeout}），
      * 避免同一语义在超时路径与显式路径上给出不同结果。</p>
+     *
+     * <p>刻意与 {@code --auto-approve} 解耦：授权代答与条件选择是两个不相干的安全语义，
+     * 共用一个开关会让「只想放行授权」的脚本在无人值守时静默替用户做选择。</p>
      */
     private String autoPick(String question, List<Map<String, Object>> optionList) {
         if (optionList == null || optionList.isEmpty()) {

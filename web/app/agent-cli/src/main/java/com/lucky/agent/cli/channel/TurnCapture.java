@@ -125,7 +125,13 @@ public final class TurnCapture {
         return false;
     }
 
-    /** 本轮 token 增量合计（按 {@code token} 事件的 used 累加）。 */
+    /**
+     * 本轮 token 增量合计（按 {@code token} 事件的 used 累加）。
+     *
+     * <p>注意口径：这是<b>事件流视角</b>的累加值，与内核 {@code RunResult#tokenUsed()}（会话级统计）、
+     * {@code MetricsCollector} 快照（按 {@code tokenUsed} 键）是三个独立来源，数值可能不同。
+     * 状态栏与 headless 的 {@code turnTokens} 用本值；{@code /usage} 用指标快照；二者不互相校准。</p>
+     */
     public long tokenUsed() {
         long sum = 0;
         for (AgentEvent e : snapshot()) {

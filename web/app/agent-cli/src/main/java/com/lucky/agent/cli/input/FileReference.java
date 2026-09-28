@@ -5,7 +5,6 @@ import com.lucky.agent.common.dto.ExecResult;
 import com.lucky.agent.executor.api.FileService;
 
 import java.time.Duration;
-import java.util.List;
 
 /**
  * {@code @} 前缀：把单个文件的内容注入本轮上下文。
@@ -105,10 +104,5 @@ public final class FileReference {
             }
         }
         return -1;
-    }
-
-    /** 供补全使用：把候选路径补齐为 {@code @path} 形式。 */
-    public static List<String> decorate(List<String> paths) {
-        return paths.stream().map(p -> PREFIX + p).toList();
     }
 }

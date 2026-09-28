@@ -8,6 +8,7 @@ import org.jline.terminal.TerminalBuilder;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.Locale;
 
 /**
@@ -42,15 +43,16 @@ public final class TerminalSession implements Closeable {
     /**
      * 打开终端会话。
      *
-     * @param plain 强制纯文本（不做任何 TTY 探测，禁用颜色与行编辑）
+     * @param plain       强制纯文本（不做任何 TTY 探测，禁用颜色与行编辑）
+     * @param historyFile 交互式历史文件路径（{@code <frameworkRoot>/agent/cli-history}）；仅 JLine 分支使用
      */
-    public static TerminalSession open(boolean plain) {
+    public static TerminalSession open(boolean plain, Path historyFile) {
         if (!plain) {
             Terminal t = tryBuildTerminal();
             if (t != null && !isDumb(t)) {
                 Theme theme = Theme.ansi();
                 OutputSink sink = OutputSink.of(t.writer(), theme);
-                return new TerminalSession(t, sink, LineEditor.jline(t, sink), true);
+                return new TerminalSession(t, sink, LineEditor.jline(t, sink, historyFile), true);
             }
             // 有意保留：可能已构建出 dumb 终端，须关闭以免占用原生句柄
             closeQuietly(t);

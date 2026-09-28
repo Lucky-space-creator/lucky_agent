@@ -6,6 +6,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 import picocli.CommandLine;
 
+import java.nio.charset.Charset;
 import java.util.Map;
 
 /**
@@ -58,8 +59,8 @@ public class CliApplication {
         // 关闭 Web 容器：CLI 是纯终端进程（决策 D11）
         System.setProperty("spring.main.web-application-type", "none");
         // 编码：即使调用方没有 -Dfile.encoding=UTF-8，也保证中文按 UTF-8 处理
-        if (System.getProperty("file.encoding") == null
-                || !System.getProperty("file.encoding").toUpperCase(java.util.Locale.ROOT).contains("UTF")) {
+        if (Charset.defaultCharset().displayName() == null
+                || !Charset.defaultCharset().displayName().toUpperCase(java.util.Locale.ROOT).contains("UTF")) {
             System.setProperty("file.encoding", "UTF-8");
         }
 

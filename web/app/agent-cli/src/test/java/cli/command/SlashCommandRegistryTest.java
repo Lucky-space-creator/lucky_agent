@@ -10,15 +10,21 @@ import com.lucky.agent.cli.command.SlashCommandRegistry;
 import com.lucky.agent.cli.config.CliConfigResolver;
 import com.lucky.agent.cli.session.SessionHolder;
 import com.lucky.agent.common.constant.PermissionLevel;
+import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.dto.SessionRef;
+import com.lucky.agent.core.util.metrics.MetricsCollector;
+import com.lucky.agent.core.util.metrics.SessionMetrics;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -68,7 +74,8 @@ class SlashCommandRegistryTest {
         String text = sink.toString();
 
         for (String name : List.of("/help", "/exit", "/new", "/sessions", "/resume",
-                "/history", "/workspace", "/tokens", "/doctor", "/clear")) {
+                "/history", "/workspace", "/tokens", "/compact", "/undo", "/safety", "/reload",
+                "/doctor", "/clear")) {
             assertTrue(text.contains(name), "帮助里应包含 " + name);
         }
         // 每个命令名与别名都应可被补全（否则会出现「敲得出来但补不出来」）
@@ -129,6 +136,107 @@ class SlashCommandRegistryTest {
         assertTrue(text.contains("全部权限"), text);
     }
 
+    @Test
+    @DisplayName("/safety 展示两轴安全模型（沙箱 × 审批）与当前生效策略")
+    void safetyShowsTwoAxisModel() {
+        StringBuilder sink = new StringBuilder();
+        dispatch("/safety", sink);
+        String text = sink.toString();
+        assertTrue(text.contains("两轴安全模型"), text);
+        assertTrue(text.contains("X 轴"), text);
+        assertTrue(text.contains("Y 轴"), text);
+        assertTrue(text.contains("工作空间：示例项目"), text);
+        assertTrue(text.contains("权限档：全部权限"), text);
+        assertTrue(text.contains("自动代答：关闭"), text);
+    }
+
+    @Test
+    @DisplayName("/tokens 展示会话累计用量与上下文窗口占用率（P2-4）")
+    void tokensShowsCumulativeAndWindowUsage() {
+        SessionMetrics sm = new SessionMetrics();
+        sm.addToken(1234);
+        sm.addInput(500);
+        sm.addOutput(734);
+        sm.incModelCalls();
+        sm.recordCache(true);
+        sm.recordCache(false);
+        sm.recordTool("read_file", true);
+        sm.recordSkill();
+        sm.recordMcp();
+        sm.setLastModel("gpt-4o");
+        sm.setContextWindow(128000);
+        sm.setStartAt(System.currentTimeMillis() - 1500);
+        MetricsCollector metrics = new MetricsCollector(null, null) {
+            @Override
+            public SessionMetrics snapshot(String sessionId) {
+                return sm;
+            }
+        };
+        StringBuilder sink = new StringBuilder();
+        SlashCommandRegistry.withBuiltins().dispatch("/tokens", context(sink, metrics));
+        String text = sink.toString();
+        assertTrue(text.contains("会话累计用量"), text);
+        assertTrue(text.contains("1234"), text);
+        assertTrue(text.contains("gpt-4o"), text);
+        assertTrue(text.contains("128000"), text);
+        // 1234 / 128000 ≈ 0.96%，按 %.1f 四舍五入显示为 1.0%
+        assertTrue(text.contains("1.0%"), text);
+    }
+
+    @Test
+    @DisplayName("自定义命令：commands/*.md 扫描为 /name 且正文作为待提交提示词")
+    void customCommandScannedAndPending(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("review.md");
+        Files.writeString(file, "代码评审\n\n请评审以下改动：\n- 新增了 X\n");
+        SlashCommandRegistry registry = SlashCommandRegistry.withBuiltins();
+        registry.registerCustomCommands(dir);
+
+        StringBuilder sink = new StringBuilder();
+        CommandContext ctx = context(sink);
+        registry.dispatch("/review", ctx);
+        String pending = ctx.consumePendingPrompt();
+        assertTrue(pending != null && pending.contains("请评审以下改动"), "自定义命令正文应成为待提交提示词");
+    }
+
+    @Test
+    @DisplayName("自定义命令不覆盖同名内置命令（决策 1：能力边界锁死）")
+    void customCommandDoesNotShadowBuiltin(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("help.md");
+        Files.writeString(file, "伪装成 help 的自定义命令");
+        SlashCommandRegistry registry = SlashCommandRegistry.withBuiltins();
+        registry.registerCustomCommands(dir);
+
+        StringBuilder sink = new StringBuilder();
+        registry.dispatch("/help", context(sink));
+        // 内置 /help 仍生效：列出全部命令，而不是被自定义「help」替换成一句话
+        assertTrue(sink.toString().contains("/exit"), "内置 /help 不应被同名自定义命令覆盖");
+    }
+
+    @Test
+    @DisplayName("/reload 重新读取项目本地配置并写入上下文（改完保存即生效）")
+    void reloadReadsProjectConfig(@TempDir Path dir) throws Exception {
+        Path cfg = dir.resolve(".lucky/settings.json");
+        Files.createDirectories(cfg.getParent());
+        Files.writeString(cfg, "{\"model\":\"reload-model\",\"maxTurns\":7}");
+        // frameworkRoot 放在 cwd 子目录外，避免触发「起始目录位于框架根内 → 跳过」分支
+        WorkspaceDirs dirs = new WorkspaceDirs() {
+            @Override
+            public Path frameworkRoot() {
+                return dir.resolve("fw");
+            }
+        };
+        StringBuilder sink = new StringBuilder();
+        CommandContext ctx = context(sink, null, dirs, dir.toString());
+
+        SlashCommandRegistry.withBuiltins().dispatch("/reload", ctx);
+
+        String text = sink.toString();
+        assertTrue(text.contains("已重载项目配置"), text);
+        assertTrue(text.contains("reload-model"), text);
+        assertEquals("reload-model", ctx.project().values().get("model"), "重载后上下文配置应已更新");
+        assertEquals("7", ctx.project().values().get("maxTurns"));
+    }
+
     // ------------------------------------------------------------------ 辅助
 
     private static SlashCommandRegistry.Outcome dispatch(String line, StringBuilder sink) {
@@ -136,6 +244,15 @@ class SlashCommandRegistryTest {
     }
 
     private static CommandContext context(StringBuilder sink) {
+        return context(sink, null, null, null);
+    }
+
+    private static CommandContext context(StringBuilder sink, MetricsCollector metrics) {
+        return context(sink, metrics, null, null);
+    }
+
+    private static CommandContext context(StringBuilder sink, MetricsCollector metrics,
+                                          WorkspaceDirs dirs, String cwd) {
         OutputSink out = OutputSink.of(
                 new PrintStream(new StringBuilderStream(sink), true, StandardCharsets.UTF_8), Theme.plain());
         Workspace ws = new Workspace().workspaceId("ws-1").name("示例项目")
@@ -162,12 +279,14 @@ class SlashCommandRegistryTest {
             }
         };
         // 只填本组用例真正会用的依赖；其余留空以暴露「命令偷偷用了不该用的东西」
-        CliServices services = new CliServices(null, null, null, workspaces, null, null, null,
+        CliServices services = new CliServices(null, null, null, workspaces, dirs, metrics, null,
                 null, new CliConfigResolver());
         CliConfigResolver.ProjectConfig project =
                 new CliConfigResolver.ProjectConfig(null, Map.of(), List.of(), false);
         SessionHolder holder = new SessionHolder(new SessionRef("s-12345678", "local-user", "ws-1"));
-        return new CommandContext(out, services, new CliOptions(), project, holder, () -> {
+        CliOptions options = new CliOptions();
+        options.cwd = cwd;
+        return new CommandContext(out, services, options, project, holder, () -> {
         });
     }
 
