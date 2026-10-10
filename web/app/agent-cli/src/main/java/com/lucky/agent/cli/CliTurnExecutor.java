@@ -86,6 +86,11 @@ public final class CliTurnExecutor {
         CancelWatcher watcher = watchCancel
                 ? CancelWatcher.start(() -> channel.cancel(ref).subscribe())
                 : CancelWatcher.disabled();
+        // 本轮内临时接管 SIGINT：见 InterruptTrap 的类注释（缺陷 D17）。
+        // 与 watcher 同开关：headless 下 stdin 承载数据、也不该吞掉脚本的信号语义。
+        InterruptTrap trap = watchCancel
+                ? InterruptTrap.install(() -> channel.cancel(ref).subscribe())
+                : InterruptTrap.disabled();
 
         RunResult result = null;
         Throwable failure = null;
@@ -102,6 +107,9 @@ public final class CliTurnExecutor {
             }
         } finally {
             watcher.stop();
+            // 必须先恢复原 SIGINT 处理器：提示符处 JLine 处于 raw 模式、根本不产生 SIGINT，
+            // 但一旦有异常路径让终端停在 cooked 模式，留着我们的处理器会吞掉用户唯一的退出手段
+            trap.close();
         }
 
         // ③ 等事件流收尾（正常路径瞬时返回，此处仅为异常路径兜底）

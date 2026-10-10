@@ -211,7 +211,10 @@ public final class SlashCommandRegistry {
             }
             out.println();
             out.println(out.theme().bold("输入前缀"));
-            out.println("  " + pad("!<命令>", 26) + "直接交给执行臂执行，不经模型（仍受权限与边界校验）");
+            out.println("  " + pad("!<命令>", 26)
+                    + "直接交给执行臂执行，不经模型（仍受权限与边界校验）");
+            out.println("  " + pad("", 26)
+                    + out.theme().dim("↑ 前提：当前工作空间权限档须为「全部权限」，否则命令执行会被拒（用 /ws 查看）"));
             out.println("  " + pad("@<路径> [说明]", 26) + "把文件内容注入本轮上下文（经执行臂读取）");
             out.println("  " + pad("其它任意文本", 26) + "作为提示词发给 Agent");
             out.println();
@@ -475,7 +478,7 @@ public final class SlashCommandRegistry {
 
         @Override
         public String usage() {
-            return "/workspace [ID|名称|路径]";
+            return "/workspace [序号|ID|名称|路径]";
         }
 
         @Override
@@ -497,7 +500,16 @@ public final class SlashCommandRegistry {
                     String mark = w.workspaceId().equals(currentId) ? out.theme().green("●") : " ";
                     out.println(mark + String.format(" %d. %s", i++, WorkspaceResolver.describe(w)));
                 }
-                out.println(out.theme().dim("切换：/workspace <序号外的 ID|名称|路径>（会给新工作空间开一个新会话）"));
+                out.println(out.theme().dim("切换：/workspace <序号|ID|名称|路径>（会给新工作空间开一个新会话）"));
+                return false;
+            }
+
+            // 支持序号：直接复用上面列表的编号，用户不必复制长 ID（此前只认 ID/名称/路径，
+            // 与列表展示的序号对不上 —— 照着提示敲「/workspace 2」必然 NOT_FOUND）。
+            Optional<Workspace> byIndex =
+                    WorkspaceResolver.byIndex(workspaces.listWorkspaces(), args.get(0));
+            if (byIndex.isPresent()) {
+                switchTo(ctx, byIndex.get());
                 return false;
             }
 

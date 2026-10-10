@@ -57,7 +57,11 @@ public record CoreProperties(
             subagentTaskTimeoutSec = 300;
         }
         if (orchestratorMaxIterations <= 0) {
-            orchestratorMaxIterations = 3;
+            // 兜底值必须与 lucky-defaults.yml 中的 core.orchestrator-max-iterations 一致。
+            // 曾经二者分别是 3 与 5：Web 读 yml=5，而没有 application.yml 的 CLI 落到本兜底=3，
+            // 于是同一个任务在 CLI 上会比 Web 早两轮被安全阀强制结束（缺陷 D3 的可见后果之一）。
+            // 本兜底只是「配置缺失时也自洽」的最后一道，事实源仍在 lucky-defaults.yml。
+            orchestratorMaxIterations = 5;
         }
         if (orchestratorMaxRetries <= 0) {
             orchestratorMaxRetries = 2;

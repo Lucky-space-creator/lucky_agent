@@ -1,4 +1,4 @@
-package cli;
+package com.lucky.agent.cli;
 
 import com.lucky.agent.cli.channel.TurnCapture;
 import com.lucky.agent.common.dto.AgentEvent;

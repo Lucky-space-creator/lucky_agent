@@ -20,6 +20,17 @@ public record TurnOutcome(RunResult result, TurnCapture capture, Throwable failu
         return failure != null || (result != null && result.error() != null && !result.error().isBlank());
     }
 
+    /**
+     * 是否由用户主动取消（内核以 {@code status="cancelled"} 收尾）。
+     *
+     * <p>单独判定的理由：取消是用户敲下 Ctrl+C 后的<b>预期结果</b>，却被 {@link #failed()}
+     * 一并归类为失败，于是界面打出「本轮失败：已取消」——像是在通报一个事故。
+     * 把「取消」从「失败」里分出来，提示语才能各自得体。</p>
+     */
+    public boolean cancelled() {
+        return result != null && "cancelled".equals(result.status());
+    }
+
     /** 错误文本（无则 {@code null}）。 */
     public String errorText() {
         if (failure != null) {

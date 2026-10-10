@@ -70,6 +70,7 @@ public final class TerminalSession implements Closeable {
                     .jna(false)
                     // 显式 UTF-8：与启动脚本的 chcp 65001 / -Dfile.encoding=UTF-8 保持同一口径，
                     // 否则 JLine 可能按系统代码页（GBK/936）解释输入，中文输入即乱码。
+                    // 注：走原生控制台路径时输入是宽字符、并不依赖本项；它主要约束非原生回退分支。
                     .encoding(StandardCharsets.UTF_8)
                     .build();
         } catch (Exception | LinkageError e) {
@@ -77,10 +78,27 @@ public final class TerminalSession implements Closeable {
         }
     }
 
-    /** {@code dumb} 终端没有行列控制能力，行编辑会静默失效，故与「非 TTY」同等对待。 */
+    /**
+     * 是否为「哑终端」——即没有行列控制与原生输入能力的降级终端。
+     *
+     * <p><b>为什么必须按前缀判断（真实缺陷的修复点）</b>：JLine 的 {@code DumbTerminalProvider}
+     * 会按环境给出 {@code dumb} <b>或</b> {@code dumb-color} 两种 type（后者在检测到颜色能力时使用）。
+     * 此前这里只做 {@code "dumb".equals(type)} 精确匹配，于是 {@code dumb-color} 被<b>误判为
+     * 可交互终端</b>：CLI 照样打印「终端：交互式（ANSI）」并进入 REPL，但底层既没有原生输入
+     * （经代码页读取字节 → 中文输入被毁成 U+FFFD）也没有 raw 模式（Ctrl+C 仍触发 SIGINT →
+     * 一次误触直接杀进程）。实测触发条件：环境中存在 {@code TERM=dumb}
+     * （Git Bash / 部分 CI 与终端会设置），或输出被重定向导致拿不到控制台句柄。</p>
+     *
+     * <p>修正后的语义：认定为哑终端即走纯文本分支并拒绝进入 REPL —— 让「不能交互」显式化，
+     * 而不是伪装成可交互再把用户的输入弄坏。原生控制台正常时不受影响（type 为
+     * {@code windows-vtp} 等），交互功能一切照旧。</p>
+     */
     private static boolean isDumb(Terminal t) {
         String type = t.getType();
-        return type == null || "dumb".equals(type.toLowerCase(Locale.ROOT));
+        if (type == null) {
+            return true;
+        }
+        return type.toLowerCase(Locale.ROOT).startsWith("dumb");
     }
 
     private static void closeQuietly(Terminal t) {

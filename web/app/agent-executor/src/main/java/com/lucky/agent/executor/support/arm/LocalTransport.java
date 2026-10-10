@@ -81,7 +81,7 @@ public class LocalTransport implements ExecutorClient {
         }
         PermissionDecision local = evaluator.evaluate(op, level, Path.of(workspace.path()), ruleCache.current());
         if (local == PermissionDecision.DENY || decision == PermissionDecision.DENY) {
-            return Mono.just(ExecResult.failure(op.opType(), op.requestId(), "权限拒绝"));
+            return Mono.just(ExecResult.failure(op.opType(), op.requestId(), denyReason(op, level)));
         }
         if (local == PermissionDecision.ASK) {
             return Mono.just(ExecResult.failure(op.opType(), op.requestId(), ExecResult.ASK_REQUIRED));
@@ -124,6 +124,30 @@ public class LocalTransport implements ExecutorClient {
     @Override
     public Mono<Boolean> ping() {
         return Mono.just(true);
+    }
+
+    /**
+     * 拒绝原因文案（缺陷 D4 的修复点）。
+     *
+     * <p>此前这里只有「权限拒绝」四个字，用户既无法区分是<b>规则基线</b>拒绝还是
+     * <b>权限档不足</b>，也不知道该改什么。实测中 {@code !whoami} 这类无害命令在
+     * 「修改文件」档下全部失败且零指引。现在把两类原因分开，并给档位不足补上
+     * 「改哪里」的可行动路径。</p>
+     *
+     * <p>归因依据：{@link PermissionEvaluator#evaluate} 在规则链判 DENY/ASK 时提前返回，
+     * 故能走到档位判定就说明原因确定是档位不足；反之则为规则基线拒绝。</p>
+     */
+    private String denyReason(FileOp op, PermissionLevel level) {
+        if (!evaluator.deniedByLevel(op, level)) {
+            return "权限拒绝：该操作命中安全规则基线（敏感路径 / 破坏性命令等），与工作空间权限档无关，"
+                    + "调高权限档也不会放行。";
+        }
+        if (op.opType() == FileOp.OpType.EXEC) {
+            return "权限拒绝：当前工作空间权限档为「" + level.getLabel() + "」，命令执行需要「全部权限」。"
+                    + "请把该工作空间的权限级别改为「全部权限」，或指定一个已设为「全部权限」的工作空间。";
+        }
+        return "权限拒绝：当前工作空间权限档为「" + level.getLabel()
+                + "」，该操作超出档位（写操作需「修改文件」或以上）。";
     }
 
     private boolean isWriteOp(FileOp.OpType type) {

@@ -1,4 +1,4 @@
-package cli.workspace;
+package com.lucky.agent.cli.workspace;
 
 import com.lucky.agent.cli.workspace.WorkspaceResolver;
 import com.lucky.agent.common.constant.PermissionLevel;
@@ -85,6 +85,40 @@ class WorkspaceResolverTest {
     }
 
     @Test
+    @DisplayName("短 ID（前 8 位）可直接当 -w 选择器 —— 提示里展示的就是它")
+    void shortIdSelectorMatches() {
+        Workspace a = ws("859c4350-9fc6-4a8a-9b9c-e42a9527158e", "test", "/data/test",
+                PermissionLevel.MODIFY, false);
+        Workspace b = ws("a4a483e2-1111-2222-3333-444455556666", "SpringBlade", "/data/sb",
+                PermissionLevel.FULL, false);
+
+        WorkspaceResolver.Result r = WorkspaceResolver.resolve(config(a, b), "859c4350");
+        assertEquals(WorkspaceResolver.Status.OK, r.status(),
+                "八字短 ID 必须能命中，否则歧义提示给出的指引不可用");
+        assertEquals("859c4350-9fc6-4a8a-9b9c-e42a9527158e", r.workspace().workspaceId());
+    }
+
+    @Test
+    @DisplayName("ID 前缀命中多条 → AMBIGUOUS（前缀匹配不静默选一个）")
+    void idPrefixAmbiguous() {
+        Workspace a = ws("abcd0001-x", "甲", "/data/a", PermissionLevel.MODIFY, false);
+        Workspace b = ws("abcd0002-y", "乙", "/data/b", PermissionLevel.MODIFY, false);
+
+        WorkspaceResolver.Result r = WorkspaceResolver.resolve(config(a, b), "abcd");
+        assertEquals(WorkspaceResolver.Status.AMBIGUOUS, r.status());
+        assertEquals(2, r.candidates().size());
+    }
+
+    @Test
+    @DisplayName("名称精确优先于 ID 前缀（避免名称恰好是 ID 前缀时被抢走）")
+    void exactNameBeatsIdPrefix() {
+        Workspace a = ws("test0000-x", "前缀陷阱", "/data/a", PermissionLevel.MODIFY, false);
+        Workspace b = ws("other-id", "test", "/data/b", PermissionLevel.MODIFY, false);
+
+        assertEquals("other-id", WorkspaceResolver.resolve(config(a, b), "test").workspace().workspaceId());
+    }
+
+    @Test
     @DisplayName("选择器无匹配 → NOT_FOUND（不用空结果冒充成功）")
     void selectorNotFound() {
         Workspace a = ws("id-aaa", "前端项目", "/data/web", PermissionLevel.MODIFY, false);
@@ -121,6 +155,43 @@ class WorkspaceResolverTest {
         Workspace w = new Workspace().workspaceId("x").name("n").path("/p");
         String text = WorkspaceResolver.describe(w);
         assertFalse(text.contains("null"), text);
+    }
+
+    @Test
+    @DisplayName("builtinDefault：取内置工作空间作为兜底落点（无法询问时的默认落点）")
+    void builtinDefaultPicksBuiltin() {
+        Workspace builtin = ws("b", "默认", "/fw/workspace", PermissionLevel.MODIFY, true);
+        Workspace custom = ws("c", "项目", "/data/proj", PermissionLevel.MODIFY, false);
+
+        Optional<Workspace> picked = WorkspaceResolver.builtinDefault(config(custom, builtin));
+        assertTrue(picked.isPresent(), "有内置项时必须给出兜底落点，否则 CLI 只能退出");
+        assertEquals("b", picked.get().workspaceId());
+    }
+
+    @Test
+    @DisplayName("builtinDefault：无内置项时为空（只有这时才允许报用法错误退出）")
+    void builtinDefaultEmptyWhenNone() {
+        Workspace custom = ws("c", "项目", "/data/proj", PermissionLevel.MODIFY, false);
+        assertTrue(WorkspaceResolver.builtinDefault(config(custom)).isEmpty());
+        assertTrue(WorkspaceResolver.builtinDefault(config()).isEmpty());
+        assertTrue(WorkspaceResolver.builtinDefault(null).isEmpty(), "null 配置不应抛异常");
+    }
+
+    @Test
+    @DisplayName("byIndex：按列表编号取（1-based），越界/非数字/空一律回落后续匹配")
+    void byIndexResolves() {
+        Workspace a = ws("a", "甲", "/data/a", PermissionLevel.MODIFY, false);
+        Workspace b = ws("b", "乙", "/data/b", PermissionLevel.MODIFY, false);
+        List<Workspace> all = List.of(a, b);
+
+        assertEquals("a", WorkspaceResolver.byIndex(all, "1").orElseThrow().workspaceId());
+        assertEquals("b", WorkspaceResolver.byIndex(all, "2").orElseThrow().workspaceId());
+        assertTrue(WorkspaceResolver.byIndex(all, "3").isEmpty(), "越界应回落后续匹配");
+        assertTrue(WorkspaceResolver.byIndex(all, "0").isEmpty());
+        assertTrue(WorkspaceResolver.byIndex(all, "abc").isEmpty());
+        assertTrue(WorkspaceResolver.byIndex(all, null).isEmpty());
+        assertTrue(WorkspaceResolver.byIndex(List.of(), "1").isEmpty());
+        assertTrue(WorkspaceResolver.byIndex(null, "1").isEmpty());
     }
 
     // ------------------------------------------------------------------ 辅助

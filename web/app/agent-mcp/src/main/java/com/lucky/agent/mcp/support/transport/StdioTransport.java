@@ -2,7 +2,6 @@ package com.lucky.agent.mcp.support.transport;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.mcp.api.dto.McpServerDef;
-import com.lucky.agent.mcp.config.McpProperties;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedReader;
@@ -32,8 +31,16 @@ public class StdioTransport implements McpTransport {
 
     private static final int MAX_QUEUED_LINES = 512;
 
+    /**
+     * 关闭子进程的宽限期（毫秒）：先 destroy，超时强杀。
+     *
+     * <p>不能用请求级超时（{@code requestTimeoutMs}，默认 10s）：关闭是收尾动作，
+     * 子进程不响应终止时等满请求超时会让「退出/重连」出现秒级抖动（实测 D10）。
+     * 1.5s 足够正常进程优雅退出，超时一律强杀，保证收口有界。</p>
+     */
+    private static final long CLOSE_GRACE_MS = 1500L;
+
     private final McpServerDef def;
-    private final McpProperties properties;
     private final ObjectMapper objectMapper;
     private final AtomicLong idGen = new AtomicLong();
 
@@ -43,9 +50,8 @@ public class StdioTransport implements McpTransport {
     private volatile boolean closed;
     private BufferedWriter writer;
 
-    public StdioTransport(McpServerDef def, McpProperties properties, ObjectMapper objectMapper) {
+    public StdioTransport(McpServerDef def, ObjectMapper objectMapper) {
         this.def = def;
-        this.properties = properties;
         this.objectMapper = objectMapper;
     }
 
@@ -132,7 +138,7 @@ public class StdioTransport implements McpTransport {
         if (process != null) {
             process.destroy();
             try {
-                if (!process.waitFor(properties.requestTimeoutMs(), TimeUnit.MILLISECONDS)) {
+                if (!process.waitFor(CLOSE_GRACE_MS, TimeUnit.MILLISECONDS)) {
                     process.destroyForcibly();
                 }
             } catch (InterruptedException e) {

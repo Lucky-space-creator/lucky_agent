@@ -1,0 +1,12 @@
+# 行尾约定（必须入库，否则缺陷会随下一次 checkout 复发）
+#
+# 背景：lucky.bat / lucky-cli.bat 曾以 LF 行尾入库，导致 cmd.exe 无法解析
+# （rem 注释与其后文本被拆散、set "JAR=..." 失效，脚本表现为「一堆
+# 'xxx' is not recognized」且以 0 退出，掩盖了真实失败）。
+# 仓库内没有任何 Git 行尾配置可依赖，故在此显式锚定。
+#
+# 批处理：必须是 CRLF —— cmd.exe 的解析器按 CRLF 断行
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Shell 脚本：必须是 LF —— CRLF 会让 shebang 后的 \r 被当成命令的一部分
+*.sh text eol=lf

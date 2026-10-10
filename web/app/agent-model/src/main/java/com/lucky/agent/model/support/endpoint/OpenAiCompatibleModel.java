@@ -42,6 +42,12 @@ import java.util.Set;
  * 把 {@code AiMessage.thinking()} 以 {@code reasoning_content} 字段名写回 assistant 消息。
  * 二者缺一都会导致第二轮调用失败：只开 sendThinking 时 thinking 恒为空（没有回传内容），
  * 只开 returnThinking 时内容不会序列化到请求里。</p>
+ *
+ * <p><b>请求侧兜底（D15）</b>：模型偶尔会产出<b>没有思考链</b>的 assistant 消息（实测极短回答
+ * 可返回空 reasoning_content），该消息留在会话历史里，随后任何带 tools 的请求都会被厂商 400
+ * 拒绝并连锁污染整轮编排。为此本类在发送前经 {@link ReasoningPassbackSupport} 做一次请求副本
+ * 归一化（思考模式下剔除/补占位），保证「带工具的请求不出现缺 reasoning_content 的 assistant」。
+ * 只改发往厂商的副本，不动会话内存态与落盘。</p>
  */
 @Slf4j
 public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
@@ -58,11 +64,17 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
     private final ModelUsageTracker usageTracker;
     private final OpenAiChatModel delegate;
     private final OpenAiStreamingChatModel streamingDelegate;
+    /** 是否向端点请求了推理档位（OFF 不发 reasoning_effort，但很多推理模型仍会思考，故仅作初值）。 */
+    private final boolean reasoningRequested;
+    /** 端点是否已实测产出过思考链：一旦产出即视为思考模式端点，覆盖「OFF 档位仍思考」的场景。 */
+    private volatile boolean thinkingObserved;
 
     public OpenAiCompatibleModel(ModelConfig config, InferenceDepth inferenceDepth,
                                  ModelUsageTracker usageTracker) {
         this.config = config;
         this.usageTracker = usageTracker;
+        String reasoningEffort = resolveReasoningEffort(inferenceDepth);
+        this.reasoningRequested = reasoningEffort != null;
         OpenAiChatModel.OpenAiChatModelBuilder builder = OpenAiChatModel.builder()
                 .baseUrl(EndpointFormat.resolveUrl(config.endpointUrl()))
                 .apiKey(config.apiKey())
@@ -70,7 +82,7 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
                 .timeout(CALL_TIMEOUT)
                 // 推理深度：OFF 不发送该参数（注意不是「关闭思考」——DeepSeek 默认开思考且 effort=high、
                 // Qwen3.8 默认 xhigh，不发送即沿用其默认高档位），其余档位映射 effort
-                .reasoningEffort(resolveReasoningEffort(inferenceDepth))
+                .reasoningEffort(reasoningEffort)
                 // 思考链回传：与推理深度解耦，恒为 true。
                 // 1) 模型本身是推理模型时（deepseek-reasoner 等）无论 effort 都会返回 reasoning_content，
                 //    若按深度关闭回传，第二轮必然被拒；
@@ -93,7 +105,7 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
                 .apiKey(config.apiKey())
                 .modelName(config.modelName())
                 .timeout(CALL_TIMEOUT)
-                .reasoningEffort(resolveReasoningEffort(inferenceDepth))
+                .reasoningEffort(reasoningEffort)
                 .returnThinking(true)
                 .sendThinking(true, THINKING_FIELD);
         if (config.temperature() != null) {
@@ -138,7 +150,10 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
                 config.modelName(), config.endpointUrl(), msgCount, toolCount);
         // 点分工具名（file.read 等）不满足 OpenAI 安全名规则，发送前清洗、响应后还原
         ToolNameMapper names = new ToolNameMapper();
-        ChatRequest wireRequest = ToolNameMappingSupport.sanitizeRequest(request, names);
+        ChatRequest sanitized = ToolNameMappingSupport.sanitizeRequest(request, names);
+        // 思考链回传保证：思考模式下带 tools 的请求不允许出现「缺 reasoning_content 的 assistant」，
+        // 否则厂商直接 400（详见 ReasoningPassbackSupport 类注释）
+        ChatRequest wireRequest = ReasoningPassbackSupport.ensureReasoningPassback(sanitized, thinkingMode());
         try {
             ChatResponse response = delegate.chat(wireRequest);
             ChatResponse restored = ToolNameMappingSupport.restoreResponse(response, names);
@@ -147,12 +162,16 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
             int toolCalls = restored.aiMessage() != null
                     && restored.aiMessage().toolExecutionRequests() != null
                     ? restored.aiMessage().toolExecutionRequests().size() : 0;
+            int thinkingLen = thinkingLength(restored.aiMessage());
+            if (thinkingLen > 0) {
+                thinkingObserved = true;
+            }
             log.info("[模型调用] OpenAI 请求成功：model={} cost={}ms finishReason={} "
                             + "inputTokens={} outputTokens={} toolCalls={} thinkingLength={}",
                     config.modelName(), cost, restored.finishReason(),
                     usage == null ? 0 : usage.inputTokenCount(),
                     usage == null ? 0 : usage.outputTokenCount(),
-                    toolCalls, thinkingLength(restored.aiMessage()));
+                    toolCalls, thinkingLen);
             String replyText = restored.aiMessage() != null && restored.aiMessage().text() != null
                     ? restored.aiMessage().text() : "(无文本回复/仅工具调用)";
             log.info("[模型回复] model={} 长度={} 内容={}",
@@ -190,7 +209,9 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
     @Override
     public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
         ToolNameMapper names = new ToolNameMapper();
-        ChatRequest wireRequest = ToolNameMappingSupport.sanitizeRequest(request, names);
+        ChatRequest sanitized = ToolNameMappingSupport.sanitizeRequest(request, names);
+        // 与同步路径同一保证：流式请求同样可能带 tools，缺 reasoning_content 会被厂商拒绝
+        ChatRequest wireRequest = ReasoningPassbackSupport.ensureReasoningPassback(sanitized, thinkingMode());
         streamingDelegate.chat(wireRequest, new StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(PartialResponse partial, PartialResponseContext context) {
@@ -199,11 +220,18 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
 
             @Override
             public void onPartialThinking(PartialThinking thinking, PartialThinkingContext context) {
+                // 流式响应的思考经增量回调送达，AiMessage 收尾时可能为空（实测），故在此置位
+                if (thinking != null && thinking.text() != null && !thinking.text().isEmpty()) {
+                    thinkingObserved = true;
+                }
                 handler.onPartialThinking(thinking, context);
             }
 
             @Override
             public void onCompleteResponse(ChatResponse response) {
+                if (thinkingLength(response.aiMessage()) > 0) {
+                    thinkingObserved = true;
+                }
                 ChatResponse restored = ToolNameMappingSupport.restoreResponse(response, names);
                 // 用量统计：流式响应在 complete 时可拿到累计 tokenUsage
                 if (usageTracker != null) {
@@ -227,6 +255,17 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
      */
     private static int thinkingLength(AiMessage ai) {
         return ai == null || ai.thinking() == null ? 0 : ai.thinking().length();
+    }
+
+    /**
+     * 端点是否处于思考模式：向厂商请求了推理档位，或历史响应已实测产出过思考链。
+     *
+     * <p>用于「请求携带 tools 时不得出现缺 reasoning_content 的 assistant」这一契约判定
+     * （{@link ReasoningPassbackSupport}）：只看档位不够——OFF 档位下推理模型仍可能产出思考；
+     * 只看实测也不够——会话第一轮尚未观测到思考时无法预判。二者取或即可。</p>
+     */
+    private boolean thinkingMode() {
+        return reasoningRequested || thinkingObserved;
     }
 
     /**

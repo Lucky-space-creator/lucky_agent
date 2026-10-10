@@ -1,4 +1,4 @@
-package cli.command;
+package com.lucky.agent.cli.command;
 
 import com.lucky.agent.cli.CliOptions;
 import com.lucky.agent.cli.channel.OutputSink;
@@ -134,6 +134,22 @@ class SlashCommandRegistryTest {
         assertTrue(text.contains("当前工作空间"), text);
         assertTrue(text.contains("/data/proj"), text);
         assertTrue(text.contains("全部权限"), text);
+    }
+
+    @Test
+    @DisplayName("/workspace <序号> 按展示编号切换（此前只认 ID → 照提示敲必然 NOT_FOUND）")
+    void workspaceAcceptsIndex() {
+        StringBuilder hit = new StringBuilder();
+        dispatch("/workspace 1", hit);
+        String hitText = hit.toString();
+        assertFalse(hitText.contains("未找到匹配的工作空间"), "序号 1 应被识别为列表第 1 项：" + hitText);
+        assertTrue(hitText.contains("切换失败") || hitText.contains("已切换工作空间"),
+                "应进入切换分支（本上下文未装配会话服务，故通常显示切换失败）：" + hitText);
+
+        // 对照：越界序号必须回落为「未找到」，证明序号分支确实在起作用而非全盘放行
+        StringBuilder miss = new StringBuilder();
+        dispatch("/workspace 9", miss);
+        assertTrue(miss.toString().contains("未找到匹配的工作空间"), miss.toString());
     }
 
     @Test

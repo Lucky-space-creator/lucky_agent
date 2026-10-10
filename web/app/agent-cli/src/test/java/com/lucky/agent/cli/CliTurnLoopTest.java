@@ -1,4 +1,4 @@
-package cli;
+package com.lucky.agent.cli;
 
 import com.lucky.agent.cli.CliTurnExecutor;
 import com.lucky.agent.cli.CliTurnLoop;

@@ -8,9 +8,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 /**
- * 工作空间解析：把 {@code -w <id|名称|路径>} 或「自动挑选」解析为唯一工作空间。
+ * 工作空间解析：把 {@code -w <ID(含前 8 位短 ID)|名称|路径>} 或「自动挑选」解析为唯一工作空间。
  *
  * <p><b>修掉的两个既有隐患</b>（原实现直接取列表第一个，无任何提示）：</p>
  * <ol>
@@ -23,8 +24,12 @@ import java.util.Locale;
  * </ol>
  *
  * <p><b>多候选不猜</b>：若存在多个同等候选且用户未指定 {@code -w}，返回
- * {@link Status#AMBIGUOUS} 并列出候选——交由交互式会话询问、headless 报用法错误退出码，
- * 而不是自行挑一个。</p>
+ * {@link Status#AMBIGUOUS} 并列出候选 —— 交由交互式会话询问。</p>
+ *
+ * <p><b>兜底而不是退出</b>：当无法询问（非 TTY）或用户放弃选择时，调用方应使用
+ * {@link #builtinDefault(WorkspaceConfig)} 回落到内置默认工作空间并<b>大声回显</b>，
+ * 而不是让 CLI 直接以用法错误退出。「没选也必须有一个默认落点」是可用性底线；
+ * 但回落必须显式告知，否则就成了它极力避免的「静默选择」。</p>
  */
 public final class WorkspaceResolver {
 
@@ -101,10 +106,59 @@ public final class WorkspaceResolver {
     }
 
     /**
-     * 匹配选择器：{@code workspaceId} 精确 → 名称精确 → 名称包含 → 物理路径归一后相等。
+     * 按序号取工作空间（1-based，与 {@code /workspace} 无参列表的编号一致）。
+     *
+     * <p>为什么需要：{@code /workspace} 无参时展示的是 {@code 1./2./3.} 编号，但切换到
+     * {@code <ID|名称|路径>} 却只认长 ID —— 用户照着列表敲 {@code /workspace 2} 必然
+     * {@link Status#NOT_FOUND}，提示与实现自相矛盾。序号与列表同源，消除该矛盾。</p>
+     *
+     * @param all   全量工作空间（顺序即展示顺序）
+     * @param token 用户输入
+     * @return 命中的工作空间；token 非纯数字或越界时为空（交由 ID/名称/路径匹配继续判断）
+     */
+    public static Optional<Workspace> byIndex(List<Workspace> all, String token) {
+        if (all == null || all.isEmpty() || token == null || token.isBlank()
+                || !token.chars().allMatch(Character::isDigit)) {
+            return Optional.empty();
+        }
+        try {
+            int idx = Integer.parseInt(token);
+            return idx >= 1 && idx <= all.size() ? Optional.of(all.get(idx - 1)) : Optional.empty();
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 内置默认工作空间（{@code builtin=true}，物理路径位于框架根内
+     * {@code <user.home>/.lucky_agent/workspace}）。
+     *
+     * <p><b>为什么需要它</b>：多候选且无法询问（非 TTY、管道、或用户直接放弃）时，
+     * 若就地报错退出，用户连 CLI 都进不去 —— 这与「必须有一个默认落点」的可用性底线冲突。
+     * 故此处提供明确的兜底落点：<b>代码里没有工作空间，但框架本机一定有自己的目录</b>。</p>
+     *
+     * <p>注意调用方<b>必须回显</b>这是兜底选择：本方法只负责取，不负责告知用户。</p>
+     *
+     * @return 内置默认工作空间；系统内无内置项时为空
+     */
+    public static Optional<Workspace> builtinDefault(WorkspaceConfig config) {
+        List<Workspace> all = config == null ? List.of() : config.listWorkspaces();
+        if (all == null || all.isEmpty()) {
+            return Optional.empty();
+        }
+        return all.stream().filter(Workspace::builtin).findFirst();
+    }
+
+    /**
+     * 匹配选择器：{@code workspaceId} 精确 → 名称精确 → ID 前缀（含 8 位短 ID）→ 名称包含 → 物理路径归一后相等。
      *
      * <p>{@code WorkspaceConfig} 契约不提供按名/路径查找，故此处自行匹配（契约只暴露
      * {@code listWorkspaces()} 等按 ID 查询的方法）。</p>
+     *
+     * <p><b>为何必须支持 ID 前缀</b>：歧义提示（与 {@code /workspace}）展示的是
+     * {@link #describe} 里的 <b>8 位短 ID</b>。若只认完整 UUID，用户照着提示敲
+     * {@code -w 859c4350} 必然得 {@link Status#NOT_FOUND} —— 提示就成了「不可用的指引」。
+     * 前缀命中多条时自然回落为 {@link Status#AMBIGUOUS}，不会误选。</p>
      */
     private static List<Workspace> match(List<Workspace> all, String selector) {
         List<Workspace> exactId = all.stream().filter(w -> selector.equals(w.workspaceId())).toList();
@@ -116,9 +170,18 @@ public final class WorkspaceResolver {
         if (!exactName.isEmpty()) {
             return exactName;
         }
+        // ID 前缀（覆盖 8 位短 ID）；大小写不敏感，UUID 十六进制无大小写之分但用户可能复制出大写
+        String lcSelector = selector.toLowerCase(Locale.ROOT);
+        List<Workspace> idPrefix = all.stream()
+                .filter(w -> w.workspaceId() != null
+                        && w.workspaceId().toLowerCase(Locale.ROOT).startsWith(lcSelector))
+                .toList();
+        if (!idPrefix.isEmpty()) {
+            return idPrefix;
+        }
         List<Workspace> fuzzyName = all.stream()
                 .filter(w -> w.name() != null
-                        && w.name().toLowerCase(Locale.ROOT).contains(selector.toLowerCase(Locale.ROOT)))
+                        && w.name().toLowerCase(Locale.ROOT).contains(lcSelector))
                 .toList();
         if (!fuzzyName.isEmpty()) {
             return fuzzyName;

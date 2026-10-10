@@ -33,6 +33,7 @@ import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -68,6 +69,14 @@ public class CliRunner {
      * {@code -r} 也就无法恢复浏览器里创建的会话。</p>
      */
     public static final String LOCAL_USER = "local-user";
+
+    /**
+     * 工作空间歧义时最多询问次数。
+     *
+     * <p>上限而非常驻循环的理由：本方法也可能被脚本化场景触发（例如在自动化里喂错输入），
+     * 无上限重问会让进程静默卡住；有上限则最坏情况只是停止追问、回落到内置默认工作空间继续。</p>
+     */
+    private static final int MAX_WORKSPACE_PROMPT_ATTEMPTS = 3;
 
     private final CliChannel channel;
     private final ConversationManager conversations;
@@ -131,9 +140,20 @@ public class CliRunner {
         try {
             warnRejectedProjectConfig(project, errSink);
             warnUnknownOutputFormat(resolvedOutputFormat, errSink);
+            warnInvalidRunExtra(options, project, errSink);
 
-            // 非交互（非 TTY / --plain / 管道）下不传 editor，让工作空间歧义时直接报用法错误并退出
-            // （exit 2），而不是阻塞在 readLine。交互式 TTY 才把 editor 传给 pickWorkspace 让其询问。
+            // --list-sessions 是纯只读、且只与会话相关的能力：会话并不按工作空间隔离
+            // （即使带了 -w，列出的仍是全部会话），因此必须排在「工作空间解析」之前。
+            // 否则多工作空间环境下它会因歧义直接失败——而启动脚本的用法提示里正是拿
+            // `--list-sessions` 当入门命令（缺陷 D8）。
+            if (options.listSessions) {
+                printSessions(out);
+                return CliExitCode.SUCCESS;
+            }
+
+            // 非交互（非 TTY / --plain / 管道）下不传 editor：不主动从 stdin 读「选择工作空间」，
+            // 以免在管道场景把数据行当成序号吃掉。此时由 pickWorkspace 回落到内置默认工作空间。
+            // 交互式 TTY 才把 editor 传给 pickWorkspace 让其询问。
             LineEditor workspaceEditor =
                     (terminal == null || !terminal.interactive()) ? null : terminal.editor();
             // 工作空间选择器同样走三级解析：命令行 -w > 环境变量 > 项目本地配置（决策 5）
@@ -145,15 +165,12 @@ public class CliRunner {
             }
             Workspace workspace = picked.get();
 
-            if (options.listSessions) {
-                printSessions(out);
-                return CliExitCode.SUCCESS;
-            }
-
-            // 交互式 REPL 必须真有 TTY：非交互环境不会有键盘输入，强行跑 REPL 只会卡在 readLine。
-            if (!headless && (terminal == null || !terminal.interactive())) {
-                errSink.println(errSink.theme().red(
-                        "需要交互式终端才能进入 REPL；非 TTY 请用 -p <提示词> 做一次性执行（或 --list-sessions 查看会话）。"));
+            // REPL 不再要求 TTY：非 TTY（IDE 运行控制台、管道、CI）下 JLine 退化为纯文本编辑器，
+            // 逐行读 stdin，读到 EOF / exit 即正常退出，不会挂起 —— 此前一律拒绝，导致
+            // 「IDE 运行控制台无法使用 CLI」这一高频场景直接不可用（真缺陷）。
+            // 一次性脚本仍建议用 -p：它不做交互、退出码语义更明确。
+            if (!headless && terminal == null) {
+                errSink.println(errSink.theme().red("无法建立终端输入通道，无法进入会话。"));
                 return CliExitCode.USAGE;
             }
 
@@ -228,8 +245,13 @@ public class CliRunner {
     /**
      * 选定唯一工作空间。
      *
-     * <p>多候选时：交互式问用户选哪个；headless 直接报用法错误 —— 不猜。
-     * 「猜一个」在这种场景下代价很高：Agent 会在错误的目录里读写文件，而用户毫无察觉。</p>
+     * <p>多候选时：交互式（TTY）问用户选哪个；无法询问（非 TTY / 用户放弃）时<b>回落到内置默认
+     * 工作空间</b>并大声回显 —— 「没选也必须有一个默认落点」。候选里有多个用户自建空间时随便挑一个
+     * 才是真正的「猜」（会把 Agent 指向用户没预期的目录）；内置默认是框架自己的目录、权限可预期，
+     * 属既定落点。</p>
+     *
+     * <p>仅当两种情况才以用法错误退出：用户<b>显式指定</b>了 {@code -w} 却无匹配（NOT_FOUND），
+     * 或系统内确实没有任何工作空间（连内置都没有，EMPTY）。</p>
      */
     private Optional<Workspace> pickWorkspace(String selector, LineEditor editor, OutputSink out) {
         WorkspaceResolver.Result result = WorkspaceResolver.resolve(workspaces, selector);
@@ -250,35 +272,86 @@ public class CliRunner {
             }
             case AMBIGUOUS -> {
                 List<Workspace> candidates = result.candidates();
-                out.println(out.theme().yellow("存在多个可用工作空间，请明确指定一个（CLI 不代为猜测）："));
+                out.println(out.theme().yellow("存在多个可用工作空间，请选择（CLI 不代为猜测）："));
                 for (int i = 0; i < candidates.size(); i++) {
                     out.println(String.format("  %d. %s", i + 1, WorkspaceResolver.describe(candidates.get(i))));
                 }
-                if (editor == null) {
-                    out.println(out.theme().red("  非交互环境无法询问，请用 -w 指定后重试。"));
-                    return Optional.empty();
-                }
-                String answer = editor.readLine("请选择序号（回车放弃）: ");
-                if (answer == null || answer.isBlank()) {
-                    out.println(out.theme().dim("已放弃。"));
-                    return Optional.empty();
-                }
-                try {
-                    int idx = Integer.parseInt(answer.trim());
-                    if (idx < 1 || idx > candidates.size()) {
-                        out.println(out.theme().red("序号超出范围。"));
-                        return Optional.empty();
+                if (editor != null) {
+                    Optional<Workspace> chosen = askWorkspace(candidates, editor, out);
+                    if (chosen.isPresent()) {
+                        return chosen;
                     }
-                    return Optional.of(candidates.get(idx - 1));
-                } catch (NumberFormatException e) {
-                    out.println(out.theme().red("请输入数字序号。"));
-                    return Optional.empty();
+                } else {
+                    out.println(out.theme().dim("  当前为非交互环境，无法询问；也可用 -w 直接指定"
+                            + "（支持 名称、前 8 位 ID 或完整 ID）。"));
                 }
+                // 未选择（非交互 / 用户放弃 / 连续输错）：回落到内置默认工作空间，
+                // 而不是让 CLI 直接退出 —— 「没选也必须有一个默认落点」是可用性底线。
+                return fallbackToBuiltin(candidates, out);
             }
             default -> {
                 return Optional.empty();
             }
         }
+    }
+
+    /**
+     * 就候选列表询问用户（仅交互式 TTY 调用）。
+     *
+     * <p>循环重问：提示语说的是「请选择序号」，那就必须真的允许重试。此前输错一次即
+     * return，用户只得到一句「请输入数字序号。」就被踢出进程（缺陷 D9）。</p>
+     *
+     * @return 用户选中的工作空间；用户放弃（回车）或连续多次输入无效时为空
+     */
+    private Optional<Workspace> askWorkspace(List<Workspace> candidates, LineEditor editor, OutputSink out) {
+        for (int attempt = 1; attempt <= MAX_WORKSPACE_PROMPT_ATTEMPTS; attempt++) {
+            String answer = editor.readLine("请选择序号（回车使用默认工作空间）: ");
+            if (answer == null || answer.isBlank()) {
+                return Optional.empty();
+            }
+            String trimmedAnswer = answer.trim();
+            try {
+                int idx = Integer.parseInt(trimmedAnswer);
+                if (idx >= 1 && idx <= candidates.size()) {
+                    return Optional.of(candidates.get(idx - 1));
+                }
+                out.println(out.theme().red("序号超出范围（可选 1-" + candidates.size() + "）。"));
+            } catch (NumberFormatException e) {
+                out.println(out.theme().red("请输入数字序号。"));
+            }
+            // 也允许直接按名称 / ID 指定：用户往往知道工作空间名而不愿数序号
+            WorkspaceResolver.Result byName = WorkspaceResolver.resolve(workspaces, trimmedAnswer);
+            if (byName.ok()) {
+                return Optional.of(byName.workspace());
+            }
+        }
+        out.println(out.theme().dim("连续 " + MAX_WORKSPACE_PROMPT_ATTEMPTS + " 次未提供有效序号。"));
+        return Optional.empty();
+    }
+
+    /**
+     * 兜底落点：内置默认工作空间（物理路径位于框架根内，即框架本机的 agent 目录所在地）。
+     *
+     * <p><b>为什么不是「猜」</b>：候选里有多个用户自建空间，随便挑一个确实等于猜（会把 Agent
+     * 指向用户没预期的目录）。而内置默认空间是框架<b>自己</b>的目录、权限可预期、且下面马上
+     * 大声回显并给出切换方式 —— 它是一个明确的既定落点，不是随机选择。</p>
+     *
+     * @return 内置默认工作空间；系统内无内置项时为空（此时才报用法错误退出）
+     */
+    private Optional<Workspace> fallbackToBuiltin(List<Workspace> candidates, OutputSink out) {
+        Optional<Workspace> builtin = WorkspaceResolver.builtinDefault(workspaces);
+        if (builtin.isPresent()) {
+            Workspace w = builtin.get();
+            out.println(out.theme().yellow("未选择工作空间，已使用内置默认工作空间："));
+            out.println("  " + WorkspaceResolver.describe(w));
+            out.println(out.theme().dim("  用 /workspace 可随时切换（切换会给目标空间开一个新会话）；"
+                    + "用 -w 可在启动时直接指定。"));
+            return builtin;
+        }
+        out.println(out.theme().red("没有内置默认工作空间，且未指定 -w，无法确定落点。"));
+        out.println(out.theme().dim("  请用 -w <ID|名称|路径> 指定；候选之一："
+                + WorkspaceResolver.describe(candidates.get(0))));
+        return Optional.empty();
     }
 
     // ------------------------------------------------------------------ 会话
@@ -366,5 +439,21 @@ public class CliRunner {
         if (!CliOptions.outputFormatValid(resolved)) {
             err.println(err.theme().yellow("未知的输出格式「" + resolved + "」，已回落为 text。"));
         }
+    }
+
+    /**
+     * 对「给了但不合法」的 run 级覆盖值告警（缺陷 D11）。
+     *
+     * <p>口径与 {@link #warnUnknownOutputFormat} 一致：<b>告警但继续</b>——用户多半只是笔误，
+     * 回退默认值把这一轮跑完比直接拒绝更有用；要修的是「完全不反馈」这一点：
+     * 以前 {@code --max-turns abc} 与不传参数在用户可见层面上毫无差别。
+     * 输出走 {@code errSink}，与 headless 的进度同流，不污染 stdout 的「只有正文」契约。</p>
+     */
+    private void warnInvalidRunExtra(CliOptions options, CliConfigResolver.ProjectConfig project,
+                                     OutputSink err) {
+        configResolver.invalidRunExtra(options.maxTurns, options.maxBudget, project)
+                .forEach((key, reason) -> err.println(err.theme().yellow(
+                        "无效的 --" + key.replaceAll("([a-z])([A-Z])", "$1-$2").toLowerCase(Locale.ROOT)
+                                + "：" + reason + "，已按默认值继续。")));
     }
 }

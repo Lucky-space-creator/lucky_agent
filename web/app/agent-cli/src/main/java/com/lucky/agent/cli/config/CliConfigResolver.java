@@ -208,6 +208,52 @@ public final class CliConfigResolver {
         return extra;
     }
 
+    /**
+     * 逐项校验 run 级覆盖值，返回「给了但不可用」的项（键 → 原因）。
+     *
+     * <p><b>为什么需要它</b>：此前这些值不合法时被原样塞进运行参数，直到内核真正跑起来才由
+     * {@code RunOverrides} 记一条 WARN 日志回退默认值；而用户很可能只是跑 {@code --list-sessions}
+     * 或 {@code --help}，压根不会触发内核 —— 于是「传了错值」与「什么都没传」在表现上完全一样
+     * （缺陷 D11）。这与 {@code --output-format} 已有的「不合法即告警并回落」口径也不一致。
+     * 这里在入口处统一校验，交调用方用 errSink 告警，把反馈前置到用户敲下回车的那一刻。</p>
+     *
+     * <p>刻意<b>不</b>校验 {@code model}：模型 id 是否存在只有在模型模块里才查得到，而 CLI 的
+     * 命令层刻意不装配运行链路组件（见 {@code CliServices} 的说明）；且错误的 modelId 在内核侧
+     * 会明确报错或回退，不会静默产生错误结果。留给内核判定比在这里做半吊子校验更诚实。</p>
+     */
+    public Map<String, String> invalidRunExtra(String maxTurnsFlag, String maxBudgetFlag,
+                                               ProjectConfig project) {
+        Map<String, String> invalid = new LinkedHashMap<>();
+        resolve(maxTurnsFlag, "maxTurns", project).ifPresent(v -> {
+            if (!isPositiveInt(v)) {
+                invalid.put("maxTurns", "需要正整数，收到「" + v + "」");
+            }
+        });
+        resolve(maxBudgetFlag, "maxBudget", project).ifPresent(v -> {
+            if (!isInt(v)) {
+                invalid.put("maxBudget", "需要整数（负数表示不限制），收到「" + v + "」");
+            }
+        });
+        return invalid;
+    }
+
+    private static boolean isInt(String raw) {
+        try {
+            Integer.parseInt(raw.trim());
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private static boolean isPositiveInt(String raw) {
+        try {
+            return Integer.parseInt(raw.trim()) > 0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
     /** 取值来源说明（供 {@code /doctor} 与启动回显「这个值从哪来」）。 */
     public String describeSource(String flagValue, String key, ProjectConfig project) {
         if (flagValue != null && !flagValue.isBlank()) {

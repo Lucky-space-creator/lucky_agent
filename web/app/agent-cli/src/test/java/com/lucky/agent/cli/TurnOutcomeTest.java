@@ -1,4 +1,4 @@
-package cli;
+package com.lucky.agent.cli;
 
 import com.lucky.agent.cli.TurnOutcome;
 import com.lucky.agent.cli.CliExitCode;

@@ -30,6 +30,6 @@ public class McpTransportFactory {
         if (McpServerDef.TYPE_HTTP.equals(def.type())) {
             return new HttpTransport(def, properties, objectMapper);
         }
-        return new StdioTransport(def, properties, objectMapper);
+        return new StdioTransport(def, objectMapper);
     }
 }

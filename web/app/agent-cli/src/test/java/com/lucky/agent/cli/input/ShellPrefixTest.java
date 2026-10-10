@@ -1,4 +1,4 @@
-package cli.input;
+package com.lucky.agent.cli.input;
 
 import com.lucky.agent.cli.approval.ApprovalHandler;
 import com.lucky.agent.cli.channel.OutputSink;

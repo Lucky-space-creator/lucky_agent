@@ -181,4 +181,22 @@ public class PermissionEvaluator {
         }
         return PermissionDecision.ALLOW;
     }
+
+    /**
+     * 该操作是否被「工作区权限档」拒绝（即 {@link #evaluateByLevel} 判 DENY）。
+     *
+     * <p><b>为什么单独暴露这个判定</b>：{@link PermissionDecision} 只有枚举、带不出原因，
+     * 而执行臂在拒绝时需要给用户一条<b>可行动</b>的提示（例如「命令执行需要全部权限档」），
+     * 而不是干巴巴的「权限拒绝」——这正是缺陷 D4 的成因：CLI 的 {@code !命令} 在
+     * 「修改文件」档下全部失败，用户既不知道原因也无从下手。
+     * 把判定收敛在此，可避免调用方各自复制一份条件、在下次规则调整时悄悄漂移。</p>
+     *
+     * <p><b>为什么它能用来归因（关键，勿改）</b>：{@link #evaluate} 的第 1 步规则链一旦判
+     * DENY/ASK 就<b>提前返回</b>，只有在规则链放行后才会走到第 2 步的档位判定。
+     * 因此「{@code evaluate} 返回 DENY 且本方法为 true」⇒ 原因<b>必然</b>是档位不足，
+     * 不会把「触碰安全基线」误报成「权限档不够」。</p>
+     */
+    public boolean deniedByLevel(FileOp op, PermissionLevel level) {
+        return evaluateByLevel(op, level) == PermissionDecision.DENY;
+    }
 }

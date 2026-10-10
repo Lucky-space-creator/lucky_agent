@@ -1,0 +1,54 @@
+# ============================================================================
+#  CLI 通道专属配置（agent-cli）
+#
+#  本文件存在的主要目的：**导入跨通道共用的业务配置**。
+#
+#  背景（缺陷 D3）：agent-cli 此前没有 application.yml，于是 model / executor /
+#  core / skill / mcp / memory 这些业务键全部落到 @ConfigurationProperties 的
+#  代码兜底默认值上，与 Web 实际生效值不一致。已实测到的分叉：
+#    · executor.sandbox-enabled  Web=true / CLI=false ⇒ CLI 下 `!命令` 全被拦
+#    · core.orchestrator-max-iterations Web=5 / CLI=3 ⇒ CLI 更早被安全阀强制结束
+#
+#  因此：业务键一律不在这里声明，只从 lucky-defaults.yml（agent-common）导入；
+#  本文件只承载「纯终端形态相关」的通道专属设置，且与
+#  CliApplication#setDefaultProperties 保持同义（那里是「不依赖配置文件也成立」的兜底）。
+#
+#  注：spring.config.import 的优先级低于本文件与命令行参数，
+#  因此用户仍可用 --key=value 或环境变量临时覆盖（例如放开日志排查问题）。
+# ============================================================================
+
+spring:
+  main:
+    # CLI 是纯终端进程，不拉起 Web 容器（决策 D11）；CliApplication 亦会设置，
+    # 这里显式写一遍，保证任何入口（含直接跑 jar、IDE 启动）都是同一形态
+    web-application-type: none
+    banner-mode: off
+  # 跨通道共用业务配置的唯一事实源（位于 agent-common，随依赖 jar 一起上 classpath）
+  config:
+    import: classpath:lucky-defaults.yml
+  output:
+    ansi:
+      # 日志不带 ANSI：headless 重定向到文件时不应混入转义序列
+      enabled: never
+  # ---- 退出收口（缺陷 D10 修复，附 jstack 证据）----------------------------------
+  # 现象：同一命令退出耗时抖动（实测 0.5s / 5.9s / 13.3s / 26.3s 不等）。
+  # 根因（jstack 实证）：主线程阻塞在
+  #   DefaultLifecycleProcessor$LifecycleGroup.stop → CountDownLatch.await
+  # 即 Spring 关闭时等待「生命周期 Bean 停稳」；而 MCP 健康探活（@Scheduled，启动即首次执行）
+  # 此刻正阻塞在 initialize 请求上（网络/子进程冷启动，最长 mcp.request-timeout-ms=10s），
+  # 调度器要等这个任务结束才停 → 退出就被这段在飞探活拖住。
+  # 修法：① 关闭时不再等调度任务（直接中断在飞探活，探活失败本就是可降级事件）；
+  #      ② 再给所有生命周期收尾一个硬上限，任何 Bean 都不得把退出拖过 2 秒。
+  # 注：这是通道专属行为（用户按 /exit 期望立刻回到 shell），只写在 CLI 配置里。
+  task:
+    scheduling:
+      shutdown:
+        await-termination: false
+  lifecycle:
+    timeout-per-shutdown-phase: 2s
+
+logging:
+  level:
+    # 默认只留 WARN+：TERMINAL 处于行编辑状态时，任何一行 INFO 日志都会冲掉提示符。
+    # 排障时可用 LOGGING_LEVEL_ROOT=INFO 覆盖，无需改本文件。
+    root: WARN

@@ -78,6 +78,11 @@
             <artifactId>jline</artifactId>
             <version>${jline.version}</version>
         </dependency>
+        <!-- 注：曾评估引入 net.java.dev.jna:jna 以便走 JLine 的原生控制台 provider，
+             经实测否掉：jline 聚合 jar 已内置 jni provider（jni.win.NativeWinSysTerminal）
+             与 Windows 原生库，无需额外依赖即可走原生控制台路径。
+             当时的「必须有 JNA」结论来自被 TERM=dumb 污染的环境，属误判，详见
+             resources/file/CLI-缺陷报告与实现方案.md 附录 D。 -->
         <dependency>
             <groupId>info.picocli</groupId>
             <artifactId>picocli</artifactId>

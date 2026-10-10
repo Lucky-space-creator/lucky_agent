@@ -1,3 +1,13 @@
+# ============================================================================
+#  Web 通道专属配置（agent-web）
+#
+#  【本文件只放「通道专属」键】
+#  跨通道共用的业务配置（model / executor / core / skill / mcp / memory）已收敛到
+#  agent-common 的 lucky-defaults.yml，由下方 spring.config.import 导入。
+#  导入配置的优先级**低于**本文件，因此在本文件里重复声明那些键会静默顶掉共享值
+#  —— 那正是 D3「Web/CLI 配置漂移」的成因，切勿再犯。
+# ============================================================================
+
 server:
   port: 8080
 
@@ -6,6 +16,9 @@ spring:
     name: lucky-agent
   main:
     banner-mode: off
+  # 跨通道共用业务配置的唯一事实源（位于 agent-common，随依赖 jar 一起上 classpath）
+  config:
+    import: classpath:lucky-defaults.yml
 
 logging:
   level:
@@ -16,50 +29,8 @@ logging:
 # 工作空间目录规范（§3.0）：根路径为 Agent 必备目录，硬编码不可更改
 # 单根=<user.home>/.lucky_agent，必备子目录无点前缀（config/memory/platform/skills/mcp 等）
 
-# 模型模块
-model:
-  context-threshold: 0.9
-  health-probe-sec: 60
-
-# 执行臂
-executor:
-  transport: local
-  boundary-strict: true
-  sandbox-enabled: true
-  cmd-timeout-sec: 30
-
-# 编排
-core:
-  plan-max-steps: 12
-  act-max-steps: 30
-  run-max-turns: 30
-  run-max-budget: -1
-  subagent-enabled: false
-  subagent-max-concurrency: 4
-  subagent-task-timeout-sec: 300
-  # 主回环最大迭代次数（安全阀 N：超过强制结束并总结）
-  orchestrator-max-iterations: 5
-  # 早停置信阈值：客观验证通过率低于该值转 ASK 让用户决策（0~1）
-  early-stop-confidence-threshold: 0.3
-  # 子任务局部重试上限（G：超限提前终止并告知用户）
-  orchestrator-max-retries: 2
-  # 核心编排器实现切换（二选一）：
-  #   reactor   -> Orchestrator：基于 REACT 主回环 + Reactor 事件流（默认，已落地完整决策逻辑）
-  #   langgraph -> LangGraphOrchestrator：基于 LangGraph4j 状态图（DAG）的等价编排实现
-  # 两者语义等价，仅在底层调度形态不同；修改后重启生效。
-  orchestrator-mode: reactor
-  # 重试指数退避基础毫秒数（第 n 次重试 = base * 2^(n-1)，上限 8s）
-  retry-backoff-ms: 500
-  # 客观验证器总开关（D 节点：文件存在性 / 校验命令退出码）
-  verification-enabled: true
-  # 单个客观验证器超时（秒）
-  verification-timeout-sec: 120
-  # 条件选择（options）挂起超时（秒）：超时无人选择时自动采用推荐项继续；
-  # <=0 表示不设超时（永久挂起，等待用户手动选择）
-  options-timeout-sec: 300
-
 # ---------------------------------------------------------------------------
-# lucky.*：框架专属配置（同一顶层键下集中维护，勿在文件内重复声明 lucky:）
+# Web 通道专属的框架配置（同一顶层键下集中维护，勿在文件内重复声明 lucky:）
 # ---------------------------------------------------------------------------
 lucky:
   web:
@@ -68,6 +39,8 @@ lucky:
     # 与从仓库根两种启动方式；若部署到自定义目录，填绝对路径显式覆盖，例如：
     #   frontend-dist: E:/JavaPro/lucky_agent/web/fronted/dist
     frontend-dist: ""
+  # 工作流是 Web 侧能力：agent-cli 的构建期禁令明确禁止依赖 agent-workflow（决策 D11），
+  # 故 lucky.workflow.* 不放进共用配置文件，留在 Web 专属配置里
   workflow:
     # 定义与实例的落盘根目录。留空 = 使用框架必备目录 <user.home>/.lucky_agent/workflow
     # （定义落根、运行实例落 instances/ 子目录，实例默认保留最近 200 条）。
@@ -87,46 +60,3 @@ lucky:
       # 命令归入的工作空间 ID。留空 = 回退内置默认工作空间（<user.home>/.lucky_agent/workspace）。
       # 执行臂按工作空间解析权限级别与 realpath 根，生产环境建议显式指定。
       workspace-id: ""
-
-# Skill（渐进披露式技能加载）
-skill:
-  # 语义召回 Top-K（非全量注入，省 token）
-  topK: 5
-  # 用户自定义 Skill 目录（相对框架根，默认 skills）
-  userDir: skills
-  # 平台预置目录（相对框架根，默认 platform，只读）
-  platformDir: platform
-  # 热插拔：定时扫描新增/删除 Skill（true=开启）
-  hot-reload: true
-  # 热插拔扫描周期（毫秒，默认 30000；@Scheduled 的 fixedDelay 单位为毫秒）
-  hot-reload-ms: 30000
-
-# MCP Server 配置（热加载定时扫描）
-mcp:
-  # 热加载扫描周期（毫秒，默认 60000；@Scheduled 的 fixedDelay 单位为毫秒）
-  hot-reload-ms: 60000
-
-# 分层 Markdown 记忆（Hint 型：索引 + 条目，对标 Claude Code Auto Memory）
-# 总结模型 = 模型配置中 role=memory 的记忆管理 Agent 端点；未配置时回退主力模型
-memory:
-  md:
-    # 分层 md 记忆总开关（false 时回退旧 JSONL 双轨记忆）
-    enabled: true
-    # 分层记忆根目录名（相对框架根 memory/ 下）
-    root: md
-    # 会话内触发总结的轮数阈值（节流参考）
-    trigger-turns: 5
-    # LLM 总结失败重试上限
-    max-retry: 2
-    # MEMORY.md 索引行数 / 字节上限（超限保留最早条目并打修剪标记，由 Dream 整理）
-    index-max-lines: 200
-    index-max-bytes: 25600
-    # 记忆预取选择器：每轮引擎 run 从两级索引挑出最相关条目注入（会话内去重）
-    prefetch-enabled: true
-    prefetch-top-k: 5
-    # 可选：选择器专用廉价端点 id（空则回退主端点）
-    prefetch-model-id: "26a16409-3bb2-4736-bedb-51cbb3af083d"
-    # Dream 合成：周期（小时）与触发最少新增会话数；启动延迟（毫秒）
-    dream-interval-hours: 24
-    dream-min-new-sessions: 5
-    dream-initial-delay-ms: 600000

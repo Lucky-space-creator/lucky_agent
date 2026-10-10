@@ -45,7 +45,9 @@ public class McpHealthProbe {
                     connector.connect(def.id());
                 }
             } catch (Exception e) {
-                log.warn("MCP 探活异常：{}", def.id(), e);
+                // 只记摘要，不打印堆栈：MCP 未安装/未启动时每轮探活都会失败，堆栈刷终端无信息量
+                log.warn("MCP 探活异常：{}（{}）", def.id(), e.getMessage());
+                log.debug("MCP 探活异常详情：{}", def.id(), e);
             }
         }
     }

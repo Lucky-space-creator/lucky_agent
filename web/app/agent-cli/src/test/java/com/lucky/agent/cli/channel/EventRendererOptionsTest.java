@@ -1,4 +1,4 @@
-package cli.channel;
+package com.lucky.agent.cli.channel;
 
 import com.lucky.agent.cli.channel.EventRenderer;
 import com.lucky.agent.cli.channel.OutputSink;

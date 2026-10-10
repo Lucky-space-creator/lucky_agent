@@ -1,4 +1,4 @@
-package cli.headless;
+package com.lucky.agent.cli.headless;
 
 import com.lucky.agent.cli.CliExitCode;
 import com.lucky.agent.cli.TurnOutcome;

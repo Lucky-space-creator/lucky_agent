@@ -8,8 +8,14 @@
   `lucky -p "..." > answer.txt` 的结果文件里，把「干净的答案」这个承诺直接打穿。
   重定向 stdout 的脚本消费方（管道、CI）拿到的将是「正文 + 日志」的混合物。
 
-  编码：CliApplication 在 Spring 启动前已把 System.err 换成强制 UTF-8 的流，本 appender 的
-  target=System.err 在初始化时捕获该流，故中文日志不会出现 GBK 乱码。
+  编码（实测结论，勿凭直觉改回）：本 appender 按 UTF-8 写出**字节**，而 Windows 控制台
+  会按**当前代码页**解释这些字节 —— 二者不一致时中文日志必然乱码
+  （实测：代码页 936 时 49 行日志中 18 行乱码，形如「妗嗘灦…」=「框架」的 UTF-8 字节被按 GBK 解码）。
+  因此**中文日志正确的前提是控制台代码页为 65001**，这一点由启动脚本 lucky-cli.bat 的
+  `chcp 65001` 保证；直接 `java -jar` 在 936 代码页下仍会乱码（已知限制）。
+  注：把 System.err 换成强制 UTF-8 的流（CliApplication 所做）**并不能**解决该问题 ——
+  它只统一了「写出编码」，解决不了「接收端代码页」这一半。
+  程序自身的输出不受影响：JLine 走的是 Windows 原生 Unicode 控制台 API，不经代码页。
   级别不在这里写死：仍由 Spring 的 logging.level.* 控制（默认 WARN 由 CliApplication 设定），
   便于排障时用环境变量临时放开，不必改这个文件。
 -->

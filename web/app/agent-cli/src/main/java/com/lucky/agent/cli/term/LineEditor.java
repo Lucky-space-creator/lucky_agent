@@ -86,8 +86,6 @@ public final class LineEditor implements InputReader, Closeable {
                 .completer(completer);
         // 历史文件位置必须显式绑定：JLine 3.30 的 DefaultHistory 无默认路径，getPath() 读的是
         // reader 的 history-file 变量，未设置时返回 null，save() 随即空操作 —— 历史根本不落盘。
-        // 构建期 variables 会先于 setHistory 注入（LineReaderImpl 构造即接收 variables、随后 attach
-        // 触发 load），故此处绑定同时覆盖「启动加载既有历史」与「退出 save 落盘」两端。
         if (historyFile != null) {
             Path file = historyFile.toAbsolutePath().normalize();
             try {
@@ -101,6 +99,12 @@ public final class LineEditor implements InputReader, Closeable {
             builder.variable(LineReader.HISTORY_FILE, file);
         }
         LineReader reader = builder.build();
+        // 关键且易漏：LineReaderBuilder.history(...) 内部只做 setHistory（纯字段赋值），
+        // **不会**调用 History.attach(reader)。而 DefaultHistory.getPath() 依赖 reader 非空，
+        // 未 attach 时 reader == null → getPath() 返回 null → save() 空操作、load() 从不执行，
+        // 即「历史静默不落盘、且不报错」。故此处必须显式 attach —— 它同时触发 load()，
+        // 使「启动读回既有历史」与「退出 save 落盘」两端都生效。
+        history.attach(reader);
         return new LineEditor(out, reader, null, completer);
     }
 
@@ -161,6 +165,11 @@ public final class LineEditor implements InputReader, Closeable {
     /** 设置补全器（JLine 分支生效）。 */
     public void setCompleter(Completer c) {
         completer.set(c);
+    }
+
+    /** 当前历史条目数（纯文本分支为 0）；供诊断与测试断言历史是否真的加载/记录。 */
+    int historySize() {
+        return reader == null ? 0 : reader.getHistory().size();
     }
 
     @Override

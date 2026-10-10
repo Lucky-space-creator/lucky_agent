@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.model.api.dto.InferenceDepth;
 import com.lucky.agent.model.api.dto.ModelConfig;
 import com.sun.net.httpserver.HttpServer;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
@@ -20,6 +22,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 思考链回传（thinking 模式契约）wire 级验收。
@@ -87,6 +90,104 @@ class ThinkingPassbackTest {
         // usageTracker 传 null：本用例只断言请求体（reasoning_content 回传），不涉及用量上报，
         // OpenAiCompatibleModel 对 tracker 为 null 已做判空保护。
         return new OpenAiCompatibleModel(config, InferenceDepth.OFF, null);
+    }
+
+    private OpenAiCompatibleModel thinkingModel(HttpServer server) {
+        ModelConfig config = ModelConfig.of("deepseek",
+                "http://127.0.0.1:" + server.getAddress().getPort(), "deepseek-v4-flash");
+        config.apiKey("sk-test");
+        // BALANCED：请求携带 reasoning_effort ⇒ 端点判定为思考模式（本缺陷真实场景）
+        return new OpenAiCompatibleModel(config, InferenceDepth.BALANCED, null);
+    }
+
+    private ToolSpecification toolSpec() {
+        return ToolSpecification.builder().name("file_read").description("读文件").build();
+    }
+
+    /**
+     * D15 主场景：思考模式下，历史里唯一一条 assistant 没有思考链（极短回答实测可为空），
+     * 该消息不带 tool_calls ⇒ 必须从发往厂商的请求中剔除，否则厂商 400。
+     */
+    @Test
+    void dropsPlainAssistantWithoutThinkingInThinkingMode() throws Exception {
+        List<String> bodies = new ArrayList<>();
+        HttpServer server = startServer(bodies, finalResponse(null), finalResponse(null));
+        try {
+            OpenAiCompatibleModel model = thinkingModel(server);
+            List<ChatMessage> messages = new ArrayList<>();
+            messages.add(UserMessage.from("只回复两个字：收到"));
+            messages.add(AiMessage.from("收到"));
+            model.chat(ChatRequest.builder()
+                    .messages(messages)
+                    .toolSpecifications(List.of(toolSpec()))
+                    .build());
+
+            JsonNode sent = MAPPER.readTree(bodies.get(0)).get("messages");
+            assertEquals(1, sent.size(), "无思考的纯文本 assistant 应被剔除，只留 user");
+            assertEquals("user", sent.get(0).get("role").asText());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
+     * 思考模式下，无思考但带 tool_calls 的 assistant 不能剔除（会孤儿化 tool 结果），
+     * 必须补占位 reasoning_content 保住配对。
+     */
+    @Test
+    void keepsToolCallAssistantWithPlaceholderThinkingInThinkingMode() throws Exception {
+        List<String> bodies = new ArrayList<>();
+        HttpServer server = startServer(bodies, finalResponse(null), finalResponse(null));
+        try {
+            OpenAiCompatibleModel model = thinkingModel(server);
+            ToolExecutionRequest req = ToolExecutionRequest.builder()
+                    .id("call_1").name("file_read").arguments("{}").build();
+            List<ChatMessage> messages = new ArrayList<>();
+            messages.add(UserMessage.from("读一下 a.txt"));
+            messages.add(AiMessage.builder().toolExecutionRequests(List.of(req)).build());
+            messages.add(ToolExecutionResultMessage.from(req.id(), req.name(), "ok"));
+            model.chat(ChatRequest.builder()
+                    .messages(messages)
+                    .toolSpecifications(List.of(toolSpec()))
+                    .build());
+
+            JsonNode sent = MAPPER.readTree(bodies.get(0)).get("messages");
+            assertEquals(3, sent.size());
+            JsonNode assistant = sent.get(1);
+            assertEquals("assistant", assistant.get("role").asText());
+            assertTrue(assistant.hasNonNull("reasoning_content"), "应补占位思考");
+            assertFalse(assistant.get("reasoning_content").asText().isBlank());
+            assertFalse(assistant.get("tool_calls").isEmpty(), "tool_calls 必须保留");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
+     * 反向约束：非思考模式端点（深度 OFF 且从未产出思考）不做任何归一化，
+     * 避免无谓丢弃历史上下文（普通模型零影响）。
+     */
+    @Test
+    void keepsPlainAssistantWhenEndpointNotInThinkingMode() throws Exception {
+        List<String> bodies = new ArrayList<>();
+        HttpServer server = startServer(bodies, finalResponse(null), finalResponse(null));
+        try {
+            OpenAiCompatibleModel model = model(server); // InferenceDepth.OFF，且测试内无思考响应
+            List<ChatMessage> messages = new ArrayList<>();
+            messages.add(UserMessage.from("只回复两个字：收到"));
+            messages.add(AiMessage.from("收到"));
+            model.chat(ChatRequest.builder()
+                    .messages(messages)
+                    .toolSpecifications(List.of(toolSpec()))
+                    .build());
+
+            JsonNode sent = MAPPER.readTree(bodies.get(0)).get("messages");
+            assertEquals(2, sent.size(), "非思考模式不得剔除历史消息");
+            assertEquals("assistant", sent.get(1).get("role").asText());
+            assertNull(sent.get(1).get("reasoning_content"));
+        } finally {
+            server.stop(0);
+        }
     }
 
     private ChatRequest firstRequest() {

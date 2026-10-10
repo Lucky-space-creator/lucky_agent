@@ -516,8 +516,14 @@ public class Orchestrator implements AgentOrchestrator {
             return new Analysis(plan, subagents, raw);
         }
         // 非法计划：重规划一次（R3 闭环），仍失败返回空降级为「无需拆分」
+        // 先发一条明确的进度：重规划会再触发一次引擎 run，而引擎自己只会发「开始PLAN阶段」——
+        // 两条一模一样的日志前后相连，看起来像消息重复（实测就被当成缺陷报了上来）。
+        // 把「为什么重来」写出来，用户才知道这是有意的第二次规划。
+        String replanReason = plan == null ? "无法解析计划" : String.join(";", planValidator.validate(plan));
+        publisher.publish(ctx.sessionId(), AgentEvent.progress(ctx.sessionId(),
+                "【重规划】首次计划不可用（" + replanReason + "），正在重新规划一次…"));
         EngineRunResult replanResult = replanner.replan(withSuppress(ctx, Phase.PLAN, goal), goal,
-                plan == null ? "无法解析计划" : String.join(";", planValidator.validate(plan))).block();
+                replanReason).block();
         if (replanResult != null && replanResult.error() == null) {
             String replanRaw = replanResult.finalText() == null ? "" : replanResult.finalText();
             Plan replan = planGenerator.parse(replanRaw).orElse(null);

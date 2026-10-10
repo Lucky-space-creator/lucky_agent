@@ -1,4 +1,4 @@
-package cli.config;
+package com.lucky.agent.cli.config;
 
 import com.lucky.agent.cli.config.CliConfigResolver;
 import org.junit.jupiter.api.DisplayName;

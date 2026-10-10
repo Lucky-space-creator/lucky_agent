@@ -7,8 +7,10 @@ import com.lucky.agent.mcp.api.McpRegistry;
 import com.lucky.agent.mcp.api.dto.McpServerDef;
 import com.lucky.agent.mcp.api.dto.McpTool;
 import com.lucky.agent.mcp.config.McpProperties;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -67,7 +69,10 @@ public class ConnectionManager implements McpConnector {
             session.close();
             sessions.remove(serverId);
             statuses.put(serverId, STATUS_ERROR);
-            log.warn("MCP 连接失败：{}", serverId, e);
+            // 只记一行摘要：MCP 服务器常常本机未安装/未启动，失败属预期降级；把完整堆栈打到
+            // 用户终端会刷屏（实测退出期尤为明显）。排查需要的堆栈保留在 DEBUG 级。
+            log.warn("MCP 连接失败：{}（{}）", serverId, e.getMessage());
+            log.debug("MCP 连接失败详情：{}", serverId, e);
         }
     }
 
@@ -115,6 +120,25 @@ public class ConnectionManager implements McpConnector {
     private void ensureConnected(String serverId) {
         if (!isConnected(serverId)) {
             connect(serverId);
+        }
+    }
+
+    /**
+     * 进程退出时的确定性收口：关闭全部 MCP 会话，回收子进程与传输资源。
+     *
+     * <p>没有这一步时，退出只靠进程终止，MCP 子进程（npx/node）会被遗弃、reader 线程悬挂；
+     * 且连接状态/子进程的清理时机不可预期（实测退出耗时抖动）。关闭是收尾动作，
+     * {@code StdioTransport.close()} 对其有界（短宽限后强杀），因此本方法耗时可控。</p>
+     */
+    @PreDestroy
+    public void closeAll() {
+        for (String serverId : new ArrayList<>(sessions.keySet())) {
+            try {
+                close(serverId);
+                log.info("退出收口：已关闭 MCP 会话 {}", serverId);
+            } catch (Exception e) {
+                log.warn("退出收口关闭 MCP 会话失败：{}（{}）", serverId, e.getMessage());
+            }
         }
     }
 }

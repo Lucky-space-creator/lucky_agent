@@ -130,7 +130,12 @@ public final class ReplLoop {
             return;
         }
         if (outcome.failed()) {
-            out.println(out.theme().red("本轮失败：" + outcome.errorText()));
+            if (outcome.cancelled()) {
+                // 用户按 Ctrl+C 取消是预期结果，不该用「失败」通报（实测曾被报成「本轮失败：已取消」）
+                out.println(out.theme().dim("已取消本轮。"));
+            } else {
+                out.println(out.theme().red("本轮失败：" + outcome.errorText()));
+            }
         } else if (result.askDenied()) {
             out.println(out.theme().yellow("已按你的选择拒绝该操作。"));
         }
@@ -219,8 +224,15 @@ public final class ReplLoop {
                 .map(ReplLoop::describeWorkspace)
                 .orElse(out.theme().red("(会话绑定的工作空间已失效)")));
         out.println("  会话：" + holder.sessionId());
-        out.println(out.theme().dim("  终端：" + (out.theme().enabled() ? "交互式（ANSI）" : "纯文本（非 TTY 或 --plain）")
+        boolean ansi = out.theme().enabled();
+        out.println(out.theme().dim("  终端：" + (ansi ? "交互式（ANSI）" : "纯文本（非 TTY 或 --plain）")
                 + "；/help 看命令；Ctrl+C 取消本轮，提示符处连按两次 Ctrl+C 退出"));
+        if (!ansi) {
+            // 非 TTY 也能进会话（IDE 运行控制台 / 管道 / CI）：逐行读 stdin，EOF 或 /exit 即退出。
+            // 显式说明，避免用户以为是「卡住」。
+            out.println(out.theme().dim("  （纯文本模式：逐行读取标准输入，输入结束或 /exit 即退出；"
+                    + "一次性执行请用 -p）"));
+        }
         out.println();
     }
 
