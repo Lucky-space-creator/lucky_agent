@@ -10,6 +10,9 @@ import com.lucky.agent.cli.workspace.WorkspaceResolver;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.common.dto.SessionSnapshot;
 import com.lucky.agent.core.repository.SessionRepository;
+import com.lucky.agent.mcp.api.McpConnector;
+import com.lucky.agent.mcp.api.dto.McpServerDef;
+import com.lucky.agent.skill.repository.dto.SkillDef;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import lombok.extern.slf4j.Slf4j;
 
@@ -75,7 +78,28 @@ public final class SlashCommandRegistry {
         r.register(new ReloadCommand());
         r.register(new DoctorCommand());
         r.register(new ClearCommand());
+        r.register(new McpCommand());
+        r.register(new SkillsCommand());
         return r;
+    }
+
+    /**
+     * 命令主题分组（用于 {@code /} 补全菜单的候选分组）。
+     *
+     * <p>集中在一处维护：命令类自身不必知道自己在 {@code /help} / 菜单里归哪一类，
+     * 新增命令时只在这里补一行即可，避免为分组给 14 个命令类各加一个方法。</p>
+     */
+    private static final Map<String, String> GROUPS = Map.ofEntries(
+            Map.entry("help", "基础"), Map.entry("exit", "基础"), Map.entry("clear", "基础"),
+            Map.entry("new", "会话"), Map.entry("sessions", "会话"), Map.entry("resume", "会话"),
+            Map.entry("history", "会话"), Map.entry("compact", "会话"), Map.entry("undo", "会话"),
+            Map.entry("workspace", "环境"), Map.entry("doctor", "环境"), Map.entry("reload", "环境"),
+            Map.entry("safety", "环境"), Map.entry("tokens", "环境"),
+            Map.entry("mcp", "扩展"), Map.entry("skills", "扩展"));
+
+    /** 返回命令的主题分组（未知命令归「其他」）。 */
+    public String groupOf(String name) {
+        return name == null ? "其他" : GROUPS.getOrDefault(name.toLowerCase(Locale.ROOT), "其他");
     }
 
     /**
@@ -739,6 +763,111 @@ public final class SlashCommandRegistry {
             } else {
                 out.println(out.theme().dim("（当前为纯文本输出，无法清屏）"));
             }
+            return false;
+        }
+    }
+
+    /** {@code /mcp} —— 列出已配置的 MCP 服务与连接状态（只读，不触发连接）。 */
+    private static final class McpCommand implements SlashCommand {
+        @Override
+        public String name() {
+            return "mcp";
+        }
+
+        @Override
+        public String summary() {
+            return "列出已配置的 MCP 服务与连接状态";
+        }
+
+        @Override
+        public boolean run(CommandContext ctx, List<String> args) {
+            OutputSink out = ctx.out();
+            if (ctx.services().mcp() == null) {
+                out.println(out.theme().yellow("MCP 能力未装配，无法列出。"));
+                return false;
+            }
+            List<McpServerDef> all = ctx.services().mcp().list();
+            if (all.isEmpty()) {
+                out.println(out.theme().dim("尚未配置任何 MCP 服务（可在 Web 端「MCP」中添加）。"));
+                return false;
+            }
+            out.println(out.theme().bold("MCP 服务（共 " + all.size() + " 个）"));
+            McpConnector connector = ctx.services().mcpConnector();
+            for (McpServerDef def : all) {
+                String mark = def.enabled() ? out.theme().green("●") : out.theme().dim("○");
+                String enabled = def.enabled() ? out.theme().green("启用") : out.theme().dim("停用");
+                String status = connector == null ? "" : "  " + statusLabel(out, connector, def);
+                out.println("  " + mark + " " + out.theme().bold(def.id())
+                        + "  " + (def.name() == null ? "" : def.name())
+                        + "  [" + def.type() + "]  " + enabled + status);
+                if (def.description() != null && !def.description().isBlank()) {
+                    out.println(out.theme().dim("      " + def.description()));
+                }
+            }
+            out.println(out.theme().dim("  只读展示；服务在首次实际调用其工具时才会建立连接。"));
+            return false;
+        }
+
+        /** 连接状态标签；仅在已连接时附带工具数，避免"看一眼状态"却把服务拉起来。 */
+        private static String statusLabel(OutputSink out, McpConnector connector, McpServerDef def) {
+            String st = connector.status(def.id());
+            String label = switch (st == null ? McpConnector.STATUS_STOPPED : st) {
+                case McpConnector.STATUS_RUNNING -> out.theme().green("已连接");
+                case McpConnector.STATUS_ERROR -> out.theme().red("连接失败");
+                default -> out.theme().dim("未连接");
+            };
+            if (connector.isConnected(def.id())) {
+                label += out.theme().dim("（工具 " + connector.listTools(def.id()).size() + "）");
+            }
+            return label;
+        }
+    }
+
+    /** {@code /skills} —— 列出可用技能与启用状态（只读）。 */
+    private static final class SkillsCommand implements SlashCommand {
+        @Override
+        public String name() {
+            return "skills";
+        }
+
+        @Override
+        public List<String> aliases() {
+            return List.of("skill");
+        }
+
+        @Override
+        public String summary() {
+            return "列出可用技能与启用状态";
+        }
+
+        @Override
+        public boolean run(CommandContext ctx, List<String> args) {
+            OutputSink out = ctx.out();
+            if (ctx.services().skills() == null) {
+                out.println(out.theme().yellow("技能能力未装配，无法列出。"));
+                return false;
+            }
+            List<SkillDef> all = ctx.services().skills().list();
+            if (all.isEmpty()) {
+                out.println(out.theme().dim("尚未安装任何技能。"));
+                return false;
+            }
+            long enabled = all.stream().filter(SkillDef::enabled).count();
+            out.println(out.theme().bold("技能（共 " + all.size() + " 个，启用 " + enabled + "）"));
+            for (SkillDef s : all) {
+                String mark = s.enabled() ? out.theme().green("●") : out.theme().dim("○");
+                String type = SkillDef.TYPE_SUBAGENT.equals(s.type()) ? "子代理" : "工具";
+                String source = SkillDef.SOURCE_PLATFORM.equals(s.source()) ? "预置" : "自定义";
+                String line = "  " + mark + " " + out.theme().bold(s.id())
+                        + "  " + (s.name() == null ? "" : s.name())
+                        + "  [" + type + " · " + source + "]"
+                        + (s.hasMissingDeps() ? out.theme().yellow("  缺依赖 " + s.missingDeps()) : "");
+                out.println(line);
+                if (s.description() != null && !s.description().isBlank()) {
+                    out.println(out.theme().dim("      " + s.description()));
+                }
+            }
+            out.println(out.theme().dim("  技能按语义匹配按需注入；本命令仅查看清单与启用状态。"));
             return false;
         }
     }

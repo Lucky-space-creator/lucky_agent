@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Lucky Agent 一键启动（Web 端）—— 与 lucky.sh 等价的短名入口。
+#
+# 【为什么是一个转发壳而不是副本】
+# 本文件原先与 lucky.sh 逐字节相同。两份相同内容必然漂移：改了其中一个忘了另一个，
+# 就会出现「./lucky 与 ./lucky.sh 行为不一致」这种极难排查的问题。
+# 故此处只做转发，唯一实现留在 lucky.sh。
+set -e
+exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lucky.sh" "$@"

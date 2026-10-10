@@ -7,15 +7,18 @@ import com.lucky.agent.cli.channel.OutputSink;
 import com.lucky.agent.cli.channel.Theme;
 import com.lucky.agent.cli.command.CliServices;
 import com.lucky.agent.cli.command.CommandContext;
+import com.lucky.agent.cli.command.SlashCommand;
 import com.lucky.agent.cli.command.SlashCommandRegistry;
 import com.lucky.agent.cli.config.CliConfigResolver;
 import com.lucky.agent.cli.headless.OutputFormatter;
 import com.lucky.agent.cli.headless.PrintModeRunner;
+import com.lucky.agent.cli.input.FileReference;
 import com.lucky.agent.cli.repl.ReplLoop;
 import com.lucky.agent.cli.session.CliSessionService;
 import com.lucky.agent.cli.session.SessionHolder;
 import com.lucky.agent.cli.term.LineEditor;
 import com.lucky.agent.cli.term.TerminalSession;
+import com.lucky.agent.cli.term.WorkspacePathCompleter;
 import com.lucky.agent.cli.workspace.WorkspaceResolver;
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.dto.SessionRef;
@@ -24,7 +27,10 @@ import com.lucky.agent.core.service.ConversationManager;
 import com.lucky.agent.core.util.metrics.MetricsCollector;
 import com.lucky.agent.core.util.runtime.ConversationStateManager;
 import com.lucky.agent.executor.api.FileService;
+import com.lucky.agent.mcp.api.McpConnector;
+import com.lucky.agent.mcp.api.McpRegistry;
 import com.lucky.agent.permission.service.PermissionService;
+import com.lucky.agent.skill.service.SkillRegistry;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import lombok.extern.slf4j.Slf4j;
@@ -87,12 +93,16 @@ public class CliRunner {
     private final MetricsCollector metrics;
     private final FileService files;
     private final PermissionService permission;
+    private final McpRegistry mcpRegistry;
+    private final McpConnector mcpConnector;
+    private final SkillRegistry skillRegistry;
     private final CliConfigResolver configResolver = new CliConfigResolver();
 
     public CliRunner(CliChannel channel, ConversationManager conversations,
                      ConversationStateManager stateManager, CliSessionService sessions,
                      WorkspaceConfig workspaces, WorkspaceDirs dirs, MetricsCollector metrics,
-                     FileService files, PermissionService permission) {
+                     FileService files, PermissionService permission,
+                     McpRegistry mcpRegistry, McpConnector mcpConnector, SkillRegistry skillRegistry) {
         this.channel = channel;
         this.conversations = conversations;
         this.stateManager = stateManager;
@@ -102,6 +112,9 @@ public class CliRunner {
         this.metrics = metrics;
         this.files = files;
         this.permission = permission;
+        this.mcpRegistry = mcpRegistry;
+        this.mcpConnector = mcpConnector;
+        this.skillRegistry = skillRegistry;
     }
 
     /** 运行并返回进程退出码。 */
@@ -184,7 +197,8 @@ public class CliRunner {
             SessionHolder holder = new SessionHolder(ref);
 
             CliServices services = new CliServices(sessions, conversations, stateManager, workspaces,
-                    dirs, metrics, files, permission, configResolver);
+                    dirs, metrics, files, permission, configResolver,
+                    mcpRegistry, mcpConnector, skillRegistry);
             LineEditor editor = terminal == null ? null : terminal.editor();
             ApprovalHandler approval = new ApprovalHandler(
                     headless ? errSink : out, headless ? null : editor,
@@ -213,7 +227,7 @@ public class CliRunner {
                     dirs.frameworkRoot().resolve("commands"));
             CommandContext ctx = new CommandContext(out, services, options, project, holder, () -> {
             });
-            installCompleter(editor, registry);
+            installCompleter(editor, registry, holder);
             ReplLoop loop = new ReplLoop(out, editor, options, ctx, registry, executor, approval, holder);
             return loop.run();
         } finally {
@@ -224,20 +238,55 @@ public class CliRunner {
     }
 
     /**
-     * 注入行补全：只补全 slash 命令名。
+     * 注入行补全：命令菜单（{@code /}）+ 工作空间文件路径补全（{@code @}）。
      *
-     * <p>刻意不补全文件路径：路径补全需要沿当前输入实时列目录，而列目录属于文件操作 ——
-     * 在补全回调里做文件操作会绕过执行臂（决策 D2 要求所有文件操作经硬边界校验）。
-     * 要引用文件请用 {@code @路径}，那条路径会正经走执行臂读取。</p>
+     * <p><b>两条互补的补全</b>，按当前词的形态分流（与 {@code ReplLoop} 的前缀判定同源）：</p>
+     * <ol>
+     *   <li>行首且以 {@code /} 开头 → 命令菜单：带 <b>summary 描述</b>与主题分组，
+     *       继续打字即过滤。JLine 的 {@link Candidate} 原生支持 {@code descr}，此前只 {@code new Candidate(c)}
+     *       未填，等于把「可发现性」白白丢掉。</li>
+     *   <li>行首且以 {@code @} 开头 → 工作空间文件/目录补全，交给 {@link WorkspacePathCompleter}
+     *       （它经执行臂列目录、异步预取 + 缓存，见该类说明）。</li>
+     * </ol>
+     *
+     * <p>只认「行首」是刻意的：{@code ReplLoop} 也只把行首的 {@code /} / {@code @} 当命令/引用，
+     * 补全与执行必须同一套判定，否则会出现「补全给出了、回车却不生效」的错觉。</p>
      */
-    private void installCompleter(LineEditor editor, SlashCommandRegistry registry) {
+    private void installCompleter(LineEditor editor, SlashCommandRegistry registry, SessionHolder holder) {
         if (editor == null) {
             return;
         }
+        WorkspacePathCompleter pathCompleter = new WorkspacePathCompleter(files, holder);
         editor.setCompleter((reader, line, candidates) -> {
-            String word = line == null ? "/" : line.word();
-            registry.completions(word).forEach(c -> candidates.add(new Candidate(c)));
+            String word = line == null || line.word() == null ? "" : line.word();
+            // 仅行首词参与补全：/ 命令与 @ 引用都只在行首生效（见 ReplLoop 的分发顺序）
+            if (line != null && line.wordIndex() != 0) {
+                return;
+            }
+            if (word.startsWith("/")) {
+                addCommandCandidates(registry, word, candidates);
+            } else if (word.startsWith(String.valueOf(FileReference.PREFIX))) {
+                pathCompleter.complete(word, candidates);
+            }
         });
+    }
+
+    /** 构造带描述与分组的命令候选（供 {@code /} 菜单显示）。 */
+    private static void addCommandCandidates(SlashCommandRegistry registry, String slashWord,
+                                             List<Candidate> candidates) {
+        String prefix = slashWord.toLowerCase(Locale.ROOT);
+        for (SlashCommand cmd : registry.commands()) {
+            String name = "/" + cmd.name();
+            if (!name.startsWith(prefix)) {
+                continue;
+            }
+            String descr = cmd.summary();
+            if (!cmd.aliases().isEmpty()) {
+                descr = descr + "（别名 /" + String.join(" /", cmd.aliases()) + "）";
+            }
+            // value=插入文本、displ=菜单显示、group=主题分组、descr=右侧说明
+            candidates.add(new Candidate(name, name, registry.groupOf(cmd.name()), descr, null, null, true));
+        }
     }
 
     // ------------------------------------------------------------------ 工作空间

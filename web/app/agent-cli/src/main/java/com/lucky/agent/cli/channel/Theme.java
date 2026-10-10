@@ -52,6 +52,30 @@ public final class Theme {
         return wrap("\u001B[35m", text);
     }
 
+    /**
+     * 亮蓝（94）：品牌主色的可读档。
+     *
+     * <p>字标要用 256 色渐变（见 {@link #color256(int, String)}），但<b>正文标记与标签</b>不适合
+     * 写死 256 色号 —— 那是按深色背景挑的值，在浅色背景（白底终端）上偏暗。亮蓝由终端自行映射，
+     * 深浅背景都可读，故「品牌感的文字」用它，而「装饰性渐变」才用固定色号。</p>
+     */
+    public String brightBlue(String text) {
+        return wrap("\u001B[94m", text);
+    }
+
+    /**
+     * 256 色前景（{@code 38;5;N}）。
+     *
+     * <p>为什么不用真彩色（{@code 38;2;R;G;B}）：真彩色在旧版 conhost / 部分 CI 终端上会被
+     * 原样打印成乱码，而 256 色自 Win10 起即受支持、覆盖所有现代终端。用固定色号换来的稳定性，
+     * 远比多几档色阶重要。同 {@link #dim(String)} 一样，纯文本模式下整段直出、不带任何转义。</p>
+     *
+     * @param index 调色板序号 0-255
+     */
+    public String color256(int index, String text) {
+        return wrap("\u001B[38;5;" + index + "m", text);
+    }
+
     public String bold(String text) {
         return wrap("\u001B[1m", text);
     }

@@ -7,16 +7,18 @@ import com.lucky.agent.cli.CliTurnLoop;
 import com.lucky.agent.cli.TurnOutcome;
 import com.lucky.agent.cli.approval.ApprovalHandler;
 import com.lucky.agent.cli.channel.OutputSink;
+import com.lucky.agent.cli.channel.Theme;
 import com.lucky.agent.cli.command.CommandContext;
 import com.lucky.agent.cli.command.SlashCommandRegistry;
 import com.lucky.agent.cli.input.FileReference;
 import com.lucky.agent.cli.input.ShellPrefix;
 import com.lucky.agent.cli.session.SessionHolder;
 import com.lucky.agent.cli.term.LineEditor;
+import com.lucky.agent.cli.workspace.WorkspaceResolver;
 import com.lucky.agent.common.constant.Phase;
 import com.lucky.agent.common.constant.PermissionLevel;
-import com.lucky.agent.workspace.api.dto.Workspace;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -216,32 +218,31 @@ public final class ReplLoop {
         return out.theme().cyan("› ");
     }
 
-    /** 启动横幅：无条件回显「当前工作空间 + 当前会话」，让用户明确 Agent 会在哪个目录里干活。 */
+    /**
+     * 启动打印：品牌字标（{@link Banner}）+ 无条件回显「当前工作空间 + 当前会话」，
+     * 让用户明确 Agent 会在哪个目录里干活。
+     *
+     * <p>这里只负责<b>取材</b>（工作空间 / 会话 / 终端），排版与着色交给 {@code Banner} ——
+     * 本类不该知道色号与转义序列。</p>
+     */
     private void printBanner() {
-        out.println(out.theme().bold("Lucky Agent CLI ") + out.theme().dim("v" + CliOptions.VERSION));
-        out.println(out.theme().dim("本地优先 · 会话/记忆/文件只在本机"));
-        out.println("  工作空间：" + ctx.services().workspaces().getWorkspace(holder.workspaceId())
-                .map(ReplLoop::describeWorkspace)
-                .orElse(out.theme().red("(会话绑定的工作空间已失效)")));
-        out.println("  会话：" + holder.sessionId());
-        boolean ansi = out.theme().enabled();
-        out.println(out.theme().dim("  终端：" + (ansi ? "交互式（ANSI）" : "纯文本（非 TTY 或 --plain）")
+        Theme t = out.theme();
+        List<String> details = new ArrayList<>();
+        details.add(Banner.detail(t, "工作空间",
+                ctx.services().workspaces().getWorkspace(holder.workspaceId())
+                        // 复用 WorkspaceResolver.describe（name [id8] · 权限 · 路径 · 内置默认）：
+                        // §4.2 要求 Banner 必须打出所选工作空间的 ID，本地另一份实现会漏掉它
+                        .map(WorkspaceResolver::describe)
+                        .orElse(t.red("(会话绑定的工作空间已失效)"))));
+        details.add(Banner.detail(t, "会话", holder.sessionId()));
+        details.add(Banner.detail(t, "终端", (t.enabled() ? "交互式（ANSI）" : "纯文本（非 TTY 或 --plain）")
                 + "；/help 看命令；Ctrl+C 取消本轮，提示符处连按两次 Ctrl+C 退出"));
-        if (!ansi) {
+        if (!t.enabled()) {
             // 非 TTY 也能进会话（IDE 运行控制台 / 管道 / CI）：逐行读 stdin，EOF 或 /exit 即退出。
             // 显式说明，避免用户以为是「卡住」。
-            out.println(out.theme().dim("  （纯文本模式：逐行读取标准输入，输入结束或 /exit 即退出；"
-                    + "一次性执行请用 -p）"));
+            details.add(Banner.detail(t, "说明", "纯文本模式：逐行读取标准输入，输入结束或 /exit 即退出；"
+                    + "一次性执行请用 -p"));
         }
-        out.println();
-    }
-
-    static String describeWorkspace(Workspace w) {
-        PermissionLevel level = w.permissionLevel() == null
-                ? PermissionLevel.defaultValue() : w.permissionLevel();
-        return (w.name() == null ? "(未命名)" : w.name())
-                + " · 权限 " + level.getLabel()
-                + " · " + (w.path() == null ? "(无路径)" : w.path())
-                + (w.builtin() ? " " + "[内置默认]" : "");
+        Banner.print(out, CliOptions.VERSION, details);
     }
 }

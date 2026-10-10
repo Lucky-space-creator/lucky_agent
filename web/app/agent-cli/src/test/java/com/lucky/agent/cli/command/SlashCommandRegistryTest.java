@@ -14,6 +14,9 @@ import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.dto.SessionRef;
 import com.lucky.agent.core.util.metrics.MetricsCollector;
 import com.lucky.agent.core.util.metrics.SessionMetrics;
+import com.lucky.agent.mcp.api.McpConnector;
+import com.lucky.agent.mcp.api.dto.McpServerDef;
+import com.lucky.agent.skill.repository.dto.SkillDef;
 import com.lucky.agent.workspace.api.WorkspaceConfig;
 import com.lucky.agent.workspace.api.dto.Workspace;
 import org.junit.jupiter.api.DisplayName;
@@ -75,7 +78,7 @@ class SlashCommandRegistryTest {
 
         for (String name : List.of("/help", "/exit", "/new", "/sessions", "/resume",
                 "/history", "/workspace", "/tokens", "/compact", "/undo", "/safety", "/reload",
-                "/doctor", "/clear")) {
+                "/doctor", "/clear", "/mcp", "/skills")) {
             assertTrue(text.contains(name), "帮助里应包含 " + name);
         }
         // 每个命令名与别名都应可被补全（否则会出现「敲得出来但补不出来」）
@@ -253,6 +256,69 @@ class SlashCommandRegistryTest {
         assertEquals("7", ctx.project().values().get("maxTurns"));
     }
 
+    // ------------------------------------------------------------------ /mcp · /skills
+
+    @Test
+    @DisplayName("/mcp 列出服务与连接状态；未连接时不触发连接去数工具")
+    void mcpListsServers() {
+        StringBuilder sink = new StringBuilder();
+        CliServices services = extensionServices(
+                new StubMcpRegistry(List.of(new McpServerDef("fs", "文件系统", "本机文件读写",
+                        McpServerDef.TYPE_STDIO, "npx", List.of("-y", "server-fs"), null, Map.of(), true))),
+                new StubMcpConnector(McpConnector.STATUS_STOPPED, false),
+                null);
+
+        SlashCommandRegistry.withBuiltins().dispatch("/mcp", context(sink, services));
+
+        String text = sink.toString();
+        assertTrue(text.contains("MCP 服务"), text);
+        assertTrue(text.contains("fs") && text.contains("文件系统"), text);
+        assertTrue(text.contains("未连接"), text);
+        assertFalse(text.contains("（工具"), "未连接时不得为看状态而把服务拉起来：" + text);
+    }
+
+    @Test
+    @DisplayName("/skills 列出技能与启用状态，并标记缺依赖")
+    void skillsListsSkills() {
+        SkillDef platform = new SkillDef("pdf", "PDF 处理", "处理 PDF 文件", List.of("pdf"),
+                SkillDef.TYPE_TOOL, true, true, List.of(), null, SkillDef.SOURCE_PLATFORM);
+        SkillDef custom = new SkillDef("draw", "绘图", "画示意图", List.of("draw"),
+                SkillDef.TYPE_SUBAGENT, false, false, List.of("ghost"), null, SkillDef.SOURCE_USER)
+                .withMissingDeps(List.of("ghost"));
+        StringBuilder sink = new StringBuilder();
+        CliServices services = extensionServices(null, null, new StubSkillRegistry(List.of(platform, custom)));
+
+        SlashCommandRegistry.withBuiltins().dispatch("/skills", context(sink, services));
+
+        String text = sink.toString();
+        assertTrue(text.contains("技能（共 2 个，启用 1）"), text);
+        assertTrue(text.contains("pdf") && text.contains("预置"), text);
+        assertTrue(text.contains("draw") && text.contains("子代理"), text);
+        assertTrue(text.contains("缺依赖"), text);
+    }
+
+    @Test
+    @DisplayName("registry 未装配时 /mcp /skills 明确提示而非抛异常")
+    void extensionCommandsWithoutRegistry() {
+        StringBuilder sink = new StringBuilder();
+        SlashCommandRegistry.withBuiltins().dispatch("/mcp", context(sink));
+        assertTrue(sink.toString().contains("未装配"), sink.toString());
+        sink.setLength(0);
+        SlashCommandRegistry.withBuiltins().dispatch("/skills", context(sink));
+        assertTrue(sink.toString().contains("未装配"), sink.toString());
+    }
+
+    @Test
+    @DisplayName("命令主题分组：菜单据此归类，未登记归「其他」")
+    void commandGroups() {
+        SlashCommandRegistry r = SlashCommandRegistry.withBuiltins();
+        assertEquals("会话", r.groupOf("resume"));
+        assertEquals("环境", r.groupOf("doctor"));
+        assertEquals("扩展", r.groupOf("mcp"));
+        assertEquals("扩展", r.groupOf("skills"));
+        assertEquals("其他", r.groupOf("some-custom"));
+    }
+
     // ------------------------------------------------------------------ 辅助
 
     private static SlashCommandRegistry.Outcome dispatch(String line, StringBuilder sink) {
@@ -296,7 +362,7 @@ class SlashCommandRegistryTest {
         };
         // 只填本组用例真正会用的依赖；其余留空以暴露「命令偷偷用了不该用的东西」
         CliServices services = new CliServices(null, null, null, workspaces, dirs, metrics, null,
-                null, new CliConfigResolver());
+                null, new CliConfigResolver(), null, null, null);
         CliConfigResolver.ProjectConfig project =
                 new CliConfigResolver.ProjectConfig(null, Map.of(), List.of(), false);
         SessionHolder holder = new SessionHolder(new SessionRef("s-12345678", "local-user", "ws-1"));
@@ -304,6 +370,198 @@ class SlashCommandRegistryTest {
         options.cwd = cwd;
         return new CommandContext(out, services, options, project, holder, () -> {
         });
+    }
+
+    /** 用给定 services 构造上下文（供 /mcp、/skills 注入测试桩）。 */
+    private static CommandContext context(StringBuilder sink, CliServices services) {
+        OutputSink out = OutputSink.of(
+                new PrintStream(new StringBuilderStream(sink), true, StandardCharsets.UTF_8), Theme.plain());
+        CliConfigResolver.ProjectConfig project =
+                new CliConfigResolver.ProjectConfig(null, Map.of(), List.of(), false);
+        SessionHolder holder = new SessionHolder(new SessionRef("s-12345678", "local-user", "ws-1"));
+        return new CommandContext(out, services, new CliOptions(), project, holder, () -> {
+        });
+    }
+
+    /** 组装只带扩展 registry 的 CliServices（其余留空）。 */
+    private static CliServices extensionServices(com.lucky.agent.mcp.api.McpRegistry mcp,
+                                                 com.lucky.agent.mcp.api.McpConnector connector,
+                                                 com.lucky.agent.skill.service.SkillRegistry skills) {
+        return new CliServices(null, null, null, null, null, null, null, null,
+                new CliConfigResolver(), mcp, connector, skills);
+    }
+
+    /** 测试桩：只实现 /mcp 用到的方法，其余抛异常以暴露越界调用。 */
+    private static final class StubMcpRegistry implements com.lucky.agent.mcp.api.McpRegistry {
+        private final List<com.lucky.agent.mcp.api.dto.McpServerDef> defs;
+
+        StubMcpRegistry(List<com.lucky.agent.mcp.api.dto.McpServerDef> defs) {
+            this.defs = defs;
+        }
+
+        @Override
+        public List<com.lucky.agent.mcp.api.dto.McpServerDef> list() {
+            return defs;
+        }
+
+        @Override
+        public List<com.lucky.agent.mcp.api.dto.McpServerDef> listEnabled() {
+            return defs.stream().filter(com.lucky.agent.mcp.api.dto.McpServerDef::enabled).toList();
+        }
+
+        @Override
+        public Optional<com.lucky.agent.mcp.api.dto.McpServerDef> find(String id) {
+            return defs.stream().filter(d -> d.id().equals(id)).findFirst();
+        }
+
+        @Override
+        public void setEnabled(String id, boolean enabled) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.lucky.agent.mcp.api.dto.McpServerDef save(
+                com.lucky.agent.mcp.api.dto.McpServerDef def) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.lucky.agent.mcp.api.dto.McpServerDef importFrom(Path packageDir) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean remove(String id) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void reload() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public long revision() {
+            return 0;
+        }
+    }
+
+    /** 测试桩：只实现读状态用到的方法。 */
+    private static final class StubMcpConnector implements com.lucky.agent.mcp.api.McpConnector {
+        private final String status;
+        private final boolean connected;
+
+        StubMcpConnector(String status, boolean connected) {
+            this.status = status;
+            this.connected = connected;
+        }
+
+        @Override
+        public String status(String serverId) {
+            return status;
+        }
+
+        @Override
+        public boolean isConnected(String serverId) {
+            return connected;
+        }
+
+        @Override
+        public List<com.lucky.agent.mcp.api.dto.McpTool> listTools(String serverId) {
+            return List.of();
+        }
+
+        @Override
+        public void connect(String serverId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close(String serverId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void reconnect(String serverId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean ping(String serverId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.lucky.agent.common.dto.ToolResult callTool(String serverId, String toolName,
+                                                              Map<String, Object> args,
+                                                              com.lucky.agent.common.dto.ConversationCtx ctx) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    /** 测试桩：只实现 /skills 用到的方法。 */
+    private static final class StubSkillRegistry implements com.lucky.agent.skill.service.SkillRegistry {
+        private final List<com.lucky.agent.skill.repository.dto.SkillDef> defs;
+
+        StubSkillRegistry(List<com.lucky.agent.skill.repository.dto.SkillDef> defs) {
+            this.defs = defs;
+        }
+
+        @Override
+        public List<com.lucky.agent.skill.repository.dto.SkillDef> list() {
+            return defs;
+        }
+
+        @Override
+        public List<com.lucky.agent.skill.repository.dto.SkillDef> listEnabled() {
+            return defs.stream().filter(com.lucky.agent.skill.repository.dto.SkillDef::enabled).toList();
+        }
+
+        @Override
+        public Optional<com.lucky.agent.skill.repository.dto.SkillDef> find(String id) {
+            return defs.stream().filter(d -> d.id().equals(id)).findFirst();
+        }
+
+        @Override
+        public void setEnabled(String id, boolean enabled) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean isReadOnly(String id) {
+            return false;
+        }
+
+        @Override
+        public com.lucky.agent.skill.repository.dto.SkillDef save(
+                com.lucky.agent.skill.repository.dto.SkillDef def) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.lucky.agent.skill.repository.dto.SkillDef importFrom(Path packageDir) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public com.lucky.agent.skill.repository.dto.SkillDef importFromDir(Path sourceDir) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean remove(String id) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void reload() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public long revision() {
+            return 0;
+        }
     }
 
     /** 把 PrintStream 写到 StringBuilder 的桥（避免测试里到处字节转字符串）。 */

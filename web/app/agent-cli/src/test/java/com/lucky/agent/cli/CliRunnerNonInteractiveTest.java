@@ -95,7 +95,10 @@ class CliRunnerNonInteractiveTest {
                 tempDirs(),
                 null, // metrics
                 null, // files
-                null  // permission
+                null, // permission
+                null, // McpRegistry
+                null, // McpConnector
+                null  // SkillRegistry
         );
     }
 
