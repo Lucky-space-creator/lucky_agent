@@ -290,10 +290,10 @@ public class ReactEngine implements Engine {
                         return EngineRunResult.of(ctx.sessionId(), phase, finalText,
                                 tokenUsed, modelRouter.modelName(modelId), "ask");
                     }
-                    publisher.publish(ctx.sessionId(), AgentEvent.toolResult(
-                            ctx.sessionId(), req.id(), req.name(), true,
-                            resultText == null || resultText.isBlank() ? "ok" : truncate(resultText, MAX_TOOL_RESULT_TEXT),
-                            null, null));
+                    // 成败标志与错误文案如实取自 ToolResult：此前恒传 ok=true / error=null，
+                    // 会让 SSE、CLI 与指标把工具失败记成成功（对模型可见、对人不诚实）。
+                    publisher.publish(ctx.sessionId(), toolResultEvent(ctx.sessionId(), req.id(),
+                            req.name(), toolResult, resultText, MAX_TOOL_RESULT_TEXT));
                     messages.add(ToolExecutionResultMessage.from(req.id(), req.name(), resultText == null ? "" : resultText));
                 }
             }
@@ -621,7 +621,28 @@ public class ReactEngine implements Engine {
         return "";
     }
 
-    private String truncate(String text, int max) {
+    /**
+     * 工具结果事件：成败标志与错误文案如实上报（D18「错误即数据」）。
+     *
+     * <p>{@code ok} 取自 {@link ToolResult#ok()}，{@code error} 透传结果里的错误文案，
+     * 保证 SSE / CLI / MetricsCollector 不再把失败记成成功。{@code suspended}（ASK）
+     * 由调用方提前转 ask 事件并 return，不走本方法，避免重复计入成败统计。</p>
+     *
+     * <p>包可见静态方法：把这段判定从 19 个依赖的引擎实例里剥离，便于单测直接覆盖，
+     * 不需要构造整个执行上下文。</p>
+     */
+    static AgentEvent toolResultEvent(String sessionId, String callId, String toolName,
+                                      ToolResult result, String resultText, int maxText) {
+        boolean ok = result.ok();
+        // 失败且无错误文案时不能回退成 "ok"，否则摘要本身仍在误导。
+        String summary = resultText == null || resultText.isBlank()
+                ? (ok ? "ok" : "error")
+                : truncate(resultText, maxText);
+        return AgentEvent.toolResult(sessionId, callId, toolName, ok, summary,
+                null, result.isError() ? result.error() : null);
+    }
+
+    private static String truncate(String text, int max) {
         return text.length() <= max ? text : text.substring(0, max) + "…";
     }
 

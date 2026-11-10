@@ -1,5 +1,8 @@
 package core.support.gateway;
 
+import com.lucky.agent.common.api.Tool;
+import com.lucky.agent.common.api.ToolAnnotations;
+import com.lucky.agent.common.api.ToolSource;
 import com.lucky.agent.common.dto.ConversationCtx;
 import com.lucky.agent.common.dto.ExecResult;
 import com.lucky.agent.common.dto.SessionRef;
@@ -133,5 +136,100 @@ class ToolGatewayTest {
         assertTrue(String.valueOf(results.get(2).data()).contains("stat-result"));
         assertTrue(results.get(3).isError(), "未知工具应返回错误");
         assertNull(results.get(3).data());
+    }
+
+    @Test
+    void readToolExceptionIsIsolatedToItsOwnResult() {
+        // 对应缺陷：单个只读工具抛异常会让 Flux.merge(...).block() 冒到 ReactEngine 外层 catch，
+        // 整轮返回 EngineRunResult.error。修复后应降级为「该调用自己的 ToolResult.error」。
+        ToolGateway gw = gatewayWith(fileService,
+                stubTool("boom.read", true, Mono.error(new IllegalStateException("Timeout on blocking read"))));
+        when(fileService.read(anyString(), anyString()))
+                .thenReturn(Mono.just(ExecResult.success(null, "r").content("read-result")));
+        when(fileService.write(anyString(), anyString(), anyString()))
+                .thenReturn(Mono.just(ExecResult.success(null, "w").summary("write-result")));
+
+        List<ToolResult> results = gw.dispatchAll(List.of(
+                new ToolGateway.ToolCall("file.read", Map.of("path", "a.txt")),
+                new ToolGateway.ToolCall("boom.read", Map.of()),
+                new ToolGateway.ToolCall("file.write", Map.of("path", "b.txt", "content", "x")),
+                new ToolGateway.ToolCall("no.such.tool", Map.of())
+        ), ctx);
+
+        assertEquals(4, results.size(), "失败不能让结果列表缺项");
+        assertTrue(results.get(0).ok(), "同批只读工具不受影响");
+        assertTrue(results.get(1).isError(), "异常只读工具应降级为 error 结果");
+        assertTrue(String.valueOf(results.get(1).error()).contains("boom.read"));
+        assertTrue(results.get(2).ok(), "后续写工具仍应执行");
+        assertTrue(results.get(3).isError(), "未知工具仍返回 error");
+    }
+
+    @Test
+    void writeToolExceptionDoesNotAbortFollowingSerialCalls() {
+        when(fileService.write(anyString(), anyString(), anyString()))
+                .thenThrow(new IllegalStateException("disk full"))
+                .thenReturn(Mono.just(ExecResult.success(null, "w").summary("write-result")));
+
+        List<ToolResult> results = gateway.dispatchAll(List.of(
+                new ToolGateway.ToolCall("file.write", Map.of("path", "a.txt", "content", "x")),
+                new ToolGateway.ToolCall("file.write", Map.of("path", "b.txt", "content", "y"))
+        ), ctx);
+
+        assertEquals(2, results.size());
+        assertTrue(results.get(0).isError(), "同步抛异常的写工具应转成 error 结果");
+        assertTrue(String.valueOf(results.get(0).error()).contains("file.write"));
+        assertTrue(results.get(1).ok(), "前一个写工具异常不应中断后续写工具");
+    }
+
+    @Test
+    void emptyToolMonoBecomesErrorResult() {
+        ToolGateway gw = gatewayWith(fileService, stubTool("empty.read", true, Mono.empty()));
+
+        List<ToolResult> results = gw.dispatchAll(List.of(
+                new ToolGateway.ToolCall("empty.read", Map.of())
+        ), ctx);
+
+        assertEquals(1, results.size());
+        assertTrue(results.get(0).isError(), "空 Mono 不能变成 null 观察");
+        assertTrue(String.valueOf(results.get(0).error()).contains("empty.read"));
+    }
+
+    private static ToolGateway gatewayWith(FileService fs, Tool... tools) {
+        ToolSource source = new ToolSource() {
+            @Override
+            public String namespace() {
+                return "test";
+            }
+
+            @Override
+            public List<Tool> tools(String workspaceId, String goal) {
+                return List.of(tools);
+            }
+        };
+        return new ToolGateway(fs, List.of(source));
+    }
+
+    private static Tool stubTool(String name, boolean readOnly, Mono<ToolResult> outcome) {
+        return new Tool() {
+            @Override
+            public String name() {
+                return name;
+            }
+
+            @Override
+            public String description() {
+                return "测试工具";
+            }
+
+            @Override
+            public ToolAnnotations annotations() {
+                return readOnly ? ToolAnnotations.readOnlyTool() : ToolAnnotations.writableTool();
+            }
+
+            @Override
+            public Mono<ToolResult> execute(ConversationCtx c, Map<String, Object> a) {
+                return outcome;
+            }
+        };
     }
 }

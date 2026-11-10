@@ -15,6 +15,7 @@ import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 
@@ -106,10 +107,17 @@ public class ToolGateway {
      * @param toolName 工具名
      * @param args     入参
      * @param ctx      会话上下文
-     * @return 工具结果
+     * @return 工具结果（任何异常都降级为 {@link ToolResult#error(String)}，不向上抛）
      */
     public ToolResult dispatch(String toolName, Map<String, Object> args, ConversationCtx ctx) {
-        Tool tool = findTool(buildTools(ctx.workspaceId()), toolName);
+        List<Tool> tools;
+        try {
+            tools = buildTools(ctx.workspaceId());
+        } catch (Exception e) {
+            log.warn("工具集构建失败：workspaceId={}", ctx.workspaceId(), e);
+            return ToolResult.error("工具集构建失败：" + messageOf(e));
+        }
+        Tool tool = findTool(tools, toolName);
         if (tool == null) {
             return ToolResult.error("未知工具：" + toolName);
         }
@@ -120,12 +128,24 @@ public class ToolGateway {
      * 批量分发一轮工具调用：只读工具并行执行（受注解 readOnly 控制）、写工具串行，
      * 结果按输入顺序返回（调用方按序回灌消息与发布事件）。
      *
+     * <p>D18「错误即数据」：任一工具抛异常 / 超时 / 返回空 Mono，都只降级为该调用自己的
+     * {@link ToolResult#error(String)}，绝不冒泡成整轮 {@code EngineRunResult.error}。
+     * 并行分支额外加 {@code onErrorResume} 与收集兜底，保证结果列表与输入严格一一对应且无 null。</p>
+     *
      * @param calls 本轮工具调用（名称 + 入参）
      * @param ctx   会话上下文
      * @return 与输入一一对应的工具结果列表
      */
     public List<ToolResult> dispatchAll(List<ToolCall> calls, ConversationCtx ctx) {
-        List<Tool> tools = buildTools(ctx.workspaceId());
+        List<Tool> tools;
+        try {
+            tools = buildTools(ctx.workspaceId());
+        } catch (Exception e) {
+            log.warn("工具集构建失败：workspaceId={}", ctx.workspaceId(), e);
+            return calls.stream()
+                    .map(c -> ToolResult.error("工具集构建失败：" + messageOf(e)))
+                    .toList();
+        }
         ToolResult[] results = new ToolResult[calls.size()];
         List<Mono<IndexedResult>> parallel = new ArrayList<>();
         for (int i = 0; i < calls.size(); i++) {
@@ -137,6 +157,9 @@ public class ToolGateway {
                 // 只读工具：并行执行，按完成顺序放回对应索引
                 int idx = i;
                 parallel.add(Mono.fromCallable(() -> new IndexedResult(idx, execute(tool, ctx, call.args())))
+                        // 兜底：即便 execute 之外的异常（Error / 调度失败）也不吞掉整批结果
+                        .onErrorResume(e -> Mono.just(new IndexedResult(idx,
+                                ToolResult.error("工具执行异常：" + call.name() + "：" + messageOf(e)))))
                         .subscribeOn(Schedulers.boundedElastic()));
             } else {
                 // 写工具：串行执行
@@ -144,16 +167,66 @@ public class ToolGateway {
             }
         }
         if (!parallel.isEmpty()) {
-            List<IndexedResult> done = Flux.merge(parallel).collectList().block();
+            List<IndexedResult> done;
+            try {
+                done = Flux.merge(parallel).collectList().block();
+            } catch (Exception e) {
+                log.warn("并行工具分发异常（未回填项降级为逐项错误）", e);
+                done = List.of();
+            }
             if (done != null) {
                 done.forEach(ir -> results[ir.index()] = ir.result());
             }
         }
-        return List.of(results);
+        // 任何未回填的索引都必须有结果：禁止 null 进入 List.copyOf，也禁止模型收到空观察。
+        List<ToolResult> out = new ArrayList<>(calls.size());
+        for (int i = 0; i < results.length; i++) {
+            out.add(results[i] == null
+                    ? ToolResult.error("工具执行未完成（异常或超时）：" + calls.get(i).name())
+                    : results[i]);
+        }
+        return List.copyOf(out);
     }
 
+    /** 单次工具执行：任何异常 / 空响应都转成 ToolResult.error，不向上抛（D18）。 */
     private ToolResult execute(Tool tool, ConversationCtx ctx, Map<String, Object> args) {
-        return tool.execute(ctx, args == null ? Map.of() : args).block();
+        try {
+            ToolResult result = tool.execute(ctx, args == null ? Map.of() : args).block();
+            return result == null
+                    ? ToolResult.error("工具无返回（超时或空响应）：" + tool.name())
+                    : result;
+        } catch (Exception e) {
+            log.warn("工具执行异常：tool={}", tool.name(), e);
+            String prefix = isTimeout(e) ? "工具执行超时" : "工具执行异常";
+            return ToolResult.error(prefix + "：" + tool.name() + "：" + messageOf(e));
+        }
+    }
+
+    /** block(Duration) 超时抛 IllegalStateException("Timeout on blocking read…")，单独归因便于模型自纠。 */
+    private static boolean isTimeout(Throwable e) {
+        String message = messageOf(e).toLowerCase(Locale.ROOT);
+        return e instanceof java.util.concurrent.TimeoutException
+                || message.contains("timeout") || message.contains("timed out");
+    }
+
+    /** 取最外层可读文案，逐级回退到根因 / 异常类名，保证错误文本非空（模型要据此自纠）。 */
+    private static String messageOf(Throwable e) {
+        if (e == null) {
+            return "未知异常";
+        }
+        String own = e.getMessage();
+        if (own != null && !own.isBlank()) {
+            return own;
+        }
+        Throwable cause = e.getCause();
+        if (cause != null && cause != e) {
+            String nested = cause.getMessage();
+            if (nested != null && !nested.isBlank()) {
+                return nested;
+            }
+            return cause.getClass().getSimpleName();
+        }
+        return e.getClass().getSimpleName();
     }
 
     private Tool findTool(List<Tool> tools, String name) {
