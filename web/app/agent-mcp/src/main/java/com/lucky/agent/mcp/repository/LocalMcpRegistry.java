@@ -3,6 +3,7 @@ package com.lucky.agent.mcp.repository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.exception.AgentException;
+import com.lucky.agent.common.util.ConcurrentMaps;
 import com.lucky.agent.mcp.api.McpRegistry;
 import com.lucky.agent.mcp.api.dto.McpServerDef;
 import com.lucky.agent.mcp.config.McpProperties;
@@ -166,8 +167,10 @@ public class LocalMcpRegistry implements McpRegistry {
         for (McpServerDef def : loader.loadAll()) {
             next.put(def.id(), def);
         }
-        servers.clear();
-        servers.putAll(next);
+        // 台账 #39：clear()+putAll() 在两步之间留出「注册表为空」的窗口，
+        // 并发的工具发现/健康探活会瞬时看到 0 个 Server。改 diff 替换：
+        // 任意中间时刻读者看到的至多是「个别旧条目尚未剔除」，绝不会看到空表。
+        ConcurrentMaps.replaceAll(servers, next);
         revision.incrementAndGet();
         log.info("MCP 注册表已加载，共 {} 个（启用 {}）", servers.size(), listEnabled().size());
     }

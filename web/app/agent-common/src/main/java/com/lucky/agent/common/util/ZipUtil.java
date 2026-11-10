@@ -30,9 +30,11 @@ public final class ZipUtil {
      */
     public static void extractZip(InputStream zipStream, Path targetDir) {
         Path root = targetDir.toAbsolutePath().normalize();
+        int entries = 0;
         try (ZipInputStream zis = new ZipInputStream(zipStream)) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
+                entries++;
                 Path target = resolveEntry(root, entry.getName());
                 if (entry.isDirectory()) {
                     Files.createDirectories(target);
@@ -43,6 +45,12 @@ public final class ZipUtil {
             }
         } catch (IOException e) {
             throw new AgentException("IMPORT_ARCHIVE_ERROR", "压缩包解压失败：文件可能已损坏", e);
+        }
+        if (entries == 0) {
+            // ZipInputStream 对垃圾字节是宽松的：首个 getNextEntry() 直接返回 null 而不抛
+            // IOException，「not-a-zip」会静默解出零条目，错误被推迟到上游「找不到 meta.json」。
+            // 零条目 = 声称是 zip 却解不出任何东西（垃圾内容或空包），在此层判为损坏。
+            throw new AgentException("IMPORT_ARCHIVE_ERROR", "压缩包解压失败：文件可能已损坏（未找到任何条目）");
         }
     }
 

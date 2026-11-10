@@ -3,6 +3,7 @@ package com.lucky.agent.skill.repository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lucky.agent.common.constant.WorkspaceDirs;
 import com.lucky.agent.common.exception.AgentException;
+import com.lucky.agent.common.util.ConcurrentMaps;
 import com.lucky.agent.skill.service.SkillRegistry;
 import com.lucky.agent.skill.repository.dto.SkillDef;
 import com.lucky.agent.skill.config.SkillProperties;
@@ -307,8 +308,9 @@ public class LocalSkillRegistry implements SkillRegistry {
             Boolean enabled = state.get(id);
             return enabled == null ? def : def.withEnabled(enabled);
         });
-        skills.clear();
-        skills.putAll(next);
+        // 台账 #39：clear()+putAll() 在两步之间留出「注册表为空」的窗口，并发的
+        // 技能匹配会瞬时看到 0 个技能。改 diff 替换：先写新、后删旧，任何时刻不空表。
+        ConcurrentMaps.replaceAll(skills, next);
         revision.incrementAndGet();
         // 仅在有变化（增删/启停/正文变更）时打印，避免热插拔定时扫描每 30s 无意义刷日志
         String fingerprint = next.entrySet().stream()

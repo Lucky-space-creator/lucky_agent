@@ -43,12 +43,33 @@ public final class PackageImporter {
             if (zip) {
                 ZipUtil.extractZip(file.getInputStream(), tempDir);
             } else {
-                Files.write(tempDir.resolve(filename == null ? META : filename), file.getBytes());
+                // 台账 #43：originalFilename 来自客户端，可携带路径分隔符
+                // （../../evil.txt、C:\x\meta.json）—— resolve 会跟着走，写穿临时目录。
+                // 必须清洗为纯文件名再落盘。
+                Files.write(tempDir.resolve(sanitizeFilename(filename)), file.getBytes());
             }
         } catch (IOException e) {
             throw new AgentException("IMPORT_READ_ERROR", "读取上传文件失败，请重试", e);
         }
         return locateAllContentRoots(tempDir);
+    }
+
+    /**
+     * 上传文件名清洗：只保留最后一段路径、剔除控制字符与首尾空白。
+     * 清洗后为空 / 是目录引用（{@code .}、{@code ..}）时回落 {@code meta.json}（与原空名兜底一致）。
+     */
+    static String sanitizeFilename(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return META;
+        }
+        String name = raw.replace('\\', '/');
+        int slash = name.lastIndexOf('/');
+        name = (slash >= 0 ? name.substring(slash + 1) : name).trim();
+        name = name.replaceAll("[\\p{Cntrl}]", "");
+        if (name.isEmpty() || ".".equals(name) || "..".equals(name)) {
+            return META;
+        }
+        return name;
     }
 
     /** 兼容旧调用：返回单个内容根目录，多包时抛歧义异常。 */

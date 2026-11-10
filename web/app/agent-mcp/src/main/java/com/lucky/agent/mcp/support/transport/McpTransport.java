@@ -37,4 +37,15 @@ public interface McpTransport {
 
     /** 关闭传输并释放资源（失败仅记日志）。 */
     void close();
+
+    /**
+     * 传输是否仍然可用（台账 #38）。
+     *
+     * <p>stdio 实现检查子进程存活；HTTP 逐请求无长连接，默认恒为 true。
+     * 会话层用它区分「已握手但底层已死」——此前子进程退出后 {@code isConnected()}
+     * 仍返回 true，状态与实况长期错位，探活都不会触发重连。</p>
+     */
+    default boolean isAlive() {
+        return true;
+    }
 }

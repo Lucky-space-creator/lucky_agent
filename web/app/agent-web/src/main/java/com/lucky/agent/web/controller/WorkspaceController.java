@@ -43,9 +43,19 @@ public class WorkspaceController {
                 .toList();
     }
 
-    /** 创建工作空间。 */
+    /**
+     * 创建工作空间。
+     *
+     * <p>台账 #43：{@code path} 缺失/为空时 {@code Path.of(null)} 直接 NPE → 裸 500；
+     * 这里显式校验，交给 {@code GlobalExceptionHandler} 以 400 + 可读文案返回
+     * （{@code Path.of} 的 {@code InvalidPathException} 本身也是
+     * {@code IllegalArgumentException} 子类，非法字符路径同样落 400）。</p>
+     */
     @PostMapping
     public Workspace create(@RequestBody CreateRequest request) {
+        if (request.path() == null || request.path().isBlank()) {
+            throw new IllegalArgumentException("工作空间物理路径不能为空（path 必填）");
+        }
         return withPath(workspaceManager.createWorkspace(request.name(), Path.of(request.path()),
                 PermissionLevel.fromCode(request.permissionLevel())));
     }

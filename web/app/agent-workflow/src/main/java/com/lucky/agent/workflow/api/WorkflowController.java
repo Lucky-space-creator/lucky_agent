@@ -6,9 +6,11 @@ import com.lucky.agent.workflow.dto.NodeTypeMeta;
 import com.lucky.agent.workflow.dto.TriggerRequest;
 import com.lucky.agent.workflow.event.WorkflowEvent;
 import com.lucky.agent.workflow.event.WorkflowEventBus;
+import com.lucky.agent.workflow.event.WorkflowEventType;
 import com.lucky.agent.workflow.exception.WorkflowException;
 import com.lucky.agent.workflow.service.NodeTypeCatalog;
 import com.lucky.agent.workflow.service.WorkflowService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
@@ -46,6 +48,7 @@ import java.util.function.Consumer;
  * <p>SSE 采用 WebFlux 的 {@code Flux<ServerSentEvent>}（而非 Servlet 的 {@code SseEmitter}），
  * 以保持本模块与宿主（响应式栈）一致，且不引入 Tomcat/spring-webmvc 依赖。</p>
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/workflows")
 public class WorkflowController {
@@ -150,7 +153,15 @@ public class WorkflowController {
         return service.instance(instanceId);
     }
 
-    /** SSE：订阅指定实例的执行事件流（WebFlux 响应式）。 */
+    /**
+     * SSE：订阅指定实例的执行事件流（WebFlux 响应式）。
+     *
+     * <p><b>终止语义</b>（台账 #36）：实例进入终态（{@code WORKFLOW_COMPLETED} /
+     * {@code WORKFLOW_FAILED}）时，事件流以 complete 收口 —— 此前流永不结束，
+     * 前端 {@code EventSource} 只能靠页面刷新/手动断开收场。心跳用
+     * {@code takeUntil} 联动终止：{@code mergeWith(interval)} 里 interval 是无限源，
+     * 不截断的话事件源 complete 了流也不会结束。</p>
+     */
     @GetMapping(value = "/instances/{instanceId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<WorkflowEvent>> events(@PathVariable String instanceId) {
         // 多播 sink：事件总线回调 → Flux 下游。
@@ -159,8 +170,17 @@ public class WorkflowController {
         // 这正是前端必须「订阅 + 立即拉一次实例快照 + 兜底轮询」的原因 —— 快照是事实源，事件只是推进信号。
         Sinks.Many<WorkflowEvent> sink = Sinks.many().multicast().onBackpressureBuffer();
         Consumer<WorkflowEvent> listener = event -> {
-            if (instanceId.equals(event.instanceId())) {
-                sink.tryEmitNext(event);
+            if (!instanceId.equals(event.instanceId())) {
+                return;
+            }
+            Sinks.EmitResult result = sink.tryEmitNext(event);
+            // FAIL_ZERO_SUBSCRIBER 是建连窗口内的正常丢弃（快照兜底），不值一条日志；
+            // 其余失败（慢客户端溢出 / 已终止后迟到）必须留痕，否则「推进信号断流」查不到原因。
+            if (result.isFailure() && result != Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER) {
+                log.warn("SSE 事件投递失败（type={} result={}）：客户端过慢或连接已终止，该事件丢失", event.type(), result);
+            }
+            if (isTerminal(event.type())) {
+                sink.tryEmitComplete(); // 终态后收口：前端 EventSource 收到 close，连接自然结束
             }
         };
         eventBus.subscribe(listener);
@@ -175,9 +195,17 @@ public class WorkflowController {
                         .map(i -> ServerSentEvent.<WorkflowEvent>builder()
                                 .comment("keep-alive")
                                 .build()))
+                // takeUntil：终态事件先放行给订阅者，随后连同无限心跳源一起终止整条流
+                // （心跳帧无 data，必须判空，否则终态判定对不上、流永不结束）
+                .takeUntil(sse -> sse.data() != null && isTerminal(sse.data().type()))
                 .doOnCancel(() -> eventBus.unsubscribe(listener))
                 .doOnTerminate(() -> eventBus.unsubscribe(listener))
                 .doFinally(signal -> eventBus.unsubscribe(listener));
+    }
+
+    /** 是否终态事件（SSE 流以它收口）。 */
+    private static boolean isTerminal(WorkflowEventType type) {
+        return type == WorkflowEventType.WORKFLOW_COMPLETED || type == WorkflowEventType.WORKFLOW_FAILED;
     }
 
     // ---------------- 异常映射 ----------------

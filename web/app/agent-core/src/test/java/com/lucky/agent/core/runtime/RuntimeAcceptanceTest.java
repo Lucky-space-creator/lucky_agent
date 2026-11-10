@@ -120,12 +120,17 @@ class RuntimeAcceptanceTest {
         assertThat(retries.retriesExhausted()).isTrue();
         assertThat(retries.exhaustedReason()).contains("STEP:max_retries");
 
-        // 每级有独立的时间限制（此处取 1ms 上限，睡 10ms 后必然耗尽）
-        BudgetScope timed = manager.subAgent("a-time", 0L, 1L, 0);
+        // 每级有独立的时间限制。「立即未耗尽」用宽裕上限（2s）断言：1ms 上限在创建与
+        // 断言之间就会偶发超过（GC/调度抖动），曾致 125 行假失败；1ms 只用于「睡后必耗尽」
+        BudgetScope timed = manager.subAgent("a-time", 0L, 2_000L, 0);
         assertThat(timed.timeExhausted()).isFalse();
         Thread.sleep(10L);
-        assertThat(timed.timeExhausted()).isTrue();
-        assertThat(timed.exhaustedReason()).contains("SUBAGENT:max_time");
+        assertThat(timed.timeExhausted()).isFalse(); // 2s 上限睡 10ms 不应耗尽
+
+        BudgetScope tight = manager.subAgent("a-tight", 0L, 1L, 0);
+        Thread.sleep(10L);
+        assertThat(tight.timeExhausted()).isTrue();
+        assertThat(tight.exhaustedReason()).contains("SUBAGENT:max_time");
     }
 
     @Test

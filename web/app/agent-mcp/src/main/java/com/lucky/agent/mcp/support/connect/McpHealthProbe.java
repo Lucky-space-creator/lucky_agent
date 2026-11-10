@@ -28,8 +28,14 @@ public class McpHealthProbe {
         this.auth = auth;
     }
 
-    /** 探活定时任务（mcp.health-probe-sec，默认 60 秒）。 */
-    @Scheduled(fixedDelayString = "${mcp.health-probe-sec:60000}")
+    /**
+     * 探活定时任务（mcp.health-probe-sec，默认 60 秒）。
+     *
+     * <p>注意单位：{@code fixedDelayString} 的裸数字按<b>毫秒</b>解析，配置项语义是「秒」，
+     * 必须带 {@code s} 后缀换算 —— 此前写 {@code :60000} 语义还行，但用户配 {@code 60}
+     * 会变成 60ms 的探活风暴；与台账 #21 的 {@code model.health-probe-sec} 同一坑。</p>
+     */
+    @Scheduled(fixedDelayString = "${mcp.health-probe-sec:60}s")
     public void probe() {
         for (McpServerDef def : registry.listEnabled()) {
             if (!auth.isAuthorized(def.id())) {

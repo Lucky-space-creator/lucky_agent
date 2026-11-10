@@ -7,6 +7,7 @@ import com.lucky.agent.common.dto.UserInput;
 import com.lucky.agent.core.service.ConversationManager;
 import com.lucky.agent.web.stream.ReactiveSsePublisher;
 import com.lucky.agent.web.stream.WebChannel;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -32,6 +33,7 @@ import java.util.UUID;
  * <p>提交立即返回（异步运行），运行过程经 {@code Flux<AgentEvent>} 经 SSE 实时推送；
  * 长任务在异步线程执行，不占用 Web 容器业务线程，POST 不阻塞等待结果。</p>
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/chat")
 public class ChatController {
@@ -61,10 +63,15 @@ public class ChatController {
         if (request.modelId() != null && !request.modelId().isBlank()) {
             extra.put(MODEL_ID_KEY, request.modelId());
         }
-        // fire-and-forget：运行经 publisher + SSE 推送，POST 立即返回
+        // fire-and-forget：运行经 publisher + SSE 推送，POST 立即返回。
+        // 台账 #44：此前 .subscribe() 无错误消费者 —— 后台提交失败（模型未配置、工作空间
+        // 失效等）被 Reactor 按 onErrorDropped 静默吞掉，前端拿着 accepted:true 干等。
+        // 至少要把失败打进日志，让「accepted 但没动静」可查。
         webChannel.submit(ref, UserInput.of(request.content(), extra))
                 .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
-                .subscribe();
+                .subscribe(null, err ->
+                        log.error("会话提交后台执行失败（前端已收到 accepted，但本次运行未开始）：session={} err={}",
+                                sessionId, err.getMessage(), err));
         return Mono.just(Map.of("sessionId", sessionId, "accepted", true));
     }
 

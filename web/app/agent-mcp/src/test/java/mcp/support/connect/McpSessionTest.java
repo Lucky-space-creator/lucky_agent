@@ -102,6 +102,23 @@ class McpSessionTest {
         assertFalse(session.isConnected());
     }
 
+    @Test
+    void testSessionReportsDeadWhenTransportDied() {
+        FakeTransport transport = new FakeTransport();
+        McpSession session = newSession(transport);
+        session.connect();
+        assertTrue(session.isConnected());
+
+        transport.alive = false; // 模拟 stdio 子进程退出（台账 #38）
+
+        assertFalse(session.isConnected(), "底层传输已死时 isConnected 必须如实返回 false，否则探活永远不会重连");
+        int callsBefore = transport.calls.size();
+        ToolResult result = session.call("toolA", Map.of());
+        assertTrue(result.isError(), "底层已死时调用应直接失败并说明原因");
+        assertTrue(result.error().contains("传输已不可用"), result.error());
+        assertEquals(callsBefore, transport.calls.size(), "底层已死时不得再发起 JSON-RPC 请求等满超时");
+    }
+
     private McpServerDef def(String id) {
         return new McpServerDef(id, id, "演示", McpServerDef.TYPE_STDIO,
                 "echo", List.of(), null, Map.of(), true);
@@ -124,6 +141,7 @@ class McpSessionTest {
         final List<String> calls = new ArrayList<>();
         final Map<String, JsonRpcResponse> overrides = new HashMap<>();
         boolean failInitialize;
+        boolean alive = true;
 
         @Override
         public void start() {
@@ -168,6 +186,11 @@ class McpSessionTest {
         @Override
         public void close() {
             calls.add("close");
+        }
+
+        @Override
+        public boolean isAlive() {
+            return alive;
         }
     }
 }

@@ -200,16 +200,28 @@ public final class ReplLoop {
         }
         String a = answer.trim();
         if (a.chars().allMatch(Character::isDigit)) {
-            int idx = Integer.parseInt(a);
+            // 台账 #42：超长纯数字串（如误把整段文本粘进选择框）会让 parseInt 抛
+            // NumberFormatException 穿透整个 REPL —— 序号解析必须兜住，越界/解析失败
+            // 一律降级为「自定义输入」，绝不能让用户被踢出进程。
+            int idx = parseOptionIndex(a);
             if (idx >= 1 && idx <= optionList.size()) {
                 Object label = optionList.get(idx - 1).get("label");
                 if (label != null && !String.valueOf(label).isBlank()) {
                     return String.valueOf(label);
                 }
             }
-            out.println(out.theme().yellow("序号超出范围，已按自定义输入处理。"));
+            out.println(out.theme().yellow("序号超出范围或不可解析，已按自定义输入处理。"));
         }
         return a;
+    }
+
+    /** 选项序号解析：解析失败（超长数字串等）返回 -1，由调用方按越界处理（包可见便于单测）。 */
+    static int parseOptionIndex(String digits) {
+        try {
+            return Integer.parseInt(digits);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     // ------------------------------------------------------------------ 展示

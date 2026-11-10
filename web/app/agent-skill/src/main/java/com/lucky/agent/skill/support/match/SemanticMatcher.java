@@ -51,7 +51,12 @@ public class SemanticMatcher implements SkillMatcher {
         }
         int limit = topK <= 0 ? 5 : topK;
         return scored.stream()
-                .sorted(Comparator.comparingDouble((Scored s) -> s.score).reversed())
+                // 台账 #41：等分必须有 tie-break。输入序来自 registry 的 ConcurrentHashMap 迭代，
+                // JVM 每次启动都可能不同 —— 等分候选拿谁全凭哈希桶布局，召回集合跨次抖动。
+                // 按分降序后用 id/name 字典序兜底：同分时结果只由内容决定，与输入序无关。
+                .sorted(Comparator.comparingDouble((Scored s) -> s.score).reversed()
+                        .thenComparing(s -> s.skill.id() == null ? "" : s.skill.id())
+                        .thenComparing(s -> s.skill.name() == null ? "" : s.skill.name()))
                 .limit(limit)
                 .map(s -> new SkillMatch(s.skill, s.score))
                 .toList();

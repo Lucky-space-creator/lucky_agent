@@ -73,8 +73,11 @@ public class CliSessionService {
         String s = selector.trim();
         List<SessionRepository.SessionMeta> all = list(userId);
         if (s.chars().allMatch(Character::isDigit)) {
-            int idx = Integer.parseInt(s);
-            return (idx >= 1 && idx <= all.size()) ? Optional.of(all.get(idx - 1)) : Optional.empty();
+            // 台账 #42 同源：超长纯数字串（如误把 UUID 拼上数字）会让 parseInt 抛
+            // NumberFormatException。序号只用于命中列表位置，解析失败按「未命中」处理。
+            Integer idx = parseIndex(s);
+            return (idx != null && idx >= 1 && idx <= all.size())
+                    ? Optional.of(all.get(idx - 1)) : Optional.empty();
         }
         Optional<SessionRepository.SessionMeta> exact = all.stream()
                 .filter(m -> s.equals(m.sessionId())).findFirst();
@@ -84,6 +87,15 @@ public class CliSessionService {
         List<SessionRepository.SessionMeta> prefix = all.stream()
                 .filter(m -> m.sessionId() != null && m.sessionId().startsWith(s)).toList();
         return prefix.size() == 1 ? Optional.of(prefix.getFirst()) : Optional.empty();
+    }
+
+    /** 纯数字选择器 → 序号；解析失败（超长数字串等）返回 null，按未命中处理。 */
+    private static Integer parseIndex(String digits) {
+        try {
+            return Integer.parseInt(digits);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /** 判定选择器是否命中多条（用于给出「有歧义」的准确提示）。 */

@@ -247,9 +247,15 @@ export const workflowApi = {
    * {@code create} 不生成 id，因此新建必须由前端带 id 且恒定 POST。</p>
    */
   create: (def: Partial<WorkflowDef>) => http.post<WorkflowDef>('/api/workflows', def),
-  /** 更新工作流定义（后端校验：必须含 1 个 START + 至少 1 个 END 节点）。 */
-  save: (def: Partial<WorkflowDef>) =>
-    def.id ? http.put<WorkflowDef>(`/api/workflows/${def.id}`, def) : http.post<WorkflowDef>('/api/workflows', def),
+  /**
+   * 更新工作流定义（恒定 PUT；台账 #45）。
+   *
+   * <p>旧实现按「有无 id」分流 PUT/POST，但 {@code WorkflowDef.id} 前后端都是必填
+   * → POST 分支不可达（死代码）。且新建有专门的 {@link #create}（前端自造 id、
+   * 恒定 POST —— 复用 save 会被误判为「更新」），因此 save 收敛为纯 update。
+   * 后端校验：必须含 1 个 START + 至少 1 个 END 节点。</p>
+   */
+  save: (def: WorkflowDef) => http.put<WorkflowDef>(`/api/workflows/${def.id}`, def),
   remove: (id: string) => http.del<{ removed: boolean }>(`/api/workflows/${id}`),
   /** 启停工作流。 */
   setEnabled: (id: string, enabled: boolean) =>

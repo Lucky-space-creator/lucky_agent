@@ -94,4 +94,29 @@ class SemanticMatcherTest {
         assertTrue(matcher.match(skills, "  ", 5).isEmpty());
         assertTrue(matcher.match(skills, null, 5).isEmpty());
     }
+
+    @Test
+    void testMatch_TiesAreBrokenByIdNotByInputOrder() {
+        // 台账 #41：三个候选对查询得分完全相同（同描述同触发词）。此前无 tie-break，
+        // 排序稳定性全看输入序 —— 而输入序来自 registry 的 ConcurrentHashMap 迭代，
+        // 跨 JVM 启动会变。修复后等分候选拿 id 字典序：无论输入序怎么换，输出必须一致。
+        List<SkillDef> oneOrder = List.of(
+                skill("b-skill", "同名任务", "导出报告 生成报告", List.of("导出报告")),
+                skill("a-skill", "同名任务", "导出报告 生成报告", List.of("导出报告")),
+                skill("c-skill", "同名任务", "导出报告 生成报告", List.of("导出报告")));
+        List<SkillDef> reversedOrder = List.of(
+                oneOrder.get(2), oneOrder.get(1), oneOrder.get(0));
+
+        List<SkillMatch> r1 = matcher.match(oneOrder, "帮我导出报告", 3);
+        List<SkillMatch> r2 = matcher.match(reversedOrder, "帮我导出报告", 3);
+
+        assertEquals(3, r1.size());
+        assertEquals(
+                r1.stream().map(m -> m.skill().id()).toList(),
+                r2.stream().map(m -> m.skill().id()).toList(),
+                "等分候选的输出顺序不得依赖输入顺序");
+        assertEquals(List.of("a-skill", "b-skill", "c-skill"),
+                r1.stream().map(m -> m.skill().id()).toList(),
+                "等分候选应按 id 字典序排列");
+    }
 }

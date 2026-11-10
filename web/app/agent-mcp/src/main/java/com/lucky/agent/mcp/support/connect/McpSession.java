@@ -61,9 +61,9 @@ public class McpSession {
         log.info("MCP 会话就绪：{}（{} 个 Tool）", def.id(), fetched.size());
     }
 
-    /** 是否已连接。 */
+    /** 是否已连接（底层传输已死时如实返回 false，见 {@link McpTransport#isAlive}）。 */
     public boolean isConnected() {
-        return connected;
+        return connected && transport.isAlive();
     }
 
     /** 缓存的 Tool 列表。 */
@@ -73,6 +73,10 @@ public class McpSession {
 
     /** 调用远端工具。 */
     public ToolResult call(String toolName, Map<String, Object> args) {
+        if (connected && !transport.isAlive()) {
+            // 底层已死：不等请求超时，直接给出可行动的失败原因（探活会随后触发重连）
+            return ToolResult.error("MCP 传输已不可用[" + def.id() + "]：子进程已退出或连接已断开，等待探活重连");
+        }
         Map<String, Object> params = new HashMap<>(Map.of("name", toolName));
         params.put("arguments", args == null ? Map.of() : args);
         JsonRpcResponse resp = transport.request("tools/call", params, properties.requestTimeoutMs());
