@@ -94,6 +94,9 @@ public class WorkflowEngine extends AbstractWorkflowEngine {
             routeSuccessors(cw, nodeId, instance, pending, fired, queue, visited);
         }
 
+        // 台账 #34：队列空 ≠ 全都执行过。不可达节点（不在 START 路径上）必须显式标 SKIPPED，
+        // 否则它们停在 PENDING 而整体报成功，画布上是一个永远灰着的节点。
+        markUnreachableNodesSkipped(cw, instance);
         stateMachine.transition(instance, WorkflowStatus.COMPLETED);
         persistProgress(instance);
         publish(instance, null, WorkflowEventType.WORKFLOW_COMPLETED, "工作流执行完成: " + definition.name());

@@ -157,14 +157,24 @@ public class StdioTransport implements McpTransport {
                     continue;
                 }
                 JsonRpcResponse resp = JsonRpcResponse.parse(objectMapper, line);
-                Object id = resp.id();
-                if (id instanceof Number number) {
-                    CompletableFuture<JsonRpcResponse> future = pending.remove(number.longValue());
-                    if (future != null) {
-                        future.complete(resp);
-                    }
-                } else {
+                Object rawId = resp.id();
+                // JSON-RPC 允许 id 为数字<b>或字符串</b>，对端把 id 字符串化是常见实现（台账 #30）：
+                // 此前只认 Number，字符串 id 一律落进「通知」分支只打 debug，响应被丢弃 ——
+                // 请求等满整个超时窗口才失败，日志里毫无线索。此处统一归一化为 long 再查挂起表。
+                Long id = normalizeId(rawId);
+                if (id == null) {
+                    // 真正的通知/服务端请求（无 id）或结构异常的 id
                     log.debug("收到 MCP 服务端通知/异常响应：{}#{}", def.id(), line);
+                    continue;
+                }
+                CompletableFuture<JsonRpcResponse> future = pending.remove(id);
+                if (future != null) {
+                    future.complete(resp);
+                } else {
+                    // 挂起表里没有：多半是已超时清理的迟到响应，或对端擅自改了 id。
+                    // 提到 warn —— 否则「每次请求都等满超时就失败」在现场无任何可查痕迹。
+                    log.warn("MCP 响应 id 未匹配到挂起请求（可能已超时或对端改写了 id）：{} id={} raw={}，响应行：{}",
+                            def.id(), id, rawId, line);
                 }
             }
         } catch (IOException e) {
@@ -175,6 +185,32 @@ public class StdioTransport implements McpTransport {
                 failAllPending("MCP 子进程已退出：" + def.id());
             }
         }
+    }
+
+    /**
+     * 把响应里的 id 归一化为挂起表键。
+     *
+     * <p>兼容三种形态：JSON 数字、数字字符串（{@code "12"}）、以及带空白的数字字符串。
+     * 无法解析为数字（如 UUID 字符串）时返回 null —— 调用方按「非本端请求」处理。</p>
+     *
+     * <p>包级可见以便单测直接覆盖 id 形态矩阵（读线程本身依赖真实子进程，不便做单测）。</p>
+     */
+    static Long normalizeId(Object rawId) {
+        if (rawId instanceof Number number) {
+            return number.longValue();
+        }
+        if (rawId instanceof String text) {
+            String trimmed = text.trim();
+            if (trimmed.isEmpty()) {
+                return null;
+            }
+            try {
+                return Long.parseLong(trimmed);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private void drainStderr() {

@@ -1,6 +1,7 @@
 package com.lucky.agent.permission.support.rules;
 
 import com.lucky.agent.common.contract.PermissionRule;
+import com.lucky.agent.common.exception.AgentException;
 
 import java.nio.file.Path;
 import java.util.regex.Pattern;
@@ -28,6 +29,13 @@ public class PathRuleMatcher {
         }
         String pattern = rule.matcher().pattern();
         PermissionRule.Anchor anchor = PermissionRule.Anchor.fromCode(rule.matcher().anchor());
+        if (anchor == null) {
+            // 锚点无法识别 → 不能静默当成 project（会把 DENY //abs/... 变成永不匹配的空规则）。
+            // 抛出让规则链 fail-closed 成 DENY（台账 #8）。
+            throw new AgentException("PERMISSION_RULE_INVALID",
+                    "规则「" + rule.id() + "」的锚点无法解析：\"" + rule.matcher().anchor()
+                            + "\"（可用值：//abs / home / project / relative）");
+        }
         String resolvedPattern = switch (anchor) {
             case ABS -> pattern;
             case PROJECT -> toSlash(workspaceRoot.toString()) + "/" + stripLeadingSlash(pattern);

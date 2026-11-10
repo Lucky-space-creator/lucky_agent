@@ -4,9 +4,9 @@ import com.lucky.agent.workflow.domain.VariableScope;
 import com.lucky.agent.workflow.domain.WorkflowDef;
 import com.lucky.agent.workflow.domain.WorkflowInstance;
 import com.lucky.agent.workflow.domain.enums.RunMode;
+import com.lucky.agent.workflow.engine.AbstractWorkflowEngine;
 import com.lucky.agent.workflow.engine.CompiledWorkflow;
 import com.lucky.agent.workflow.engine.DagCompiler;
-import com.lucky.agent.workflow.engine.WorkflowEngine;
 import com.lucky.agent.workflow.engine.trigger.WorkflowScheduler;
 import com.lucky.agent.workflow.exception.WorkflowException;
 import com.lucky.agent.workflow.repository.WorkflowInstanceRepository;
@@ -18,18 +18,21 @@ import java.util.Map;
 /**
  * 工作流应用服务：定义 CRUD、启停、编译校验、触发执行与运行实例查询。
  * <p>作为 REST/CLI/程序化调用的统一入口，屏蔽引擎与仓储细节（通道解耦）。</p>
+ *
+ * <p>引擎依赖声明为共同父类 {@link AbstractWorkflowEngine}（台账 #19）：此前固定注入 legacy
+ * {@code WorkflowEngine}，使 {@code lucky.workflow.execution.engine=langgraph} 成为空开关。</p>
  */
 public class WorkflowService {
 
     private final WorkflowRepository repository;
     private final WorkflowInstanceRepository instanceRepository;
-    private final WorkflowEngine engine;
+    private final AbstractWorkflowEngine engine;
     private final DagCompiler compiler;
     private final WorkflowScheduler scheduler;
 
     public WorkflowService(WorkflowRepository repository,
                            WorkflowInstanceRepository instanceRepository,
-                           WorkflowEngine engine,
+                           AbstractWorkflowEngine engine,
                            DagCompiler compiler,
                            WorkflowScheduler scheduler) {
         this.repository = repository;

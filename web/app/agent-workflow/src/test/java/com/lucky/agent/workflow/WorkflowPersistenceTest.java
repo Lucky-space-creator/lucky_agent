@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 落盘持久化回归测试：验证工作流定义与运行实例能跨「进程重启」往返。
@@ -109,6 +110,50 @@ class WorkflowPersistenceTest {
         assertThat(gen.position().x()).isEqualTo(320.0);
         assertThat(gen.position().y()).isEqualTo(144.0);
         assertThat(end.position()).isNull();
+    }
+
+    @Test
+    void workflowDefIdShouldNotEscapeStorageDir(@TempDir Path dir) throws IOException {
+        FileWorkflowRepository repo = new FileWorkflowRepository(dir, mapper);
+        WorkflowDef evil = new WorkflowDef("../evil", "越界", null, 1,
+                List.of(), List.of(), com.lucky.agent.workflow.domain.TriggerDef.manual(), true, 1L, 2L);
+
+        // 台账 #3：id 直接拼路径，可写/删工作空间外任意 *.json
+        assertThatThrownBy(() -> repo.save(evil))
+                .isInstanceOf(com.lucky.agent.workflow.exception.WorkflowException.class);
+        assertThatThrownBy(() -> repo.deleteById("../../config"))
+                .isInstanceOf(com.lucky.agent.workflow.exception.WorkflowException.class);
+        assertThatThrownBy(() -> repo.findById(".."))
+                .isInstanceOf(com.lucky.agent.workflow.exception.WorkflowException.class);
+        assertThatThrownBy(() -> repo.findById("C:/Windows/win"))
+                .isInstanceOf(com.lucky.agent.workflow.exception.WorkflowException.class);
+
+        // 越界尝试不得在存储目录外留下任何文件
+        assertThat(Files.exists(dir.getParent().resolve("evil.json"))).isFalse();
+        assertThat(Files.exists(dir.getParent().resolve("config.json"))).isFalse();
+
+        // 正常 id（含中文与连字符）不受影响
+        WorkflowDef ok = new WorkflowDef("wf-工单-2026", "正常", null, 1,
+                List.of(), List.of(), com.lucky.agent.workflow.domain.TriggerDef.manual(), true, 1L, 2L);
+        repo.save(ok);
+        assertThat(repo.findById("wf-工单-2026")).isPresent();
+    }
+
+    @Test
+    void saveShouldBeAtomicAndLeaveNoTempFile(@TempDir Path dir) throws IOException {
+        FileWorkflowRepository repo = new FileWorkflowRepository(dir, mapper);
+        WorkflowDef def = new WorkflowDef("wf-atomic", "原子写", null, 1,
+                List.of(), List.of(), com.lucky.agent.workflow.domain.TriggerDef.manual(), true, 1L, 2L);
+
+        repo.save(def);
+
+        // 写成功后台账目录里只能是完整 JSON，不能残留 .tmp（否则重启后扫描到半截文件）
+        try (var files = Files.list(dir)) {
+            assertThat(files.map(p -> p.getFileName().toString()).toList())
+                    .noneMatch(name -> name.endsWith(".tmp"));
+        }
+        assertThat(mapper.readValue(dir.resolve("wf-atomic.json").toFile(), WorkflowDef.class).id())
+                .isEqualTo("wf-atomic");
     }
 
     @Test

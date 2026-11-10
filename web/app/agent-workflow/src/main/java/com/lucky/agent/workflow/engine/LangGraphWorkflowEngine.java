@@ -97,6 +97,9 @@ public class LangGraphWorkflowEngine extends AbstractWorkflowEngine {
             publish(instance, null, WorkflowEventType.WORKFLOW_FAILED, "工作流失败: " + finalState.error());
             return;
         }
+        // 台账 #34：图跑完不等于所有节点都被路由到。不可达节点必须显式标 SKIPPED，
+        // 否则它们停在 PENDING 而整体报成功。
+        markUnreachableNodesSkipped(cw, instance);
         stateMachine.transition(instance, WorkflowStatus.COMPLETED);
         persistProgress(instance);
         publish(instance, null, WorkflowEventType.WORKFLOW_COMPLETED, "工作流执行完成: " + definition.name());

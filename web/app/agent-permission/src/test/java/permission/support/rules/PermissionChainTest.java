@@ -57,4 +57,30 @@ class PermissionChainTest {
                 Paths.get("C:/ws"), Paths.get("C:/ws/delete/x"), List.of(ask));
         assertEquals(PermissionDecision.ASK, decision);
     }
+
+    @Test
+    void testUnknownAnchorFailsClosed() {
+        // 台账 #8：锚点拼错（"abs" 少一个斜杠）此前被静默回落 project，
+        // DENY //abs/Users/x 于是变成「工作区相对路径的 deny」，永不匹配 → 用户以为已封禁。
+        PermissionRule bad = new PermissionRule().id("bad").priority(10)
+                .type(PermissionRule.RuleType.PATH)
+                .matcher(new PermissionRule.Matcher("/Users/x/**", "abs"))
+                .action(PermissionRule.RuleAction.DENY);
+
+        assertEquals(PermissionDecision.DENY, chain.evaluatePath(
+                        Paths.get("C:/ws"), Paths.get("C:/ws/anything.txt"), List.of(bad)),
+                "不可解析的规则必须 fail-closed 为 DENY，而不是退化成空规则");
+    }
+
+    @Test
+    void testMissingAnchorDefaultsToProject() {
+        // 缺省锚点是合法配置（历史规则可能没写），仍按 project 解释 —— 不能因 #8 的修复被误伤
+        PermissionRule noAnchor = new PermissionRule().id("legacy").priority(10)
+                .type(PermissionRule.RuleType.PATH)
+                .matcher(new PermissionRule.Matcher("/secret/**", null))
+                .action(PermissionRule.RuleAction.DENY);
+
+        assertEquals(PermissionDecision.DENY, chain.evaluatePath(
+                Paths.get("C:/ws"), Paths.get("C:/ws/secret/a.txt"), List.of(noAnchor)));
+    }
 }

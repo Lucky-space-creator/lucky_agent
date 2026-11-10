@@ -101,6 +101,19 @@ public class SubAgentExecutor {
                     break;
                 }
                 for (dev.langchain4j.agent.tool.ToolExecutionRequest req : ai.toolExecutionRequests()) {
+                    // 台账 #15：工具隔离必须在这里硬校验。此前只过滤了「给模型看的 schema 清单」，
+                    // 而分发走 ToolGateway.dispatch —— 它在全量工具表按名查找，模型幻觉或被注入
+                    // 一个未声明工具（如 shell.exec）仍会真的执行，disallowedTools 形同虚设。
+                    // 拒绝时必须回灌一条 tool 结果：LangChain4j 要求每个 tool_execution_request
+                    // 都有对应的 ToolExecutionResultMessage，缺了下一轮请求直接 400。
+                    if (!runtime.allows(req.name())) {
+                        log.warn("子代理调用未授权工具，已拒绝执行：agent={} tool={} allowed={}",
+                                spec.name(), req.name(), runtime.allowedToolNames());
+                        messages.add(ToolExecutionResultMessage.from(req.id(), req.name(),
+                                "工具「" + req.name() + "」不在本子代理的允许范围内，调用已被拒绝。"
+                                        + "请仅使用授予你的工具，或直接返回当前结论。"));
+                        continue;
+                    }
                     ToolResult toolResult = toolGateway.dispatch(req.name(), parseArgs(req.arguments()), ctx);
                     String resultText = toolResult.data() == null ? toolResult.error() : String.valueOf(toolResult.data());
                     messages.add(ToolExecutionResultMessage.from(req.id(), req.name(), resultText == null ? "" : resultText));

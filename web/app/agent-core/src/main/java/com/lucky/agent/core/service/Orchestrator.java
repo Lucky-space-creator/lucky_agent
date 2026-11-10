@@ -215,7 +215,9 @@ public class Orchestrator implements AgentOrchestrator {
                 // P2-2：单步任务也走轻量验证（无客观声明时仅主观判定）
                 VerificationVerdict v = verificationChain.verify(null, ctx, goal,
                         direct.finalText(), publisher);
-                budget.incrementTurn();
+                // 台账 #25：回合数在循环头（分析阶段，见 budget.incrementTurn 上一处）已计过一次。
+                // 这里再计一次会让「一次迭代 = 2 回合」——maxTurns=N 实际只跑 N/2 轮，
+                // maxTurns=1 时首轮即报「已达最大回合数」。回合 = 一次迭代，只计一次。
                 if (v.done()) {
                     return EngineRunResult.of(sessionId, Phase.ACT, v.summary(),
                             direct.tokenUsed(), direct.model(), "success");
@@ -345,7 +347,7 @@ public class Orchestrator implements AgentOrchestrator {
             // D → I: 客观验证 + 达成度判定（仅当存在可客观校验的步骤；子代理/单代理走主观兜底）
             VerificationVerdict verdict = verificationChain.verify(
                     hasSteps ? plan : null, ctx, goal, roundLog.toString(), publisher);
-            budget.incrementTurn();
+            // 台账 #25：回合已在本次迭代的分析阶段计过，此处不再重复计数（同单步分支）。
 
             if (verdict.done()) {
                 return EngineRunResult.of(sessionId, Phase.ACT, verdict.summary(),

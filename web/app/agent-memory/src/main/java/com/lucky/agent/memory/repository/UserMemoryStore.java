@@ -142,6 +142,9 @@ public class UserMemoryStore implements MemoryStore {
             } catch (IOException e) {
                 log.warn("做梦清理失败：{}", memoryDir, e);
             }
+            // 落盘已可能被裁剪/删除，缓存若不同步，被删条目仍会从内存里被检索到
+            // （用户视角：「已经遗忘的记忆又冒出来了」）。sweep 是低频动作，整表清空代价可忽略。
+            cache.clear();
         } finally {
             lockGuard.unlockWrite();
         }
@@ -155,13 +158,22 @@ public class UserMemoryStore implements MemoryStore {
                 return;
             }
             long now = System.currentTimeMillis();
+            int limit = maxPerScope > 0 ? maxPerScope : Integer.MAX_VALUE;
+            // 台账 #24：衰减值<b>只用于「淘汰判定」，绝不回写</b>。
+            // 原实现把 decayed(confidence) 写回文件，下次 sweep 又在衰减值上再乘一次
+            // → 10 天龄条目实际按 21 天档衰减，提前跌破阈值被物理删除；
+            // 而且 MemoryRetrieverImpl 在读取时还会再 apply 一次 DecayManager，
+            // 等于同一条记忆被扣两遍分。改为保留原始 confidence 后：
+            //   ① 同一份数据无论 sweep 多少次，effective 恒定（幂等）；
+            //   ② 读取侧的时间衰减仍是唯一的一次衰减；
+            //   ③ 淘汰时机仍由「当前年龄对应的 effective 值」决定，语义不变。
             List<MemoryEntry> kept = entries.stream()
-                    .map(e -> new MemoryEntry(e.ts(), e.track(), e.userId(), e.workspaceId(),
-                            e.content(), decayed(e.confidence(), ageDays(e.ts(), now), decayPerDay), e.source()))
-                    .filter(e -> e.confidence() >= forgetThreshold)
-                    .sorted(Comparator.comparing(MemoryEntry::ts,
+                    .map(e -> new Scored(e, decayed(e.confidence(), ageDays(e.ts(), now), decayPerDay)))
+                    .filter(s -> s.effective() >= forgetThreshold)
+                    .sorted(Comparator.comparing((Scored s) -> s.entry().ts(),
                             Comparator.nullsLast(Comparator.reverseOrder())))
-                    .limit(maxPerScope)
+                    .limit(limit)
+                    .map(Scored::entry)
                     .toList();
             if (kept.size() != entries.size()) {
                 backend.rewrite(file, kept);
@@ -170,6 +182,10 @@ public class UserMemoryStore implements MemoryStore {
         } catch (Exception e) {
             log.warn("做梦清理单文件失败：{}", file, e);
         }
+    }
+
+    /** sweep 中间量：条目 + 它的「当前有效置信度」（原始置信度按年龄衰减一次，不落盘）。 */
+    private record Scored(MemoryEntry entry, double effective) {
     }
 
     private boolean containsSame(List<MemoryEntry> scope, MemoryEntry entry) {

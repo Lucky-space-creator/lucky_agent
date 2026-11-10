@@ -19,5 +19,11 @@
             <groupId>com.lucky.agent</groupId>
             <artifactId>agent-common</artifactId>
         </dependency>
+        <!-- 本模块此前零测试用例；配置中心持久化（原子写/损坏备份）必须有回归，故引入测试栈 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>

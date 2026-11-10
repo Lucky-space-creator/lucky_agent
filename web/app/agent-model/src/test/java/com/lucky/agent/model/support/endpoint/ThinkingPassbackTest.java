@@ -12,6 +12,8 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
@@ -40,6 +42,21 @@ class ThinkingPassbackTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String THINKING_1 = "思考链A";
     private static final String THINKING_2 = "思考链B";
+
+    /**
+     * 「已观测到思考」是端点级静态状态（台账 #29：模型实例每轮重建，观测结果必须跨实例保留），
+     * 因此用例之间会互相污染 —— 例如「观测到思考」的用例会让后面期待「从未观测」的用例翻车。
+     * 每个用例前复位，保证各用例的初始条件是「全新进程」。
+     */
+    @BeforeEach
+    void resetObservedState() {
+        OpenAiCompatibleModel.resetObservedThinking();
+    }
+
+    @AfterEach
+    void clearObservedState() {
+        OpenAiCompatibleModel.resetObservedThinking();
+    }
 
     @Test
     void passesReasoningContentBackOnNextRound() throws Exception {

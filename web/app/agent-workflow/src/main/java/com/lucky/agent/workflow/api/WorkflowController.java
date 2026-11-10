@@ -23,7 +23,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.List;
@@ -116,11 +118,26 @@ public class WorkflowController {
 
     // ---------------- 触发与运行 ----------------
 
+    /**
+     * 触发一次执行。
+     *
+     * <p><b>为什么返回 {@link Mono} 而不是裸对象</b>（台账 #20）：WebFlux 会在
+     * {@code reactor-http-nio-N} 事件循环线程上调用控制器方法，而 {@code RunMode.SYNC}
+     * 会在<b>调用线程</b>里同步跑完整条工作流 —— 其中 CODE/EXEC 节点还要
+     * {@code Mono.block(timeout)} 等命令执行结果。在非阻塞线程上 {@code block()} 直接抛
+     * {@code IllegalStateException}，被节点执行器吞成「超时」→ CODE 节点 100% 失败；
+     * 即便是 LLM 节点，同步 HTTP 也会把事件循环占死，整个服务失去响应能力。</p>
+     *
+     * <p>这里显式下沉到 {@link Schedulers#boundedElastic()}：它<b>在语义上允许阻塞</b>，
+     * 且队列无界、按需扩线程，正是「跑一段同步/阻塞逻辑」的指定载体。返回体仍是同一个
+     * {@link WorkflowInstance} JSON，前端契约不变（只是响应改为在订阅完成后发出）。</p>
+     */
     @PostMapping("/{id}/trigger")
-    public WorkflowInstance trigger(@PathVariable String id,
-                                    @RequestBody(required = false) TriggerRequest request) {
+    public Mono<WorkflowInstance> trigger(@PathVariable String id,
+                                          @RequestBody(required = false) TriggerRequest request) {
         TriggerRequest req = (request == null) ? TriggerRequest.empty() : request;
-        return service.trigger(id, req.variables(), req.resolveMode());
+        return Mono.fromCallable(() -> service.trigger(id, req.variables(), req.resolveMode()))
+                .subscribeOn(Schedulers.boundedElastic());
     }
 
     @GetMapping("/instances")

@@ -81,7 +81,11 @@ public class RetryModelGateway implements ModelGateway {
             }
             long backoff = backoffFor(attempt);
             retryCount.incrementAndGet();
-            log.warn("[model-retry] 第 {}/{} 次调用遇瞬时故障（{}），{}ms 后重试",
+            // 注意重试粒度（台账 #26）：这里的重试单元是<b>整轮 run</b>，不是单次模型调用。
+            // 若故障发生在第 N 步，重试会从第 1 步重来 —— 已执行的文件写入/检查点会被重放。
+            // 引擎侧已做消息回滚（ReactEngine#rollbackToBaseline）避免上下文成倍膨胀，
+            // 但文件副作用无法撤销；根治需把重试下沉到单次模型调用。
+            log.warn("[model-retry] 第 {}/{} 次调用遇瞬时故障（{}），{}ms 后重试（整轮重跑，工具副作用可能重放）",
                     attempt, maxAttempts, brief(result), backoff);
             if (!sleep(backoff)) {
                 return result; // 被中断：立即返回已有结果，不吞掉中断标志

@@ -9,6 +9,7 @@ import com.lucky.agent.workflow.adapter.NoopToolAdapter;
 import com.lucky.agent.workflow.adapter.SandboxAdapter;
 import com.lucky.agent.workflow.adapter.ToolAdapter;
 import com.lucky.agent.workflow.api.WorkflowController;
+import com.lucky.agent.workflow.engine.AbstractWorkflowEngine;
 import com.lucky.agent.workflow.engine.ConditionEvaluator;
 import com.lucky.agent.workflow.engine.DagCompiler;
 import com.lucky.agent.workflow.engine.LangGraphWorkflowEngine;
@@ -221,8 +222,18 @@ public class WorkflowAutoConfiguration {
 
     // ---------------- 引擎 / 调度 / 服务 / 通道 ----------------
 
+    /**
+     * 传统调度引擎（默认）。
+     *
+     * <p><b>必须按开关注册</b>（台账 #19）：此前本 Bean 无任何条件、而 {@code WorkflowService} /
+     * {@code WorkflowScheduler} 按 {@code WorkflowEngine} 具体类型注入，于是
+     * {@code lucky.workflow.execution.engine=langgraph} 只会额外造一个没人用的
+     * {@code LangGraphWorkflowEngine} Bean，实际执行路径永远是 legacy —— 开关静默失效。
+     * 现在两个引擎按同一开关二选一，消费者改注入共同父类 {@link AbstractWorkflowEngine}。</p>
+     */
     @Bean
     @ConditionalOnMissingBean
+    @ConditionalOnProperty(name = "lucky.workflow.execution.engine", havingValue = "legacy", matchIfMissing = true)
     public WorkflowEngine workflowEngine(DagCompiler compiler,
                                          WorkflowStateMachine stateMachine,
                                          MappingEvaluator mappingEvaluator,
@@ -235,6 +246,7 @@ public class WorkflowAutoConfiguration {
                                          WorkflowRepository repository,
                                          WorkflowInstanceRepository instanceRepository,
                                          @Qualifier("workflowAsyncExecutor") ExecutorService asyncExecutor) {
+        log.info("工作流引擎：legacy（lucky.workflow.execution.engine=legacy）");
         return new WorkflowEngine(compiler, stateMachine, mappingEvaluator, conditionEvaluator, eventBus,
                 nodeExecutors, llmAdapter, toolAdapter, sandboxAdapter, repository, instanceRepository, asyncExecutor);
     }
@@ -260,13 +272,14 @@ public class WorkflowAutoConfiguration {
                                                            WorkflowRepository repository,
                                                            WorkflowInstanceRepository instanceRepository,
                                                            @Qualifier("workflowAsyncExecutor") ExecutorService asyncExecutor) {
+        log.info("工作流引擎：langgraph（lucky.workflow.execution.engine=langgraph）");
         return new LangGraphWorkflowEngine(compiler, stateMachine, mappingEvaluator, conditionEvaluator, eventBus,
                 nodeExecutors, llmAdapter, toolAdapter, sandboxAdapter, repository, instanceRepository, asyncExecutor);
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public WorkflowScheduler workflowScheduler(WorkflowEngine engine, List<Trigger> triggers) {
+    public WorkflowScheduler workflowScheduler(AbstractWorkflowEngine engine, List<Trigger> triggers) {
         return new WorkflowScheduler(engine, triggers);
     }
 
@@ -274,7 +287,7 @@ public class WorkflowAutoConfiguration {
     @ConditionalOnMissingBean
     public WorkflowService workflowService(WorkflowRepository repository,
                                            WorkflowInstanceRepository instanceRepository,
-                                           WorkflowEngine engine,
+                                           AbstractWorkflowEngine engine,
                                            DagCompiler compiler,
                                            WorkflowScheduler scheduler) {
         return new WorkflowService(repository, instanceRepository, engine, compiler, scheduler);

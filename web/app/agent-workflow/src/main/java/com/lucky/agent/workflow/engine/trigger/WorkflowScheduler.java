@@ -3,7 +3,7 @@ package com.lucky.agent.workflow.engine.trigger;
 import com.lucky.agent.workflow.domain.WorkflowDef;
 import com.lucky.agent.workflow.domain.VariableScope;
 import com.lucky.agent.workflow.domain.enums.RunMode;
-import com.lucky.agent.workflow.engine.WorkflowEngine;
+import com.lucky.agent.workflow.engine.AbstractWorkflowEngine;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,10 +17,11 @@ public class WorkflowScheduler implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(WorkflowScheduler.class);
 
-    private final WorkflowEngine engine;
+    /** 依赖共同父类而非 legacy 具体类，自动触发同样受 {@code execution.engine} 开关影响（台账 #19）。 */
+    private final AbstractWorkflowEngine engine;
     private final List<Trigger> triggers;
 
-    public WorkflowScheduler(WorkflowEngine engine, List<Trigger> triggers) {
+    public WorkflowScheduler(AbstractWorkflowEngine engine, List<Trigger> triggers) {
         this.engine = engine;
         this.triggers = triggers == null ? List.of() : List.copyOf(triggers);
     }

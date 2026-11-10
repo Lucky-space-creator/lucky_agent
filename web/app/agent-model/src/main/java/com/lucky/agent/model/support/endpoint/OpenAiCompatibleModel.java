@@ -23,7 +23,9 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * OpenAI 兼容模型接入（LangChain4j 官方 {@link OpenAiChatModel} 适配）。
@@ -66,8 +68,19 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
     private final OpenAiStreamingChatModel streamingDelegate;
     /** 是否向端点请求了推理档位（OFF 不发 reasoning_effort，但很多推理模型仍会思考，故仅作初值）。 */
     private final boolean reasoningRequested;
-    /** 端点是否已实测产出过思考链：一旦产出即视为思考模式端点，覆盖「OFF 档位仍思考」的场景。 */
-    private volatile boolean thinkingObserved;
+    /**
+     * 端点级「已实测产出过思考链」标记（键 = 端点 id + 模型名）。
+     *
+     * <p><b>必须是静态的</b>（台账 #29）：{@link ModelEndpointImpl#toModel()} 每次调用都重建模型实例
+     * （保证推理深度改完即时生效），若把观测结果放在实例字段上，第二轮起就退回 false ——
+     * OFF 档 + 默认开思考的端点（DeepSeek effort 默认 high、Qwen 默认 xhigh）在第二轮
+     * 会误判为「非思考模式」，跳过 {@link ReasoningPassbackSupport} 归一化，
+     * 于是历史里那条没思考链的 assistant 带着 tools 发给厂商 → 400（案例 K 的跨轮变体）。</p>
+     *
+     * <p>语义安全：同一端点同一模型「能不能产出 reasoning_content」是稳定的能力属性，
+     * 一旦观测到就长期成立；切模型会因键里含 modelName 而重新观测。</p>
+     */
+    private static final Map<String, Boolean> THINKING_OBSERVED = new ConcurrentHashMap<>();
 
     public OpenAiCompatibleModel(ModelConfig config, InferenceDepth inferenceDepth,
                                  ModelUsageTracker usageTracker) {
@@ -164,7 +177,7 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
                     ? restored.aiMessage().toolExecutionRequests().size() : 0;
             int thinkingLen = thinkingLength(restored.aiMessage());
             if (thinkingLen > 0) {
-                thinkingObserved = true;
+                markThinkingObserved();
             }
             log.info("[模型调用] OpenAI 请求成功：model={} cost={}ms finishReason={} "
                             + "inputTokens={} outputTokens={} toolCalls={} thinkingLength={}",
@@ -222,7 +235,7 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
             public void onPartialThinking(PartialThinking thinking, PartialThinkingContext context) {
                 // 流式响应的思考经增量回调送达，AiMessage 收尾时可能为空（实测），故在此置位
                 if (thinking != null && thinking.text() != null && !thinking.text().isEmpty()) {
-                    thinkingObserved = true;
+                    markThinkingObserved();
                 }
                 handler.onPartialThinking(thinking, context);
             }
@@ -230,7 +243,7 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
             @Override
             public void onCompleteResponse(ChatResponse response) {
                 if (thinkingLength(response.aiMessage()) > 0) {
-                    thinkingObserved = true;
+                    markThinkingObserved();
                 }
                 ChatResponse restored = ToolNameMappingSupport.restoreResponse(response, names);
                 // 用量统计：流式响应在 complete 时可拿到累计 tokenUsage
@@ -263,9 +276,39 @@ public class OpenAiCompatibleModel implements ChatModel, StreamingChatModel {
      * <p>用于「请求携带 tools 时不得出现缺 reasoning_content 的 assistant」这一契约判定
      * （{@link ReasoningPassbackSupport}）：只看档位不够——OFF 档位下推理模型仍可能产出思考；
      * 只看实测也不够——会话第一轮尚未观测到思考时无法预判。二者取或即可。</p>
+     *
+     * <p>「已观测」跨模型实例保留（静态表），因为本类实例每轮重建，见 {@link #THINKING_OBSERVED}。</p>
      */
     private boolean thinkingMode() {
-        return reasoningRequested || thinkingObserved;
+        return reasoningRequested || THINKING_OBSERVED.containsKey(observedKey());
+    }
+
+    /**
+     * 端点能力的稳定键：<b>baseUrl + 模型名</b>。
+     *
+     * <p>刻意不用 {@code config.id()}：{@code ModelConfig.of(...)} 每次构造都会生成新的 UUID id
+     * （见该工厂方法），端点若每轮从配置重建，id 就不稳定，观测结果照样丢。
+     * baseUrl + modelName 才是「这是哪个模型」的真实标识：换模型或换服务地址都会重新观测，
+     * 而同端点重建实例能命中。</p>
+     */
+    private String observedKey() {
+        String url = config.endpointUrl() == null ? "" : config.endpointUrl();
+        String model = config.modelName() == null ? "" : config.modelName();
+        return url + "|" + model;
+    }
+
+    private void markThinkingObserved() {
+        THINKING_OBSERVED.put(observedKey(), Boolean.TRUE);
+    }
+
+    /**
+     * 清除端点级观测状态（仅供测试隔离）。
+     *
+     * <p>静态表是跨实例的正确行为，但会让单测之间互相污染（前一个用例观测到思考，
+     * 后一个用例期待「从未观测」）。测试在 {@code @BeforeEach} 调本方法即可复位。</p>
+     */
+    static void resetObservedThinking() {
+        THINKING_OBSERVED.clear();
     }
 
     /**

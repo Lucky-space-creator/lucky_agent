@@ -11,6 +11,7 @@ import com.lucky.agent.permission.support.guard.PermissionCircuitBreaker;
 import com.lucky.agent.permission.support.guard.PermissionOverrideStore;
 import com.lucky.agent.permission.support.guard.SymlinkResolver;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -94,7 +95,9 @@ public class PermissionEvaluator {
         // 3) 危险操作：全部权限（用户已选自动执行）时放行，不再逐次 ASK；
         //    仍受 deny 规则链、symlink 越界与执行臂硬边界兜底，不作为越权通道。
         //    非全部权限级别（只读/修改）下危险写操作保持 ASK 或经一次性放行执行。
-        if (dangerousOpDetector.isDangerous(op)) {
+        //    「覆盖已有文件」与「重命名」也算危险（台账 #7）：传入目标是否存在，
+        //    新建文件仍是低风险，覆盖源文件必须确认。
+        if (dangerousOpDetector.isDangerous(op, Files.exists(absPath))) {
             if (level == PermissionLevel.FULL) {
                 breaker.onAllowed();
                 return PermissionDecision.ALLOW;

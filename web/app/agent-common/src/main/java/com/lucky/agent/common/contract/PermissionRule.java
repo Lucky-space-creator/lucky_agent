@@ -74,13 +74,28 @@ public class PermissionRule {
             return code;
         }
 
+        /**
+         * 解析锚点代码。
+         *
+         * <p><b>为什么不再无条件回落 PROJECT</b>（台账 #8）：此前拼错（如 {@code abs} 少写一个斜杠）、
+         * 写成不存在枚举、或传 null，一律变成 {@code PROJECT} —— 于是 {@code DENY //abs/Users/x}
+         * 被解释成「工作区相对路径 {@code //abs/Users/x}」，永不匹配任何文件：
+         * 用户以为已封禁，实际是条空规则。安全枚举解析必须 fail-closed。</p>
+         *
+         * <p>这里区分两种「没有值」：<b>缺省</b>（null/空白，属合法配置，回落 PROJECT）
+         * 与<b>无法识别</b>（返回 null，由调用方按不可用处理并拒绝）。</p>
+         */
         public static Anchor fromCode(String code) {
+            if (code == null || code.isBlank()) {
+                return PROJECT;
+            }
+            String normalized = code.trim();
             for (Anchor a : values()) {
-                if (a.code.equalsIgnoreCase(code)) {
+                if (a.code.equalsIgnoreCase(normalized)) {
                     return a;
                 }
             }
-            return PROJECT;
+            return null;
         }
     }
 

@@ -242,10 +242,46 @@ class OrchestratorTest {
         verify(scheduler, times(1)).scheduleSerial(any(), any(), anyString(), anyString());
     }
 
+    // ---------- 回合预算：一次迭代只计一回合（台账 #25） ----------
+    @Test
+    void testTurnBudgetCountsOncePerIteration() {
+        Engine engine = mock(Engine.class);
+        // PLAN 返回非计划文本 → 走「单 Agent 直接执行」分支
+        when(engine.run(any(), any(), anyString()))
+                .thenReturn(Mono.just(EngineRunResult.of(SESSION, Phase.PLAN, "直接做", 0, "m", "success")));
+
+        java.util.concurrent.atomic.AtomicInteger round = new java.util.concurrent.atomic.AtomicInteger();
+        VerificationChain chain = mock(VerificationChain.class);
+        when(chain.verify(any(), any(), anyString(), anyString(), any()))
+                .thenAnswer(inv -> {
+                    int n = round.incrementAndGet();
+                    return n == 1
+                            ? new VerificationVerdict(false, "第 1 轮进度", "继续", List.of())
+                            : new VerificationVerdict(true, "完成", "完成", List.of());
+                });
+
+        CoreProperties props = props(5, 0);
+        Orchestrator orch = orchestrator(engine, chain, props, mock(AskSuspender.class));
+        ConversationCtx ctx = ConversationCtx.builder()
+                .sessionRef(new SessionRef(SESSION, "u-1", "ws-1"))
+                .phase(Phase.ACT)
+                .permissionLevel(PermissionLevel.FULL)
+                .goal("完成任务")
+                // 只有 2 个回合预算：修复前一次迭代计 2 回合，第 2 轮开头就被安全阀拦下
+                .extra(Map.of("maxTurns", 2))
+                .build();
+
+        EngineRunResult r = orch.run(new SessionRef(SESSION, "u-1", "ws-1"), ctx,
+                mock(AgentEventPublisher.class));
+
+        assertEquals("success", r.status(),
+                "maxTurns=2 应允许跑两轮，实际：" + r.finalText());
+        assertEquals(2, round.get(), "第二轮必须真正执行到验证阶段");
+    }
+
     /** 装配支持注入 TaskScheduler 的编排器。 */
     private Orchestrator orchestrator(Engine engine, VerificationChain chain,
-                                     CoreProperties props, AskSuspender suspender, TaskScheduler scheduler) {
-        ConversationStateManager stateManager = mock(ConversationStateManager.class);
+                                     CoreProperties props, AskSuspender suspender, TaskScheduler scheduler) {        ConversationStateManager stateManager = mock(ConversationStateManager.class);
         ConversationStateManager.SessionState state = mock(ConversationStateManager.SessionState.class);
         when(state.messages()).thenReturn(new java.util.concurrent.CopyOnWriteArrayList<>());
         when(stateManager.session(any())).thenReturn(state);

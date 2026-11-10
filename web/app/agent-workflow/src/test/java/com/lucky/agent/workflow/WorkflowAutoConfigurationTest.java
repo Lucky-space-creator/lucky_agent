@@ -3,7 +3,10 @@ package com.lucky.agent.workflow;
 import com.lucky.agent.workflow.adapter.LlmAdapter;
 import com.lucky.agent.workflow.adapter.SandboxAdapter;
 import com.lucky.agent.workflow.config.WorkflowAutoConfiguration;
+import com.lucky.agent.workflow.engine.AbstractWorkflowEngine;
+import com.lucky.agent.workflow.engine.LangGraphWorkflowEngine;
 import com.lucky.agent.workflow.engine.WorkflowEngine;
+import com.lucky.agent.workflow.engine.trigger.WorkflowScheduler;
 import com.lucky.agent.workflow.service.WorkflowService;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -45,5 +48,34 @@ class WorkflowAutoConfigurationTest {
                     assertThat(context.getBean(LlmAdapter.class).complete("hi", Map.of()))
                             .isEqualTo("custom-response");
                 });
+    }
+
+    /**
+     * 台账 #19：{@code lucky.workflow.execution.engine} 此前是空开关 —— legacy 引擎无条件注册，
+     * 消费者又按具体类型 {@code WorkflowEngine} 注入，于是 langgraph 引擎只能躺在容器里没人用。
+     * 下面两个用例分别锁住「默认 legacy」与「开关真的换引擎」。
+     */
+    @Test
+    void defaultEngineIsLegacy() {
+        runner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).hasSingleBean(AbstractWorkflowEngine.class);
+            assertThat(context.getBean(AbstractWorkflowEngine.class)).isInstanceOf(WorkflowEngine.class);
+            assertThat(context).doesNotHaveBean(LangGraphWorkflowEngine.class);
+        });
+    }
+
+    @Test
+    void langgraphSwitchActuallyTakesEffect() {
+        runner.withPropertyValues("lucky.workflow.execution.engine=langgraph").run(context -> {
+            assertThat(context).hasNotFailed();
+            // 只应有 LangGraph 引擎：legacy 必须因开关不满足而不注册（修复前两个都在）
+            assertThat(context).hasSingleBean(AbstractWorkflowEngine.class);
+            assertThat(context.getBean(AbstractWorkflowEngine.class)).isInstanceOf(LangGraphWorkflowEngine.class);
+            assertThat(context).doesNotHaveBean(WorkflowEngine.class);
+            // 服务与调度器都应指向同一个（LangGraph）引擎
+            assertThat(context).hasSingleBean(WorkflowService.class);
+            assertThat(context).hasSingleBean(WorkflowScheduler.class);
+        });
     }
 }

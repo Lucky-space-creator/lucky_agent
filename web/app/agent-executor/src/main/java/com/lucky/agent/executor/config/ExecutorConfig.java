@@ -87,12 +87,12 @@ public class ExecutorConfig {
     }
 
     @Bean
-    public CheckpointSnapshoter checkpointSnapshoter(SnapshotIndex snapshotIndex) {
-        return new CheckpointSnapshoter(dirs, snapshotIndex);
+    public CheckpointSnapshoter checkpointSnapshoter(SnapshotIndex snapshotIndex, ObjectMapper objectMapper) {
+        return new CheckpointSnapshoter(dirs, snapshotIndex, objectMapper);
     }
 
     @Bean
-    public Compensator compensator() {
-        return new Compensator(dirs);
+    public Compensator compensator(ObjectMapper objectMapper) {
+        return new Compensator(dirs, objectMapper);
     }
 }

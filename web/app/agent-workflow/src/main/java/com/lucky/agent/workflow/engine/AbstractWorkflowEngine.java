@@ -21,9 +21,14 @@ import com.lucky.agent.workflow.repository.WorkflowRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -38,6 +43,13 @@ import java.util.concurrent.ExecutorService;
  * 两者共用同一套执行器、适配器、事件契约与状态机，故切换对 REST/SSE 与前端完全透明。
  */
 public abstract class AbstractWorkflowEngine implements SubflowInvoker {
+
+    /** 子流程最大嵌套深度（防 A→B→A 无限递归打爆栈，台账 #35）。 */
+    public static final int MAX_SUBFLOW_DEPTH = 8;
+
+    /** 当前线程的子流程调用链（SUBFLOW 固定 SYNC 执行，故线程内可见）。 */
+    private static final ThreadLocal<Deque<String>> SUBFLOW_STACK =
+            ThreadLocal.withInitial(ArrayDeque::new);
 
     protected final Logger log = LoggerFactory.getLogger(getClass());
 
@@ -108,9 +120,36 @@ public abstract class AbstractWorkflowEngine implements SubflowInvoker {
 
     @Override
     public WorkflowInstance invoke(String subWorkflowId, VariableScope inputs) {
-        WorkflowDef sub = workflowRepository.findById(subWorkflowId)
-                .orElseThrow(() -> new WorkflowException("子工作流不存在: " + subWorkflowId));
-        return run(sub, inputs, RunMode.SYNC);
+        Deque<String> stack = SUBFLOW_STACK.get();
+        try {
+            // 台账 #35：SUBFLOW 此前完全没有递归防护。A→B→A 会一路递归到 StackOverflowError，
+            // 而 safeExecute 只 catch Exception，Error 直接穿透；每一帧的 finally 还会各自落盘
+            // 一个 RUNNING 实例，异常结束后留下一堆永远不会推进的僵尸记录。
+            // 这里在调用前同时拦「环」与「深度」，异常被 SubflowNodeExecutor 捕获后只判该节点失败。
+            if (stack.contains(subWorkflowId)) {
+                throw new WorkflowException("检测到子流程循环引用：" + chain(stack) + " -> " + subWorkflowId);
+            }
+            if (stack.size() >= MAX_SUBFLOW_DEPTH) {
+                throw new WorkflowException("子流程嵌套超过上限 " + MAX_SUBFLOW_DEPTH
+                        + " 层，疑似配置过深：" + chain(stack));
+            }
+            stack.addLast(subWorkflowId);
+            try {
+                WorkflowDef sub = workflowRepository.findById(subWorkflowId)
+                        .orElseThrow(() -> new WorkflowException("子工作流不存在: " + subWorkflowId));
+                return run(sub, inputs, RunMode.SYNC);
+            } finally {
+                stack.removeLast();
+            }
+        } finally {
+            if (stack.isEmpty()) {
+                SUBFLOW_STACK.remove();
+            }
+        }
+    }
+
+    private static String chain(Deque<String> stack) {
+        return stack.isEmpty() ? "(根)" : String.join(" -> ", stack);
     }
 
     // ---------------- 执行骨架 ----------------
@@ -130,12 +169,85 @@ public abstract class AbstractWorkflowEngine implements SubflowInvoker {
         }
     }
 
+    /**
+     * 标记工作流失败。
+     *
+     * <p><b>台账 #33：顺序必须是「改状态 → 落盘 → 发事件」。</b>此前先发
+     * {@code WORKFLOW_FAILED} 再 transition，而终态落盘要等 {@link #safeExecute} 的 finally。
+     * 前端收到事件后立刻回查 {@code GET /instances/{id}}，拿到的还是 RUNNING 旧快照 ——
+     * 表现为「日志说失败了，面板还在转圈」。</p>
+     */
     private void markFailed(WorkflowInstance instance, String error) {
-        logLine(instance, null, WorkflowEventType.WORKFLOW_FAILED, "工作流执行异常: " + error);
         WorkflowStatus current = instance.getStatus();
         if (current == WorkflowStatus.RUNNING || current == WorkflowStatus.SUSPENDED) {
             stateMachine.transition(instance, WorkflowStatus.FAILED, error);
         }
+        persistProgress(instance);
+        logLine(instance, null, WorkflowEventType.WORKFLOW_FAILED, "工作流执行异常: " + error);
+    }
+
+    /**
+     * 收尾：把仍处于 PENDING 的节点标记 SKIPPED（台账 #34）。
+     *
+     * <p>{@link DagCompiler} 只校验结构/环/端点，不校验「是否从 START 可达」。于是孤立节点
+     * （没接进主链的一段）永远没人执行，状态停在 {@code PENDING}，而整体却报 COMPLETED ——
+     * 用户在画布上看到一个永远灰着的节点，却收到「执行成功」。</p>
+     *
+     * <p><b>两类节点必须区分：</b></p>
+     * <ul>
+     *   <li><b>条件未命中</b>：节点在 DAG 上结构可达，只是本次分支没走到 —— 正常语义，标 SKIPPED
+     *       但<b>不告警</b>（否则任何带条件的工作流每次运行都会刷一条 warn）。</li>
+     *   <li><b>结构不可达</b>：沿任意边都到不了 —— 配置错误，标 SKIPPED 并告警。</li>
+     * </ul>
+     *
+     * @return 被标记的数量
+     */
+    protected int markUnreachableNodesSkipped(CompiledWorkflow cw, WorkflowInstance instance) {
+        if (cw == null || cw.nodes() == null) {
+            return 0;
+        }
+        Set<String> reachable = structurallyReachable(cw);
+        List<String> skipped = new ArrayList<>();
+        List<String> orphans = new ArrayList<>();
+        for (NodeDef node : cw.nodes().values()) {
+            NodeInstance existing = instance.nodeOf(node.id());
+            if (existing != null && existing.getStatus() != NodeStatus.PENDING) {
+                continue;
+            }
+            instance.node(node.id(), node.name(), node.type()).markSkipped();
+            skipped.add(node.id());
+            if (!reachable.contains(node.id())) {
+                orphans.add(node.id());
+            }
+        }
+        if (!orphans.isEmpty()) {
+            log.warn("工作流存在结构不可达节点（沿任意边都无法从 START 到达），已标记 SKIPPED："
+                    + "instance={} nodes={}", instance.getInstanceId(), orphans);
+        }
+        if (!skipped.isEmpty()) {
+            persistProgress(instance);
+        }
+        return skipped.size();
+    }
+
+    /** 结构可达集合：从 START 沿所有出边（忽略条件）BFS 能到达的节点。 */
+    private static Set<String> structurallyReachable(CompiledWorkflow cw) {
+        Set<String> seen = new HashSet<>();
+        if (cw.startNodeId() == null) {
+            return seen;
+        }
+        Deque<String> queue = new ArrayDeque<>();
+        queue.add(cw.startNodeId());
+        while (!queue.isEmpty()) {
+            String id = queue.poll();
+            if (!seen.add(id)) {
+                continue;
+            }
+            for (EdgeDef edge : cw.outgoing().getOrDefault(id, List.of())) {
+                queue.add(edge.target());
+            }
+        }
+        return seen;
     }
 
     /**

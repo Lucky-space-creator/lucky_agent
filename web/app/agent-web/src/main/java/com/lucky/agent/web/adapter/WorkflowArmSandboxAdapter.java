@@ -7,6 +7,7 @@ import com.lucky.agent.workspace.api.dto.Workspace;
 import com.lucky.agent.workflow.adapter.CommandResult;
 import com.lucky.agent.workflow.adapter.SandboxAdapter;
 import lombok.extern.slf4j.Slf4j;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -68,6 +69,17 @@ public class WorkflowArmSandboxAdapter implements SandboxAdapter {
         }
         if (command == null || command.isBlank()) {
             return CommandResult.blocked("命令为空");
+        }
+        // 台账 #20：本方法必须同步等待命令结果（下游 NodeExecutor 是阻塞契约），
+        // 而 Reactor 的非阻塞线程（reactor-http-nio-N / reactor-tcp-N 等）上调用 block() 会直接抛
+        // IllegalStateException，被上层吞成「等待超时」—— 现象是「CODE 节点每次都超时」，
+        // 根因却在调度上。这里提前拦下并给出可行动的定位信息，避免用户去查命令本身。
+        if (Schedulers.isInNonBlockingThread()) {
+            String thread = Thread.currentThread().getName();
+            log.error("工作流命令沙箱被非阻塞线程同步调用，已拦截：thread={} command={}", thread, command);
+            return CommandResult.blocked("命令沙箱不能在 Reactor 非阻塞线程上同步等待（当前线程：" + thread
+                    + "）。请让工作流在 boundedElastic 上执行：REST 触发已内置下沉，自定义入口请自行"
+                    + " subscribeOn(Schedulers.boundedElastic())。");
         }
         Optional<Workspace> workspace = resolveWorkspace();
         if (workspace.isEmpty()) {

@@ -80,6 +80,14 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
     private static final String K_LOG = "executionLog";
     private static final String K_DONE = "done";
     private static final String K_ABORTED = "aborted";
+    /**
+     * 用户已请求停止（台账 #18）。
+     *
+     * <p>此前本编排器里 {@code cancelRequested} 出现 0 次：{@code orchestrator-mode=langgraph}
+     * 时用户点停止只置了一个标志，编排继续跑满轮次 —— 包括继续执行工具写文件。
+     * 现在循环头与每一轮入口（analyze 节点）都检查，命中即走 summarize 收尾。</p>
+     */
+    private static final String K_CANCELLED = "cancelled";
     private static final String K_SUMMARY = "summary";
     private static final String K_REASON = "reason";
     private static final String K_CONTINUE_GOAL = "continueGoal";
@@ -151,6 +159,12 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
         int turns = 0;
 
         for (int iter = 1; ; iter++) {
+            // 用户取消（台账 #18）：优先于其它安全阀 —— 用户已经说停了，不该再跑任何一轮
+            // （含「跑满剩余轮次继续调用工具写文件」）。
+            if (cancelRequested(ref)) {
+                return EngineRunResult.of(sessionId, Phase.ACT, "已取消，停止本轮执行。",
+                        session.global().usedTokens(), null, "cancelled");
+            }
             // N 安全阀（循环头统一检查）：迭代次数 / 回合数 / token 预算 任一耗尽 → 强制结束并总结
             EngineRunResult tripped = checkSafetyValve(sessionId, iter, maxIter, turns, session,
                     accumulated, publisher);
@@ -214,6 +228,12 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
                 rc.budget().record(null, n.longValue());
             }
 
+            // 取消收尾：图内 analyze 节点检测到停止后会把 K_CANCELLED 带回这里
+            if (Boolean.TRUE.equals(finalState.value(K_CANCELLED).orElse(false))) {
+                return EngineRunResult.of(sessionId, Phase.ACT, "已取消，停止本轮执行。",
+                        session.global().usedTokens(), null, "cancelled");
+            }
+
             // ASK 分支（P0-1）：单步或执行中遇高危确认 → 已挂起，中断整个编排返回
             if (Boolean.TRUE.equals(finalState.value(K_ASK).orElse(false))) {
                 Object askResult = finalState.value(K_ASK_RESULT);
@@ -254,6 +274,16 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
         int iter = asInt(s.value(K_ITER), 0);
         Map<String, Object> out = new HashMap<>();
         out.put(K_DONE, false);
+        // 图内回环（analyze→execute→review→memory→analyze…）期间用户可能已点停止。
+        // 一次 compiled.invoke 会连续走多轮，只在外层循环检查会让「停止」延迟到整次 invoke 跑完，
+        // 期间仍可能执行工具写文件 —— 这里在每轮入口再拦一次。
+        if (cancelRequested(ctx.sessionRef())) {
+            publisher.publish(sessionId, AgentEvent.thought(sessionId,
+                    "【取消】收到停止请求，不再执行后续步骤，直接收尾。"));
+            out.put(K_DONE, true);
+            out.put(K_CANCELLED, true);
+            return out;
+        }
         publisher.publish(sessionId, AgentEvent.thought(sessionId,
                 "【分析】正在分析需求并判断是否需拆分为子任务（第 " + iter + " 轮）…"));
         Plan plan = analyzePlan(ctx, asStr(s.value(K_GOAL), ctx.goal()), publisher);
@@ -471,6 +501,10 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
 
     /** C: 是否拆小任务 / N: 安全阀。 */
     private String decideRoute(AgentState s, ConversationCtx ctx, int maxIter, AgentEventPublisher publisher) {
+        // 取消优先于一切路由：已停止就不再派发单步/执行节点
+        if (Boolean.TRUE.equals(s.value(K_CANCELLED).orElse(false))) {
+            return "summarize";
+        }
         int iter = asInt(s.value(K_ITER), 0);
         if (iter > maxIter) {
             publisher.publish(ctx.sessionId(), AgentEvent.thought(ctx.sessionId(),
@@ -486,6 +520,9 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
 
     /** J: 是否达成目标；N: 安全阀。 */
     private String reviewRoute(AgentState s, ConversationCtx ctx, int maxIter, AgentEventPublisher publisher) {
+        if (Boolean.TRUE.equals(s.value(K_CANCELLED).orElse(false))) {
+            return "summarize";
+        }
         if (Boolean.TRUE.equals(s.value(K_DONE).orElse(false))) {
             return "summarize";
         }
@@ -497,6 +534,22 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
     }
 
     // ---------------- 辅助 ----------------
+
+    /**
+     * 会话是否已被请求停止（台账 #18）。
+     *
+     * <p>读取失败一律按「未取消」处理：取消是附加能力，会话状态缺失不应把正常任务打断。</p>
+     */
+    private boolean cancelRequested(SessionRef ref) {
+        if (ref == null) {
+            return false;
+        }
+        try {
+            return stateManager.session(ref).cancelRequested();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
 
     /** N 安全阀：迭代次数 / 回合数 / token 预算三重检查（返回兜底结果或 null）。 */
     private EngineRunResult checkSafetyValve(String sessionId, int iter, int maxIter, int turns,

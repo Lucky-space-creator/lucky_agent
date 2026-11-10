@@ -23,7 +23,11 @@ public final class MiddlewareOrder {
     /** 上下文压缩：token 超阈值时触发压缩。 */
     public static final int COMPACTION = 600;
 
-    /** 记忆召回：LLM 调用前注入召回内容。 */
+    /**
+     * 记忆召回（预留序号）：召回本身已由提示词装配层承担
+     * （{@code ReactEngine.assembleSystemPrompt} 注入分层记忆 + 预取条目），
+     * 不再有对应中间件（台账 #27）。序号保留，避免既有配置/文档中的落点漂移。
+     */
     public static final int MEMORY_RECALL = 700;
 
     /** 状态快照：每轮结构化快照，供 traceId 回放。 */

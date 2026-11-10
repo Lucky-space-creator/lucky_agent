@@ -111,12 +111,12 @@ public class LlmJudgeVerifier implements ObjectiveVerifier {
                 + (evidenceText.isEmpty() ? "" : "\n【客观验证证据】" + evidenceText)
                 + (objectiveFailures.isBlank() ? "" : "\n【客观验证未通过项（必须修复）】" + objectiveFailures);
 
-        return judgeOnce(ctx, goal, judgeGoal, objectiveFailures);
+        return judgeOnce(ctx, goal, judgeGoal, objectiveFailures, evidence);
     }
 
     /** 执行一次判定：直接同步调用模型（不经引擎、不写会话状态、不推事件流）。 */
     private VerificationVerdict judgeOnce(ConversationCtx ctx, String goal, String judgeGoal,
-                                          String objectiveFailures) {
+                                          String objectiveFailures, List<VerificationResult> evidence) {
         String text = "";
         try {
             String modelId = modelIdOf(ctx);
@@ -158,10 +158,13 @@ public class LlmJudgeVerifier implements ObjectiveVerifier {
             log.debug("达成度判定降级为关键词判定：session={}", ctx.sessionId());
         }
 
-        List<VerificationResult> all = new ArrayList<>();
+        // 台账 #14：客观证据必须原样并入返回的 verdict。
+        // 此前只 add 一条 judged(...)，客观结果被整包丢弃 —— 于是
+        // VerificationChain 的 objectiveFailures() 恒空、「客观优先」成死分支，
+        // 且 Orchestrator.evidenceConfidence / ChainVerifierAdapter 因看不到客观项
+        // 而恒取中性 0.5，早停阈值 0.3 永不触发。
+        List<VerificationResult> all = new ArrayList<>(evidence == null ? List.of() : evidence);
         all.add(VerificationResult.judged(done, done ? "模型判定目标已达成" : "模型判定仍有未完成项"));
-
-        // 判定轮不携带 evidence 之外的客观信号：客观未通过项覆盖逻辑仍由 VerificationChain 执行
         if (done) {
             return new VerificationVerdict(true, summary, goal, all);
         }

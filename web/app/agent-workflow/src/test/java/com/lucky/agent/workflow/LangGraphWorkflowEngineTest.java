@@ -109,8 +109,10 @@ class LangGraphWorkflowEngineTest {
         assertThat(instance.nodeOf("classify").getStatus()).isEqualTo(NodeStatus.COMPLETED);
         assertThat(instance.nodeOf("check").getStatus()).isEqualTo(NodeStatus.COMPLETED);
         assertThat(instance.nodeOf("approve").getStatus()).isEqualTo(NodeStatus.COMPLETED);
-        // 未命中的分支不被触达（图语义）
-        assertThat(instance.nodeOf("reject")).isNull();
+        // 未命中的分支不执行。台账 #34 收口后，两个引擎行为统一为「标 SKIPPED」而非「实例里没有」——
+        // 否则前端画布无法区分「跳过」与「节点缺失」，切换引擎会出现渲染差异。
+        assertThat(instance.nodeOf("reject")).isNotNull();
+        assertThat(instance.nodeOf("reject").getStatus()).isEqualTo(NodeStatus.SKIPPED);
         assertThat(String.valueOf(instance.nodeOf("classify").getOutput().get("text")))
                 .contains("noop-llm").contains("退款");
         assertThat(events).anyMatch(e -> e.type() == WorkflowEventType.WORKFLOW_COMPLETED);
@@ -126,7 +128,8 @@ class LangGraphWorkflowEngineTest {
         assertThat(instance.getStatus()).isEqualTo(WorkflowStatus.COMPLETED);
         assertThat(instance.nodeOf("check").getStatus()).isEqualTo(NodeStatus.COMPLETED);
         assertThat(instance.nodeOf("reject").getStatus()).isEqualTo(NodeStatus.COMPLETED);
-        assertThat(instance.nodeOf("approve")).isNull();
+        assertThat(instance.nodeOf("approve")).isNotNull();
+        assertThat(instance.nodeOf("approve").getStatus()).isEqualTo(NodeStatus.SKIPPED);
     }
 
     @Test

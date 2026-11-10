@@ -6,8 +6,10 @@ import com.lucky.agent.workflow.exception.WorkflowException;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -35,10 +37,24 @@ public class FileWorkflowRepository implements WorkflowRepository {
     @Override
     public WorkflowDef save(WorkflowDef definition) {
         Path file = fileOf(definition.id());
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         try {
-            objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), definition);
+            // 原子写：先写临时文件再 move。此前 writeValue(File) 直接 TRUNCATE 目标，
+            // 中途崩溃/掉电会留下半截 JSON，findAll() 随即整体读取失败（台账 #3）。
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(tmp.toFile(), definition);
+            try {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
             return definition;
         } catch (IOException e) {
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException ignored) {
+                // 清理失败不影响主错误上报
+            }
             throw new WorkflowException("工作流定义写入失败: " + definition.id(), e);
         }
     }
@@ -86,7 +102,34 @@ public class FileWorkflowRepository implements WorkflowRepository {
         }
     }
 
+    /**
+     * 解析定义文件路径，并卡住「id 即路径」的逃逸面（台账 #3）。
+     *
+     * <p>此前直接 {@code dir.resolve(id + ".json")}，{@code id="../../Users/x/foo/config"}
+     * 可写/删工作空间外任意 {@code *.json}。这里只做「不能跳出 dir」的判定：
+     * 禁止路径分隔符、盘符、NUL/控制字符、以点开头与 {@code ..} 片段；
+     * 中文、空格、字母数字等正常 id 一律放行。</p>
+     */
     private Path fileOf(String id) {
+        if (!isSafeId(id)) {
+            throw new WorkflowException("工作流 ID 不合法（不得包含路径分隔符或 ..）：" + id);
+        }
         return dir.resolve(id + ".json");
+    }
+
+    private static boolean isSafeId(String id) {
+        if (id == null || id.isBlank() || id.length() > 128) {
+            return false;
+        }
+        if (id.startsWith(".") || id.contains("..")) {
+            return false;
+        }
+        for (int i = 0; i < id.length(); i++) {
+            char c = id.charAt(i);
+            if (c == '/' || c == '\\' || c == ':' || c == '\0' || Character.isISOControl(c)) {
+                return false;
+            }
+        }
+        return true;
     }
 }

@@ -2,6 +2,9 @@ package com.lucky.agent.permission.support.rules;
 
 import com.lucky.agent.common.constant.PermissionDecision;
 import com.lucky.agent.common.contract.PermissionRule;
+import com.lucky.agent.common.exception.AgentException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -15,11 +18,16 @@ import java.util.List;
  */
 public class PermissionChain {
 
+    private static final Logger log = LoggerFactory.getLogger(PermissionChain.class);
+
     private final PathRuleMatcher pathRuleMatcher = new PathRuleMatcher();
     private final CommandRuleMatcher commandRuleMatcher = new CommandRuleMatcher();
 
     /**
      * 路径规则链裁决。
+     *
+     * <p>规则本身不可解析（如锚点写错）时<b>fail-closed 为 DENY</b>：
+     * 一条坏规则宁可让操作被拒并大声报错，也不能静默退化成「空规则」让人以为已封禁（台账 #8）。</p>
      *
      * @param workspaceRoot 工作区根
      * @param absPath       待判定绝对路径
@@ -33,7 +41,17 @@ public class PermissionChain {
         boolean hasAllow = false;
         boolean hasAsk = false;
         for (PermissionRule rule : rules.stream().sorted(Comparator.comparingInt(PermissionRule::priority)).toList()) {
-            if (rule.type() != PermissionRule.RuleType.PATH || !pathRuleMatcher.matches(rule, workspaceRoot, absPath)) {
+            if (rule.type() != PermissionRule.RuleType.PATH) {
+                continue;
+            }
+            boolean matched;
+            try {
+                matched = pathRuleMatcher.matches(rule, workspaceRoot, absPath);
+            } catch (AgentException e) {
+                log.error("路径规则不可解析，按 DENY 处理：{}", e.getMessage());
+                return PermissionDecision.DENY;
+            }
+            if (!matched) {
                 continue;
             }
             PermissionDecision decision = toDecision(rule);

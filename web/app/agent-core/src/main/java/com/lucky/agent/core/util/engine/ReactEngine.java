@@ -156,6 +156,12 @@ public class ReactEngine implements Engine {
         AgentEventPublisher publisher = stateManager.publisher();
         // 用户在界面选定的模型端点（未指定时由路由回退主端点）
         String modelId = modelIdOf(ctx);
+        // 台账 #26：进入本轮前的会话消息基线。RetryModelGateway 的重试单元是「整轮 run」，
+        // 失败重跑时若不回滚，上一轮已落库的 assistant/tool 消息会再追加一遍 → 上下文与
+        // token 成倍膨胀（最坏 3x），模型还会看到自相矛盾的重复历史。
+        // 这里记录基线，异常路径回滚到进入前；成功路径不动。
+        // 局限（已在台账标注）：文件写入、检查点等副作用无法回滚，根治需把重试下沉到单次模型调用。
+        int messageBaseline = state.messages().size();
         try {
             String sysPrompt = assembleSystemPrompt(ctx, phase, state);
             List<ToolSpecification> tools = toolGateway.buildToolSpecifications(ctx.workspaceId(), ctx.goal());
@@ -324,6 +330,16 @@ public class ReactEngine implements Engine {
                 state.appendMessage(lastAi == null
                         ? AiMessage.from(finalText)
                         : lastAi.toBuilder().text(finalText).build());
+            } else {
+                // 台账 #17：步数耗尽（或模型始终没产出正文）时，此前既不发 error、也不落库，
+                // 却返回 status="success" —— 用户看到一条空白回答，日志全绿，无法归因。
+                // 现在如实报错：错误事件 + status="max-steps" + error 文案（会话层据此返回 ERROR）。
+                String reason = "已达最大步数（" + maxSteps + "）仍未产出结论，本轮未完成，请调整目标或拆分任务后重试";
+                log.warn("引擎步数耗尽：session={} phase={} steps={}", ctx.sessionId(), phase, step);
+                publisher.publish(ctx.sessionId(), AgentEvent.error(
+                        ctx.sessionId(), phase.name(), null, reason, "错误:ASK"));
+                return new EngineRunResult(ctx.sessionId(), phase, "", tokenUsed,
+                        modelRouter.modelName(modelId), "max-steps", reason);
             }
             // 编排模式（多步连续 run）下不逐次发布 stop，避免前端误将中间步骤当整轮结束而断连；
             // 收尾 stop 由编排层/会话层统一发布（单步运行时照常发布）。
@@ -333,11 +349,31 @@ public class ReactEngine implements Engine {
             return EngineRunResult.of(ctx.sessionId(), phase, finalText, tokenUsed, modelRouter.modelName(modelId), "success");
         } catch (Exception e) {
             log.error("引擎运行失败：session={} phase={}", ctx.sessionId(), phase, e);
+            // 台账 #26：把本轮回滚到进入前的消息基线，避免上层整轮重试时重复累积历史。
+            rollbackToBaseline(state, messageBaseline);
             publisher.publish(ctx.sessionId(), AgentEvent.error(
                     ctx.sessionId(), phase.name(), null, e.getMessage(), "错误:ASK"));
             return EngineRunResult.error(ctx.sessionId(), phase, e.getMessage());
         } finally {
             state.running(wasRunning);
+        }
+    }
+
+    /**
+     * 回滚本轮新增的会话消息（台账 #26，配合「整轮重试」使用）。
+     *
+     * <p>只回滚<b>消息</b>：已经发生的文件写入/检查点无法撤销（这是重试粒度问题的残留），
+     * 但至少保证重试不会让上下文与 token 成倍膨胀。</p>
+     */
+    private static void rollbackToBaseline(ConversationStateManager.SessionState state, int baseline) {
+        try {
+            List<ChatMessage> msgs = state.messages();
+            // CopyOnWriteArrayList：按索引尾部删除，避免整表替换与并发读冲突
+            while (msgs.size() > baseline) {
+                msgs.remove(msgs.size() - 1);
+            }
+        } catch (RuntimeException e) {
+            log.warn("回滚本轮消息失败（不影响错误上报）：baseline={}", baseline, e);
         }
     }
 
@@ -746,6 +782,12 @@ public class ReactEngine implements Engine {
                 @Override
                 public void onCompleteResponse(ChatResponse response) {
                     aiRef.set(response.aiMessage());
+                    // 台账 #16：流式响应同样携带真实 token 用量，此前从不写入 usageRef
+                    // → outcome.tokenUsage() 恒 null → 全链路退回本地估算（中文按 1 字 1 token），
+                    // 预算熔断、/tokens、Metrics 全建立在估算值上。
+                    if (response != null) {
+                        usageRef.set(response.tokenUsage());
+                    }
                     latch.countDown();
                 }
 

@@ -55,16 +55,27 @@ public class FileWorkflowInstanceRepository implements WorkflowInstanceRepositor
     /** 兜底淘汰间隔：无新实例产生时，每写入 N 次仍校验一次容量。 */
     static final int PRUNE_INTERVAL_SAVES = 64;
 
+    /** 写入锁分段数（台账 #32：避免所有实例共用一把全局锁）。 */
+    static final int LOCK_STRIPES = 16;
+
     private final Path dir;
     private final ObjectMapper objectMapper;
     private final int maxRetained;
 
     /**
-     * 写入串行锁：进度落盘可能来自引擎线程与终态收尾等不同路径，
-     * 串行化可保证同一实例的「临时文件 → 原子移动」不交错。
-     * 读取路径刻意不加锁 —— 原子移动已保证读取方永远看到完整内容，无需为读引入竞争。
+     * 写入串行锁（按 instanceId 分 {@value #LOCK_STRIPES} 段，台账 #32）。
+     *
+     * <p><b>为何不能一把全局锁：</b>本类在宿主里是单例，{@code writeLock} 曾是实例字段 ——
+     * 于是<b>所有工作流实例</b>共用同一把锁。两个不同实例并行跑（ASYNC 触发）时，
+     * 它们的进度落盘会互相排队，节点越多、实例越多，串行化窗口越长。</p>
+     *
+     * <p>分段的语义边界：同一实例的「临时文件 → 原子移动」仍需串行（否则同实例写入交错）；
+     * 不同实例之间没有共享可变状态，可以并行。16 段是无锁竞争比与内存开销的折中。</p>
      */
-    private final ReentrantLock writeLock = new ReentrantLock();
+    private final ReentrantLock[] writeLocks = new ReentrantLock[LOCK_STRIPES];
+
+    /** 淘汰锁：容量校验是全目录操作，用 tryLock 避免多线程同时扫描目录。 */
+    private final ReentrantLock pruneLock = new ReentrantLock();
 
     private final AtomicLong saveCount = new AtomicLong();
 
@@ -76,6 +87,9 @@ public class FileWorkflowInstanceRepository implements WorkflowInstanceRepositor
         this.dir = dir;
         this.objectMapper = objectMapper;
         this.maxRetained = maxRetained > 0 ? maxRetained : DEFAULT_MAX_RETAINED;
+        for (int i = 0; i < LOCK_STRIPES; i++) {
+            writeLocks[i] = new ReentrantLock();
+        }
         try {
             Files.createDirectories(dir);
         } catch (IOException e) {
@@ -83,10 +97,16 @@ public class FileWorkflowInstanceRepository implements WorkflowInstanceRepositor
         }
     }
 
+    /** 按 instanceId 取分段锁（同一实例恒落同一段）。 */
+    private ReentrantLock lockFor(String instanceId) {
+        return writeLocks[Math.floorMod(instanceId == null ? 0 : instanceId.hashCode(), LOCK_STRIPES)];
+    }
+
     @Override
     public void save(WorkflowInstance instance) {
         Path file = fileOf(instance.getInstanceId());
-        writeLock.lock();
+        ReentrantLock lock = lockFor(instance.getInstanceId());
+        lock.lock();
         try {
             boolean newInstanceFile = !Files.exists(file);
             writeAtomically(file, instance);
@@ -94,7 +114,7 @@ public class FileWorkflowInstanceRepository implements WorkflowInstanceRepositor
                 pruneIfExceeded();
             }
         } finally {
-            writeLock.unlock();
+            lock.unlock();
         }
     }
 
@@ -103,13 +123,17 @@ public class FileWorkflowInstanceRepository implements WorkflowInstanceRepositor
      *
      * <p>临时文件必须与目标同目录：{@code ATOMIC_MOVE} 要求同文件系统。个别文件系统不支持原子移动时
      * 降级为普通替换移动（此时仍有「截断窗口」，但至少内容不会与目标文件交错写入）。</p>
+     *
+     * <p><b>为何写紧凑 JSON 而不是 pretty：</b>进度按节点落盘意味着同一实例会被写 N 次，
+     * 而每次都是全量序列化 —— 缩进空白的体积在 N 次写入里被成倍放大（实测多 30%~40% 字节）。
+     * 这些文件是给 API 读的运行历史，不是人工编辑的配置，故紧凑输出。</p>
      */
     private void writeAtomically(Path target, WorkflowInstance instance) {
         Path tmp = null;
         try {
             tmp = Files.createTempFile(dir, target.getFileName().toString() + ".", ".tmp");
             try (OutputStream out = Files.newOutputStream(tmp)) {
-                objectMapper.writerWithDefaultPrettyPrinter().writeValue(out, instance);
+                objectMapper.writeValue(out, instance);
             }
             try {
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -171,8 +195,14 @@ public class FileWorkflowInstanceRepository implements WorkflowInstanceRepositor
      *
      * <p>调用频率由 {@link #save} 摊销控制，不在此处判断「是否需要淘汰」的时机 ——
      * 本方法只回答「当前是否超标」，时机决策留在写入路径，避免调用方漏判。</p>
+     *
+     * <p>并发保护：全目录扫描用 tryLock。拿不到锁说明另一线程正在淘汰，
+     * 直接跳过即可 —— 淘汰是幂等的，每次写入都会重新校验容量，不存在「漏淘汰」。</p>
      */
     private void pruneIfExceeded() {
+        if (!pruneLock.tryLock()) {
+            return;
+        }
         try (Stream<Path> files = Files.list(dir)) {
             List<Path> json = files
                     .filter(p -> p.getFileName().toString().endsWith(".json"))
@@ -190,6 +220,8 @@ public class FileWorkflowInstanceRepository implements WorkflowInstanceRepositor
             }
         } catch (IOException e) {
             log.warn("工作流实例目录清理失败: {} - {}", dir, e.getMessage());
+        } finally {
+            pruneLock.unlock();
         }
     }
 

@@ -95,6 +95,7 @@ class CmdSandboxTest {
         CmdSandbox sandbox = new CmdSandbox(true, 20);
         ExecResult r = sandbox.run(exec("echo " + MARKER), workDir("echo"));
         assertTrue(r.ok(), "命令应执行成功，实际错误：" + r.error());
+        assertEquals(0, r.exitCode(), "成功命令的退出码应为 0");
         assertEquals("exit=0", r.summary());
         assertNotNull(r.content());
         assertTrue(r.content().contains(MARKER), "应拿到命令输出，实际：" + r.content());
@@ -158,12 +159,16 @@ class CmdSandboxTest {
     }
 
     @Test
-    @DisplayName("非零退出码被保留（供 failOnError 判定）")
-    void nonZeroExitCodePreserved() throws IOException {
+    @DisplayName("台账 #5：非零退出码即失败，并被结构化保留")
+    void nonZeroExitCodeIsFailure() throws IOException {
         CmdSandbox sandbox = new CmdSandbox(true, 20);
         ExecResult r = sandbox.run(exec("exit 3"), workDir("exit3"));
-        assertTrue(r.ok(), "进程本身启动成功即 ok=true，退出码由 summary 表达");
+        // 修复前这里 ok=true：校验命令失败被 CommandVerifier 判成「通过」
+        assertFalse(r.ok(), "非零退出必须 ok=false");
+        assertEquals(3, r.exitCode(), "退出码应以结构化字段暴露");
         assertEquals("exit=3", r.summary());
+        assertNotNull(r.error());
+        assertTrue(r.error().contains("3"), r.error());
     }
 
     @Test

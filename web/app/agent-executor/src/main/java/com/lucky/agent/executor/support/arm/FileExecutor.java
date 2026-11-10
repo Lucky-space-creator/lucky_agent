@@ -96,13 +96,45 @@ public class FileExecutor {
                 .path(op.path()).summary("已删除：" + op.path() + "（可 30 天内于回收站恢复）");
     }
 
+    /**
+     * 移入回收站。
+     *
+     * <p>台账 #10：此前直接用 {@code op.path().replace(':','_')} 拼目标名，{@code a/../b}
+     * 会经 {@code resolve} 逃出本次时间戳目录、覆盖其他回收站条目；同名文件在同一毫秒内
+     * 还会互相覆盖。现在把分隔符全部扁平化、消掉 {@code ..} 语义，并追加原路径短 hash
+     * 保证唯一。</p>
+     */
     private void softDeleteToTrash(FileOp op, Path absPath) throws IOException {
-        String relPath = op.path() == null ? "root" : op.path().replace(':', '_');
         String timestamp = Long.toString(System.currentTimeMillis());
-        Path targetTrash = trashDir.resolve(op.workspaceId()).resolve(timestamp + "_" + relPath);
+        Path targetTrash = trashDir.resolve(safeName(op.workspaceId()))
+                .resolve(timestamp + "_" + trashEntryName(op, absPath));
         Files.createDirectories(targetTrash.getParent());
         Files.move(absPath, targetTrash, StandardCopyOption.REPLACE_EXISTING);
         log.info("软删除：{} -> {}", absPath, targetTrash);
+    }
+
+    /** 回收站条目名：扁平化分隔符、消除 {@code ..}、追加 hash 去重。 */
+    private static String trashEntryName(FileOp op, Path absPath) {
+        String raw = op.path() == null || op.path().isBlank() ? "root" : op.path();
+        String cleaned = raw.replace('\\', '_').replace('/', '_').replace(':', '_')
+                .replace("..", "__");
+        if (cleaned.isBlank()) {
+            cleaned = "root";
+        }
+        // 长度上限，避免超长路径撞上文件系统限制
+        if (cleaned.length() > 80) {
+            cleaned = cleaned.substring(0, 80);
+        }
+        return cleaned + "_" + Integer.toHexString(absPath.toString().hashCode());
+    }
+
+    /** 工作空间 id 也可能带分隔符（配置手填），落目录前统一净化。 */
+    private static String safeName(String name) {
+        if (name == null || name.isBlank()) {
+            return "unknown";
+        }
+        String cleaned = name.replace('\\', '_').replace('/', '_').replace(':', '_');
+        return cleaned.equals(".") || cleaned.contains("..") ? cleaned.replace("..", "__") : cleaned;
     }
 
     private ExecResult list(FileOp op, Path absPath) throws IOException {
@@ -133,8 +165,21 @@ public class FileExecutor {
     }
 
     private ExecResult rename(FileOp op, Path absPath) throws IOException {
-        if (op.args() == null || !(op.args().get("to") instanceof String to)) {
+        if (op.args() == null || !(op.args().get("to") instanceof String to) || to.isBlank()) {
             return ExecResult.failure(FileOp.OpType.RENAME, op.requestId(), "缺少目标路径参数 to");
+        }
+        // 兜底：目标必须是「相对源目录」的路径。绝对路径在 Windows 上会被 Path.resolve
+        // 直接采纳，从而完全绕过工作空间边界（台账 #1）。主校验在 LocalTransport 的
+        // guardRenameTarget（基于工作空间根 + realpath），这里防的是有人直接调用本类。
+        Path rawTarget;
+        try {
+            rawTarget = Path.of(to);
+        } catch (RuntimeException e) {
+            return ExecResult.failure(FileOp.OpType.RENAME, op.requestId(), "目标路径不合法：" + to);
+        }
+        if (rawTarget.isAbsolute() || rawTarget.getRoot() != null) {
+            return ExecResult.failure(FileOp.OpType.RENAME, op.requestId(),
+                    "目标路径必须相对源目录，禁止使用绝对路径：" + to);
         }
         if (!Files.exists(absPath)) {
             return ExecResult.failure(FileOp.OpType.RENAME, op.requestId(), "源不存在：" + op.path());

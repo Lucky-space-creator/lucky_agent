@@ -39,6 +39,9 @@ public class CmdSandbox {
     /** 输出排空线程的收尾等待上限：进程已退出，管道随即 EOF，正常是毫秒级。 */
     private static final long DRAIN_JOIN_MS = 1000L;
 
+    /** 失败时 error 里回显输出的上限：够看清原因，又不至于把整份构建日志塞进错误字段。 */
+    private static final int ERROR_OUTPUT_LIMIT = 800;
+
     private final boolean enabled;
     private final long timeoutSec;
 
@@ -88,8 +91,21 @@ public class CmdSandbox {
             }
             drainer.join(DRAIN_JOIN_MS);
             int exit = process.exitValue();
+            String output = decode(sink.toByteArray());
+            // 非零退出 = 命令失败（台账 #5）。此前无条件返回 success，退出码只进 summary，
+            // 于是 CommandVerifier 的 `!result.ok()` 永远为 false —— 校验命令失败也被判「通过」，
+            // 未验证的改动被当作已验证推进。现在 ok 与 exitCode 语义一致，输出仍原样带回，
+            // 让调用方/模型能看到 stderr。
+            if (exit != 0) {
+                String error = "命令退出码 " + exit + (output.isBlank() ? "" : "：" + tail(output));
+                return ExecResult.failure(FileOp.OpType.EXEC, op.requestId(), error)
+                        .exitCode(exit)
+                        .content(output)
+                        .summary("exit=" + exit);
+            }
             return ExecResult.success(FileOp.OpType.EXEC, op.requestId())
-                    .summary("exit=" + exit).content(decode(sink.toByteArray()));
+                    .exitCode(exit)
+                    .summary("exit=" + exit).content(output);
         } catch (IOException e) {
             return ExecResult.failure(FileOp.OpType.EXEC, op.requestId(), "命令启动失败：" + e.getMessage());
         } catch (InterruptedException e) {
@@ -120,12 +136,20 @@ public class CmdSandbox {
         descendants.forEach(ProcessHandle::destroyForcibly);
     }
 
-    private static void drain(Process process, ByteArrayOutputStream sink) {
-        try (InputStream in = process.getInputStream()) {
+    private static void drain(Process process, ByteArrayOutputStream sink) {        try (InputStream in = process.getInputStream()) {
             in.transferTo(sink);
         } catch (IOException ignored) {
             // 进程被强制终止时管道会异常关闭，属预期情况，不改变结果语义
         }
+    }
+
+    /** 截取输出尾部用于 error 回显（编译/测试失败的关键信息通常在末尾）。 */
+    private static String tail(String output) {
+        String trimmed = output.strip();
+        if (trimmed.length() <= ERROR_OUTPUT_LIMIT) {
+            return trimmed;
+        }
+        return "…" + trimmed.substring(trimmed.length() - ERROR_OUTPUT_LIMIT);
     }
 
     /**

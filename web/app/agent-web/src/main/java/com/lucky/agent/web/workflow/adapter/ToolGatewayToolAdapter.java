@@ -63,7 +63,10 @@ public class ToolGatewayToolAdapter implements ToolAdapter {
         ConversationCtx ctx = ConversationCtx.builder()
                 .sessionRef(SessionRef.of(SYNTHETIC_SESSION_ID, LOCAL_USER_ID, workspaceId))
                 .phase(Phase.ACT)
-                .permissionLevel(PermissionLevel.FULL)
+                // 台账 #13：此前硬编码 FULL，于是「只读/修改」档工作空间里，对话通道写文件会被拦，
+                // 而同一工作空间的 TOOL 节点以 FULL 身份放行 —— 权限模型被旁路。
+                // 现在按该工作空间的实际权限档构造上下文，与对话通道同一口径。
+                .permissionLevel(resolvePermissionLevel(workspaceId))
                 .goal("workflow-tool:" + toolName)
                 .build();
 
@@ -104,6 +107,27 @@ public class ToolGatewayToolAdapter implements ToolAdapter {
             out.put("data", data);
         }
         return out;
+    }
+
+    /**
+     * 取该工作空间的实际权限档（台账 #13）。
+     *
+     * <p>不做缓存：用户在设置页改权限档后应立即生效，缓存会造出「改了没生效」的错觉。
+     * 解析失败一律回落 {@link PermissionLevel#defaultValue()}（fail-closed，绝不回落到 FULL）。</p>
+     */
+    private PermissionLevel resolvePermissionLevel(String workspaceId) {
+        WorkspaceManager manager = workspaceManagerProvider.getIfAvailable();
+        if (manager == null) {
+            return PermissionLevel.defaultValue();
+        }
+        try {
+            return manager.findById(workspaceId)
+                    .map(Workspace::permissionLevel)
+                    .orElse(PermissionLevel.defaultValue());
+        } catch (Exception e) {
+            log.warn("解析工作空间权限档失败，回落默认档：workspaceId={} err={}", workspaceId, e.getMessage());
+            return PermissionLevel.defaultValue();
+        }
     }
 
     /**

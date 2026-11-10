@@ -17,7 +17,9 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 记忆预取选择器（对标 Claude Code Memory Prefetch）。
@@ -37,7 +39,17 @@ public class MemoryPrefetcher {
     private final MemoryMdProperties props;
     /** 上次「无命中」时间戳（毫秒）：连续无命中时短暂限频，避免每轮引擎白调选择器。 */
     private static final long EMPTY_THROTTLE_MS = 300_000L;
-    private volatile long lastEmptyAt = 0L;
+    /**
+     * 限频状态<b>按会话</b>记录（台账 #28）。
+     *
+     * <p>此前是单个实例字段 {@code lastEmptyAt}，而本类是单例 Bean —— 等价于进程级共享：
+     * 任一会话「无命中」一次，此后 5 分钟<b>所有</b>会话的预取都直接返回空串，
+     * 新开的对话会拿不到本该命中的记忆。按 sessionId 分桶后，限频只影响触发它的那个会话。</p>
+     */
+    private final Map<String, Long> lastEmptyAt = new ConcurrentHashMap<>();
+
+    /** 限频状态最多跟踪的会话数：超出后先清过期项，仍超则整体重置（记忆是增强能力，宁可多调一次也不无限增长）。 */
+    private static final int MAX_TRACKED_SESSIONS = 512;
 
     public MemoryPrefetcher(ModelRouter modelRouter, HierarchyMemoryRetriever retriever,
                             MemoryMdProperties props) {
@@ -59,30 +71,63 @@ public class MemoryPrefetcher {
         }
         // 连续无命中 → 短暂限频（5 分钟内不再调选择器，避免取消/空索引场景下反复白调模型）。
         // 注意：限频窗口内返回空串，不再触发任何模型调用，从根上杜绝「用户没提问却被反复调用模型」。
-        if (lastEmptyAt > 0 && System.currentTimeMillis() - lastEmptyAt < EMPTY_THROTTLE_MS) {
+        String throttleKey = throttleKey(ctx);
+        if (throttled(throttleKey)) {
             return "";
         }
         String workspaceId = ctx.workspaceId();
         String indexText = retriever.recallIndex(workspaceId);
         if (indexText == null || indexText.isBlank()) {
             // 索引本身为空也计入「无命中」，避免每次引擎循环都重复读盘/重复判断
-            lastEmptyAt = System.currentTimeMillis();
+            markEmpty(throttleKey);
             return "";
         }
         String goal = ctx.goal() == null ? "" : ctx.goal();
         Set<String> selected = selectIds(goal, indexText);
         if (selected.isEmpty()) {
-            lastEmptyAt = System.currentTimeMillis();
+            markEmpty(throttleKey);
             return "";
         }
         // 会话内去重：本次新命中（首次注入）的条目才读取全文
         Set<String> fresh = state == null ? selected : state.markPrefetched(selected);
         if (fresh.isEmpty()) {
-            lastEmptyAt = System.currentTimeMillis();
+            markEmpty(throttleKey);
             return "";
         }
-        lastEmptyAt = 0L;
+        lastEmptyAt.remove(throttleKey);
         return retriever.recallEntries(workspaceId, fresh);
+    }
+
+    /** 限频键：以会话为粒度（无 sessionId 时退化为工作空间，最后兜底全局）。 */
+    private static String throttleKey(ConversationCtx ctx) {
+        try {
+            if (ctx.sessionRef() != null && ctx.sessionRef().sessionId() != null
+                    && !ctx.sessionRef().sessionId().isBlank()) {
+                return ctx.sessionRef().sessionId();
+            }
+        } catch (RuntimeException ignored) {
+            // sessionRef 缺省实现可按需拒绝，退化到下一级键即可
+        }
+        String ws = ctx.workspaceId();
+        return (ws == null || ws.isBlank()) ? "__global__" : "ws:" + ws;
+    }
+
+    private boolean throttled(String key) {
+        Long at = lastEmptyAt.get(key);
+        return at != null && System.currentTimeMillis() - at < EMPTY_THROTTLE_MS;
+    }
+
+    /** 记录一次「无命中」；表满时先清过期项，仍满则整体重置，保证不随会话数无限增长。 */
+    private void markEmpty(String key) {
+        long now = System.currentTimeMillis();
+        if (lastEmptyAt.size() >= MAX_TRACKED_SESSIONS) {
+            lastEmptyAt.entrySet().removeIf(e -> now - e.getValue() >= EMPTY_THROTTLE_MS);
+            if (lastEmptyAt.size() >= MAX_TRACKED_SESSIONS) {
+                log.debug("记忆预取限频表已满（{}），整体重置", lastEmptyAt.size());
+                lastEmptyAt.clear();
+            }
+        }
+        lastEmptyAt.put(key, now);
     }
 
     /** 选择器：从索引中挑出与本轮目标最相关的条目 id（JSON {@code {"entryIds":[...]}}）。 */

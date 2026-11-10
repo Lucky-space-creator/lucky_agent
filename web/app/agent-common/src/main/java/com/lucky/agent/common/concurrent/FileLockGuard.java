@@ -134,7 +134,10 @@ public class FileLockGuard {
     private boolean tryLock(Path lockFile) throws IOException {
         if (!Files.exists(lockFile)) {
             Path tmp = lockDir.resolve(lockFile.getFileName() + ".tmp");
-            String owner = System.getProperty("pid", "unknown") + "|" + System.currentTimeMillis() + "|" + leaseMs;
+            // owner 必须是真实 PID（台账 #6）。此前取 System.getProperty("pid")，
+            // 而全仓没有任何地方设置 -Dpid → 恒为 "unknown" → isProcessAlive 恒 false
+            // → 每个锁一创建就被判 stale、下一个请求立即删锁抢占，互斥形同虚设。
+            String owner = ProcessHandle.current().pid() + "|" + System.currentTimeMillis() + "|" + leaseMs;
             Files.writeString(tmp, owner + System.lineSeparator(), StandardCharsets.UTF_8);
             Files.move(tmp, lockFile, StandardCopyOption.ATOMIC_MOVE);
             return true;

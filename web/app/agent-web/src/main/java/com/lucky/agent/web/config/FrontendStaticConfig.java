@@ -34,7 +34,9 @@ import lombok.extern.slf4j.Slf4j;
 @Configuration
 public class FrontendStaticConfig {
 
-    
+    /** 静态资源单文件上限：超出即视为异常请求，避免一次请求把大文件读进堆。 */
+    private static final long MAX_STATIC_BYTES = 64L * 1024 * 1024;
+
     private final Path dist;
     private final Path index;
 
@@ -110,8 +112,8 @@ public class FrontendStaticConfig {
 
     /** 命中 dist 内真实文件则返回，否则回退 index.html（history 路由）。*/
     private Mono<ServerResponse> spaFallback(ServerRequest req) {
-        Path file = dist.resolve(req.path().substring(1)).normalize();
-        if (Files.isRegularFile(file)) {
+        Path file = resolveInDist(req.path().substring(1));
+        if (file != null && Files.isRegularFile(file)) {
             return serveFile(req.path().substring(1));
         }
         return serveIndex();
@@ -122,17 +124,81 @@ public class FrontendStaticConfig {
     }
 
     private Mono<ServerResponse> serveFile(String relative) {
-        Path file = dist.resolve(relative).normalize();
-        if (!Files.isRegularFile(file)) {
+        Path file = resolveInDist(relative);
+        if (file == null || !Files.isRegularFile(file)) {
             return ServerResponse.notFound().build();
         }
         try {
+            long size = Files.size(file);
+            if (size > MAX_STATIC_BYTES) {
+                log.warn("静态资源超过 {} 字节，已拒绝：{}", MAX_STATIC_BYTES, file);
+                return ServerResponse.notFound().build();
+            }
             MediaType media = mediaTypeFor(file.getFileName().toString());
             return ServerResponse.ok().contentType(media).bodyValue(Files.readAllBytes(file));
         } catch (Exception e) {
             log.warn("读取静态资源失败：{}", file, e);
             return ServerResponse.notFound().build();
         }
+    }
+
+    /**
+     * 把请求相对路径解析为 dist 内的真实路径（台账 #2）。
+     *
+     * <p>此前 {@code dist.resolve(relative).normalize()} 后直接读文件，没有回判
+     * {@code startsWith(dist)}：{@code GET /..%2f..%2fconfig.json} 会把 {@code ..}
+     * 解析出 dist 之外，从而读取本机任意文件（会话 JSONL、模型密钥配置在内）。
+     * 这里做三层校验：字符串级前缀、真实路径前缀（阻断 dist 内符号链接指向外部）、
+     * 以及非法路径字符的兜底捕获。</p>
+     *
+     * @return 合法且在 dist 内时返回路径；否则 null（调用方按未找到处理，不暴露原因）
+     */
+    // 包级可见：仅供同包单测直接验证路径判定（WebTestClient 会先行规范化 URI，测不到本函数）
+    Path resolveInDist(String relative) {
+        if (relative == null || relative.isEmpty()) {
+            return null;
+        }
+        Path candidate;
+        try {
+            candidate = dist.resolve(relative).normalize();
+        } catch (RuntimeException e) {
+            log.warn("静态资源路径非法：{}", relative);
+            return null;
+        }
+        if (!candidate.startsWith(dist)) {
+            log.warn("静态资源路径越界，已拒绝：{}", relative);
+            return null;
+        }
+        Path distReal = realpathOrNull(dist);
+        if (distReal != null) {
+            Path candidateReal = realpathOfDeepestExisting(candidate);
+            if (candidateReal != null && !candidateReal.startsWith(distReal)) {
+                log.warn("静态资源符号链接越界，已拒绝：{}", relative);
+                return null;
+            }
+        }
+        return candidate;
+    }
+
+    private static Path realpathOrNull(Path path) {
+        try {
+            return path.toRealPath();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 目标可能不存在，回溯到最深已存在祖先取真实路径以阻断符号链接。 */
+    private static Path realpathOfDeepestExisting(Path candidate) {
+        Path p = candidate;
+        while (p != null) {
+            Path real = realpathOrNull(p);
+            if (real != null) {
+                return real;
+            }
+            p = p.getParent();
+        }
+        return null;
     }
 
     private Mono<ServerResponse> serveIndex() {

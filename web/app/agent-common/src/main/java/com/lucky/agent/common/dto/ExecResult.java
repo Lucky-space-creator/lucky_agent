@@ -47,6 +47,18 @@ public class ExecResult {
     @JsonProperty("error")
     private String error;
 
+    /**
+     * 命令退出码（仅 {@code EXEC} 有值，其余操作为 null）。
+     *
+     * <p>为什么必须单独成字段：此前退出码只拼在 {@code summary} 字符串里
+     * （{@code "exit=1"}），调用方只能靠解析文本判断，于是 {@code CommandVerifier}
+     * 直接看 {@code ok()} —— 而当时的 {@code ok()} 表示「进程启动成功」，
+     * 结果是<b>校验命令失败也被判通过</b>（台账 #5）。现在退出码是结构化事实，
+     * {@code ok} 也随之为 {@code exitCode == 0}。</p>
+     */
+    @JsonProperty("exitCode")
+    private Integer exitCode;
+
     public static ExecResult success(FileOp.OpType opType, String requestId) {
         return new ExecResult().ok(true).opType(opType).requestId(requestId);
     }

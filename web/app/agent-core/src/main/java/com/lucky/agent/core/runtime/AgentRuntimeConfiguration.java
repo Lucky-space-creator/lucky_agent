@@ -17,7 +17,6 @@ import com.lucky.agent.core.runtime.memory.SpringMemoryPort;
 import com.lucky.agent.core.runtime.middleware.BudgetMiddleware;
 import com.lucky.agent.core.runtime.middleware.CompactionMiddleware;
 import com.lucky.agent.core.runtime.middleware.LoggingMiddleware;
-import com.lucky.agent.core.runtime.middleware.MemoryRecallMiddleware;
 import com.lucky.agent.core.runtime.middleware.Middleware;
 import com.lucky.agent.core.runtime.middleware.PermissionMiddleware;
 import com.lucky.agent.core.runtime.middleware.RetryMiddleware;
@@ -188,11 +187,11 @@ public class AgentRuntimeConfiguration {
         return new CompactionMiddleware(memoryPort, COMPACTION_TOKEN_THRESHOLD);
     }
 
-    @Bean
-    @ConditionalOnMissingBean
-    public MemoryRecallMiddleware memoryRecallMiddleware(MemoryPort memoryPort) {
-        return new MemoryRecallMiddleware(memoryPort);
-    }
+    // 注：记忆召回不再作为中间件存在（台账 #27）。原 MemoryRecallMiddleware 把召回结果写进
+    // RuntimeContext.attribute 后无人消费 —— 因为三条主环最终都经 EngineModelGateway 调到
+    // ReactEngine.assembleSystemPrompt，那里已经注入了同一份分层记忆（同一
+    // HierarchyMemoryRetriever），中间件那份是纯重复的读盘/检索。删除而非「补消费者」，
+    // 避免同一段记忆在提示词里注入两次、白烧 token。
 
     @Bean
     @ConditionalOnMissingBean

@@ -57,9 +57,20 @@ public class CommandVerifier implements ObjectiveVerifier {
         try {
             ExecResult result = fileService.exec(ctx.workspaceId(), command)
                     .block(Duration.ofSeconds(timeoutSec));
-            if (result == null || !result.ok()) {
+            if (result == null) {
+                return VerificationResult.failed(type(), "校验命令无返回：" + command);
+            }
+            // 退出码是客观事实，优先按它判定（台账 #5）。此前只看 ok()，
+            // 而非零退出当时也被标成 success，于是「校验失败」被记成「通过」。
+            Integer exitCode = result.exitCode();
+            if (exitCode != null && exitCode != 0) {
                 return VerificationResult.failed(type(),
-                        "校验命令未通过：" + command + "（" + (result == null ? "无返回" : result.error()) + "）");
+                        "校验命令未通过（退出码 " + exitCode + "）：" + command
+                                + "；输出：" + brief(result.content()));
+            }
+            if (!result.ok()) {
+                return VerificationResult.failed(type(),
+                        "校验命令未通过：" + command + "（" + result.error() + "）");
             }
             String expect = step.verify().contains();
             String output = result.content() == null
@@ -74,5 +85,14 @@ public class CommandVerifier implements ObjectiveVerifier {
             log.warn("命令验证异常：command={}", command, e);
             return VerificationResult.failed(type(), "校验命令执行异常：" + e.getMessage());
         }
+    }
+
+    /** 失败信息里回显命令输出的尾部，避免只报「失败」而不给原因。 */
+    private static String brief(String output) {
+        if (output == null || output.isBlank()) {
+            return "(无输出)";
+        }
+        String trimmed = output.strip();
+        return trimmed.length() <= 500 ? trimmed : "…" + trimmed.substring(trimmed.length() - 500);
     }
 }
