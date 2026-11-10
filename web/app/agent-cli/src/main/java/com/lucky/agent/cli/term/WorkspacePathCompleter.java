@@ -31,31 +31,55 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p><b>安全边界</b>：候选来自执行臂列目录的结果，天然限定在当前工作空间之内；只取名字与目录标志，
  * <b>不读文件内容</b>。</p>
+ *
+ * <p><b>缓存策略</b>：带 TTL（{@link #CACHE_TTL_MILLIS}）避免新文件永远补不出来；带上限
+ * （{@link #MAX_CACHED_DIRS}）避免长时间会话遍历大量目录后无限膨胀。过期即视为未命中，
+ * 顺带重取 —— 不引入主动失效，因为文件变化没有可靠的观察点。</p>
  */
 public final class WorkspacePathCompleter {
 
     /** 单次候选上限：目录项极多时截断，避免菜单刷屏与候选列表膨胀。 */
     static final int MAX_CANDIDATES = 200;
 
+    /** 缓存目录数上限：超过后先清过期项，仍超则整体重置（补全缓存可丢，不值得做 LRU）。 */
+    static final int MAX_CACHED_DIRS = 256;
+
+    /** 缓存存活时间：过期视为未命中。太短则频繁重取，太长则新建文件补不出来。 */
+    static final long CACHE_TTL_MILLIS = 30_000L;
+
     private final FileService files;
     private final SessionHolder holder;
     private final Scheduler scheduler;
+    private final long ttlMillis;
 
-    /** 目录缓存：key = {@code workspaceId + '\0' + 相对目录}，value = 该目录下的条目。 */
-    private final Map<String, List<ExecResult.FileEntry>> cache = new ConcurrentHashMap<>();
+    /** 目录缓存：key = {@code workspaceId + '\0' + 相对目录}，value = 该目录下的条目 + 载入时刻。 */
+    private final Map<String, CachedListing> cache = new ConcurrentHashMap<>();
     /** 正在预取的 key，避免同一目录被重复请求打爆执行臂。 */
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
+    /** 时钟（包可见，仅供测试推进时间验证 TTL；生产保持默认）。 */
+    java.util.function.LongSupplier clock = System::currentTimeMillis;
+
     public WorkspacePathCompleter(FileService files, SessionHolder holder) {
-        this(files, holder, Schedulers.boundedElastic());
+        this(files, holder, Schedulers.boundedElastic(), CACHE_TTL_MILLIS);
     }
 
     /** 可注入调度器的构造（测试用 {@code Schedulers.immediate()} 使其确定性同步）。 */
     WorkspacePathCompleter(FileService files, SessionHolder holder, Scheduler scheduler) {
+        this(files, holder, scheduler, CACHE_TTL_MILLIS);
+    }
+
+    /** 可注入 TTL 的构造（测试用短 TTL 验证过期重取）。 */
+    WorkspacePathCompleter(FileService files, SessionHolder holder, Scheduler scheduler, long ttlMillis) {
         this.files = files;
         this.holder = holder;
         this.scheduler = scheduler;
+        this.ttlMillis = ttlMillis;
         prefetchRoot();
+    }
+
+    /** 一条缓存记录：目录条目 + 载入时刻（毫秒）。 */
+    private record CachedListing(List<ExecResult.FileEntry> entries, long loadedAt) {
     }
 
     /**
@@ -75,12 +99,22 @@ public final class WorkspacePathCompleter {
         String namePrefix = (slash < 0 ? body : body.substring(slash + 1)).toLowerCase(Locale.ROOT);
         String workspaceId = holder.workspaceId();
 
-        List<ExecResult.FileEntry> entries = cache.get(cacheKey(workspaceId, dirPart));
-        if (entries == null) {
+        String key = cacheKey(workspaceId, dirPart);
+        CachedListing listing = cache.get(key);
+        if (listing != null && isExpired(listing)) {
+            cache.remove(key, listing); // 过期即失效，本次按未命中处理
+            listing = null;
+        }
+        if (listing == null) {
             prefetch(workspaceId, dirPart);
             return; // 未命中：本轮不阻塞，触发异步预取后即刻返回
         }
-        candidates.addAll(candidatesFor(entries, namePrefix));
+        candidates.addAll(candidatesFor(listing.entries(), namePrefix));
+    }
+
+    /** 当前缓存目录数（测试与诊断用）。 */
+    int cachedDirs() {
+        return cache.size();
     }
 
     /**
@@ -137,12 +171,29 @@ public final class WorkspacePathCompleter {
                             r -> {
                                 inFlight.remove(key);
                                 if (r != null && r.ok() && r.entries() != null) {
-                                    cache.put(key, r.entries());
+                                    cache.put(key, new CachedListing(r.entries(), clock.getAsLong()));
+                                    trimCache();
                                 }
                             },
                             err -> inFlight.remove(key));
         } catch (Exception e) {
             inFlight.remove(key);
+        }
+    }
+
+    /** 缓存已过期（TTL 视作失效；不主动失效是因为文件变化没有可靠观察点）。 */
+    private boolean isExpired(CachedListing listing) {
+        return ttlMillis > 0 && clock.getAsLong() - listing.loadedAt() > ttlMillis;
+    }
+
+    /** 缓存超上限：先清过期项，仍超则整体重置（补全缓存可丢，不值得做 LRU 记账）。 */
+    private void trimCache() {
+        if (cache.size() <= MAX_CACHED_DIRS) {
+            return;
+        }
+        cache.entrySet().removeIf(e -> isExpired(e.getValue()));
+        if (cache.size() > MAX_CACHED_DIRS) {
+            cache.clear();
         }
     }
 

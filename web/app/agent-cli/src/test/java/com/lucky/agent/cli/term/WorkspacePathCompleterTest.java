@@ -227,4 +227,89 @@ class WorkspacePathCompleterTest {
         assertEquals(1, completeToString(completer, "@pom").size());
         assertEquals("@pom.xml", completeToString(completer, "@pom").get(0).value());
     }
+
+    @Test
+    @DisplayName("缓存有 TTL：过期后重新取数，新建文件才补得出来")
+    void cacheExpiresAfterTtl() {
+        java.util.concurrent.atomic.AtomicInteger listCalls = new java.util.concurrent.atomic.AtomicInteger();
+        // 第一次列目录只看到 old.md，之后能看到 old.md + new.md（模拟会话中新写了文件）
+        FileService changing = new StubFs() {
+            @Override
+            public Mono<ExecResult> list(String workspaceId, String path) {
+                int n = listCalls.incrementAndGet();
+                return Mono.just(n == 1
+                        ? listing(file("old.md", "old.md", 1))
+                        : listing(file("old.md", "old.md", 1), file("new.md", "new.md", 2)));
+            }
+        };
+        WorkspacePathCompleter completer = new WorkspacePathCompleter(
+                changing, holder(), Schedulers.immediate(), WorkspacePathCompleter.CACHE_TTL_MILLIS);
+        long[] now = {System.currentTimeMillis()};
+        completer.clock = () -> now[0];
+
+        assertEquals(1, listCalls.get(), "构造时预热根目录");
+        assertEquals(1, completeToString(completer, "@").size(), "未过期时走缓存");
+
+        now[0] += WorkspacePathCompleter.CACHE_TTL_MILLIS + 1_000;
+        assertTrue(completeToString(completer, "@").isEmpty(), "过期即按未命中处理，本轮返回空");
+        assertEquals(2, listCalls.get(), "过期应触发重新取数");
+        assertEquals(2, completeToString(completer, "@").size(), "重新取数后应看到新建文件");
+    }
+
+    @Test
+    @DisplayName("缓存有上限：遍历大量目录后不会无限膨胀")
+    void cacheIsBounded() {
+        WorkspacePathCompleter completer = new WorkspacePathCompleter(
+                stubFs(), holder(), Schedulers.immediate());
+
+        for (int i = 0; i < WorkspacePathCompleter.MAX_CACHED_DIRS + 20; i++) {
+            completeToString(completer, "@d" + i + "/"); // 每个子目录各触发一次预取
+        }
+
+        assertTrue(completer.cachedDirs() <= WorkspacePathCompleter.MAX_CACHED_DIRS,
+                "缓存目录数不得超过上限，实际：" + completer.cachedDirs());
+    }
+
+    /** 只要 list 的桩：其余操作一律空（避免每个用例重复八方法）。 */
+    private abstract static class StubFs implements FileService {
+        @Override
+        public Mono<ExecResult> read(String workspaceId, String path) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<ExecResult> write(String workspaceId, String path, String content) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<ExecResult> list(String workspaceId, String path) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<ExecResult> delete(String workspaceId, String path) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<ExecResult> stat(String workspaceId, String path) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<ExecResult> mkdir(String workspaceId, String path) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<ExecResult> rename(String workspaceId, String from, String to) {
+            return Mono.empty();
+        }
+
+        @Override
+        public Mono<ExecResult> exec(String workspaceId, String command) {
+            return Mono.empty();
+        }
+    }
 }
