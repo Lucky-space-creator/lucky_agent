@@ -279,6 +279,64 @@ class OrchestratorTest {
         assertEquals(2, round.get(), "第二轮必须真正执行到验证阶段");
     }
 
+    /**
+     * 简单任务不触发重规划。
+     *
+     * <p>PLAN 阶段指令允许「简单任务不产出步骤列表，直接输出结构化总结」，这类输出解析不出
+     * Plan 属于预期结果。此前一律按「无法解析计划」重规划一次，导致每次普通对话都多跑一轮
+     * 完整 PLAN（该阶段与 ACT 共用引擎、带全套工具 → 已执行的工具会被再执行一遍）。</p>
+     */
+    @Test
+    void testSimpleTask_NoReplan() {
+        Engine engine = mock(Engine.class);
+        java.util.concurrent.atomic.AtomicInteger planCalls = new java.util.concurrent.atomic.AtomicInteger();
+        when(engine.run(any(), any(), anyString())).thenAnswer(inv -> {
+            Phase phase = inv.getArgument(1);
+            if (phase == Phase.PLAN) {
+                planCalls.incrementAndGet();
+                return Mono.just(EngineRunResult.of(SESSION, Phase.PLAN, "你好", 0, "m", "success"));
+            }
+            return Mono.just(EngineRunResult.of(SESSION, Phase.ACT, "你好", 0, "m", "success"));
+        });
+        VerificationChain chain = mock(VerificationChain.class);
+        when(chain.verify(any(), any(), anyString(), anyString(), any()))
+                .thenReturn(new VerificationVerdict(true, "达成", "", List.of()));
+        CoreProperties props = props(1, 0);
+        Orchestrator orch = orchestrator(engine, chain, props, mock(AskSuspender.class));
+
+        orch.run(new SessionRef(SESSION, "u-1", "ws-1"), ctx(PermissionLevel.FULL),
+                mock(AgentEventPublisher.class));
+
+        assertEquals(1, planCalls.get(), "简单任务（无计划 JSON）不应触发重规划");
+    }
+
+    /** 确实在写计划但 JSON 损坏时，仍然重规划一次（保留 R3 闭环）。 */
+    @Test
+    void testBrokenPlanJson_StillReplans() {
+        Engine engine = mock(Engine.class);
+        java.util.concurrent.atomic.AtomicInteger planCalls = new java.util.concurrent.atomic.AtomicInteger();
+        when(engine.run(any(), any(), anyString())).thenAnswer(inv -> {
+            Phase phase = inv.getArgument(1);
+            if (phase == Phase.PLAN) {
+                planCalls.incrementAndGet();
+                // 有 JSON 结构特征（含 "steps"）但语法损坏 → 属于「计划写坏了」
+                return Mono.just(EngineRunResult.of(SESSION, Phase.PLAN,
+                        "{\"goal\":\"x\",\"steps\":[{\"id\":1,", 0, "m", "success"));
+            }
+            return Mono.just(EngineRunResult.of(SESSION, Phase.ACT, "完成", 0, "m", "success"));
+        });
+        VerificationChain chain = mock(VerificationChain.class);
+        when(chain.verify(any(), any(), anyString(), anyString(), any()))
+                .thenReturn(new VerificationVerdict(true, "达成", "", List.of()));
+        CoreProperties props = props(1, 0);
+        Orchestrator orch = orchestrator(engine, chain, props, mock(AskSuspender.class));
+
+        orch.run(new SessionRef(SESSION, "u-1", "ws-1"), ctx(PermissionLevel.FULL),
+                mock(AgentEventPublisher.class));
+
+        assertEquals(2, planCalls.get(), "计划 JSON 损坏应触发一次重规划（共两次 PLAN）");
+    }
+
     /** 装配支持注入 TaskScheduler 的编排器。 */
     private Orchestrator orchestrator(Engine engine, VerificationChain chain,
                                      CoreProperties props, AskSuspender suspender, TaskScheduler scheduler) {        ConversationStateManager stateManager = mock(ConversationStateManager.class);

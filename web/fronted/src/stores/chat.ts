@@ -161,6 +161,162 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /**
+   * 断开事件流并复位运行态（切会话 / 新建会话 / 删除会话时调用）。
+   *
+   * <p>`running` 是全 store 单例，不随会话切换而重置。若只关流不复位，
+   * 运行中切走再切回会让发送按钮永久停在「停止」，该会话再也发不出消息。</p>
+   */
+  function detachRun(phase = '已离开') {
+    closeActiveStream()
+    if (!running.value) return
+    running.value = false
+    stopMetrics()
+    if (!runPanel.value.done) {
+      runPanel.value.done = true
+      runPanel.value.phase = phase
+    }
+  }
+
+  /**
+   * 断线重连后的状态校准。
+   *
+   * <p>后端事件流是多播无回放的，断线窗口内的事件永久丢失。以服务端快照的
+   * `state.running` 为权威：仍在跑就继续等后续事件；已结束则主动收尾，
+   * 并从持久化历史补齐本轮正文（断线期间产生的文本不会经 SSE 补发）。</p>
+   */
+  async function reconcileRun(ref: SessionRef, assistantIndex: number) {
+    let stillRunning: boolean
+    try {
+      const snap = await chatApi.snapshot(ref)
+      stillRunning = snap.state?.running === true
+    } catch {
+      // 校准请求本身失败：保持现状，等后续事件或用户手动操作
+      return
+    }
+    if (stillRunning) return
+
+    const item = messages.value[assistantIndex]
+    if (item) {
+      if (item.status === 'running') item.status = 'done'
+      try {
+        const hist = await chatApi.history(ref)
+        const assist = (hist.messages ?? []).filter((m) => m.role === 'assistant')
+        const last = assist[assist.length - 1]
+        // 只在历史更完整时覆盖，避免把已有增量内容回退成更短的旧文本
+        if (last && (last.content ?? '').length > (item.content ?? '').length) {
+          item.content = last.content ?? ''
+          if (last.checkpointIds?.length) item.checkpointIds = last.checkpointIds
+        }
+      } catch {
+        // 补全失败不影响收尾
+      }
+      if (!item.content) {
+        item.status = 'error'
+        item.error = item.error ?? '连接中断，本轮回复可能不完整；可在会话历史中查看'
+      }
+    }
+    running.value = false
+    refreshMetrics(ref.sessionId)
+    stopMetrics()
+    syncCheckpointIds(ref.sessionId)
+    closeActiveStream()
+  }
+
+  /**
+   * 把会话事件流绑定到指定消息项（submit 与「切回运行中会话」共用）。
+   *
+   * @returns 关闭函数（幂等）
+   */
+  function attachStream(ref: SessionRef, assistantIndex: number): () => void {
+    const liveItem = (): ChatItem | null => messages.value[assistantIndex] ?? null
+    const finish = () => {
+      running.value = false
+      // 收尾补拉一次最终指标（轮次/步骤/消耗），保证面板停留在真实终态
+      refreshMetrics(ref.sessionId)
+      stopMetrics()
+      // 从后端历史补齐本轮产生的文件检查点，使刚完成的回复立即可回溯
+      syncCheckpointIds(ref.sessionId)
+      if (activeClose) {
+        activeClose()
+        activeClose = null
+      }
+    }
+    return connectSse(ref, {
+      onEvent: (e) => {
+        const item = liveItem()
+        if (item) applyEvent(item, e)
+        if (e.type === 'stop' || e.type === 'error') finish()
+      },
+      onError: (m) => {
+        // 连接失败直接落在消息内提示，避免只出现在全局（无渲染）里
+        const item = liveItem()
+        if (item) {
+          item.status = 'error'
+          item.error = m
+        }
+        error.value = m
+        running.value = false
+        // 收尾：标记执行面板终态，避免错误后悬浮面板永久残留「执行中」
+        runPanel.value.done = true
+        runPanel.value.phase = '出错'
+        stopMetrics()
+      },
+      onReconnect: () => {
+        void reconcileRun(ref, assistantIndex)
+      },
+    })
+  }
+
+  /**
+   * 切回一个仍在执行的会话：从权威快照恢复运行态并重新接入事件流。
+   *
+   * <p>页面刷新、切走再切回都会走到这里；不接管的话界面显示「已完成」
+   * 而后端仍在跑，输出完全看不到。</p>
+   *
+   * @returns 是否接管了一个运行中的会话
+   */
+  async function resumeLiveRun(sessionId: string): Promise<boolean> {
+    const ws = useWorkspaceStore()
+    const session = sessions.value.find((s) => s.id === sessionId)
+    const ref: SessionRef = {
+      sessionId,
+      userId: userId(),
+      workspaceId:
+        session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || '',
+    }
+    try {
+      const snap = await chatApi.snapshot(ref)
+      if (snap.state?.running !== true) return false
+    } catch {
+      return false
+    }
+    // 接管最后一条助手消息；没有则补一个占位项，保证事件有落点
+    let idx = messages.value.length - 1
+    if (idx < 0 || messages.value[idx].role !== 'assistant') {
+      messages.value.push({
+        id: uid(),
+        role: 'assistant',
+        content: '',
+        ts: new Date().toISOString(),
+        status: 'running',
+        thoughts: [],
+        toolCalls: [],
+        plan: null,
+      })
+      idx = messages.value.length - 1
+    } else if (messages.value[idx].status !== 'running') {
+      messages.value[idx].status = 'running'
+    }
+    running.value = true
+    error.value = null
+    runPanel.value = emptyRunPanel()
+    closeActiveStream()
+    activeClose = attachStream(ref, idx)
+    startMetrics(sessionId)
+    return true
+  }
+
   /** 停止指标轮询。 */
   function stopMetrics() {
     if (metricsTimer) {
@@ -171,18 +327,34 @@ export const useChatStore = defineStore('chat', () => {
 
   /**
    * 收尾后从后端历史补齐各消息的文件检查点 ID。
-   * SSE 不携带检查点信息，靠 content 对齐历史记录补齐（含确认续跑导致的历史多一条的场景）。
+   *
+   * <p>对齐主键是 ts：前端 submit 时生成的 userTs/assistantTs 会随 extra 下传，
+   * 后端落盘直接复用同一字符串，因此内存消息的 ts 与历史记录的 ts 严格相等。</p>
+   *
+   * <p>不再以 content 作为主键：同一会话里两次回答可能逐字相同（重跑同一问题、
+   * 复述类提问），按内容反查会把后一轮的检查点挂到前一轮消息上，
+   * 用户点回溯会撤销错的文件。content 只在历史记录缺 ts（旧数据）时兜底。</p>
    */
   async function syncCheckpointIds(sessionId: string) {
     const ws = useWorkspaceStore()
-    const workspaceId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
+    const session = sessions.value.find((s) => s.id === sessionId)
+    const workspaceId =
+      session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || ''
     try {
       const snap = await chatApi.history({ sessionId, userId: userId(), workspaceId })
       const histAssist = (snap.messages ?? []).filter((m) => m.role === 'assistant' && m.checkpointIds?.length)
       if (!histAssist.length) return
+      const byTs = new Map<string, string[]>()
+      for (const h of histAssist) {
+        if (h.ts) byTs.set(h.ts, h.checkpointIds as string[])
+      }
       const memAssist = messages.value.filter((m) => m.role === 'assistant' && !m.checkpointIds?.length)
-      for (let i = memAssist.length - 1; i >= 0; i--) {
-        const m = memAssist[i]
+      for (const m of memAssist) {
+        const hit = m.ts ? byTs.get(m.ts) : undefined
+        if (hit?.length) {
+          m.checkpointIds = hit
+          continue
+        }
         if (!m.content) continue
         const rec = [...histAssist].reverse().find((h) => h.content === m.content)
         if (rec?.checkpointIds?.length) m.checkpointIds = rec.checkpointIds
@@ -308,8 +480,12 @@ export const useChatStore = defineStore('chat', () => {
   /** 加载会话历史（选择会话时）。历史端点仅依赖 sessionId，workspaceId 为空也尝试加载。 */
   async function loadHistory(id: string) {
     const ws = useWorkspaceStore()
-    const workspaceId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
-    closeActiveStream()
+    // 会话绑定空间优先，与 submit 取值口径保持一致
+    const session = sessions.value.find((s) => s.id === id)
+    const workspaceId =
+      session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || ''
+    // 切会话必须连带复位运行态：只关流不复位会让 running 单例永久残留
+    detachRun()
     currentSessionId.value = id
     try {
       const snap = await chatApi.history({ sessionId: id, userId: userId(), workspaceId })
@@ -329,22 +505,28 @@ export const useChatStore = defineStore('chat', () => {
       messages.value = []
     }
     error.value = null
+    // 该会话可能仍在执行（切走再切回 / 页面刷新）：接管事件流，否则看不到后续输出
+    await resumeLiveRun(id)
   }
 
   function ensureSession(): string {
+    const ws = useWorkspaceStore()
+    const curWsId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
     if (currentSessionId.value && sessionExists(currentSessionId.value)) {
       return currentSessionId.value
     }
-    // 复用已有的未使用新会话（与 newSession 的「只存留一个新会话」约束一致）
-    const pending = sessions.value.find((s) => s.title === '新会话')
+    // 复用已有的未使用新会话时，必须属于同一工作空间：
+    // 否则界面显示在 A、实际会在该新会话绑定的 B 里执行（改文件落到错误目录）
+    const pending = sessions.value.find(
+      (s) => s.title === '新会话' && (s.workspaceId ?? '') === curWsId,
+    )
     if (pending) {
       currentSessionId.value = pending.id
       messages.value = []
       error.value = null
       return pending.id
     }
-    const ws = useWorkspaceStore()
-    const workspaceId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
+    const workspaceId = curWsId
     const session: ChatSession = { id: uid(), title: '新会话', workspaceId, createdAt: Date.now() }
     sessions.value.unshift(session)
     currentSessionId.value = session.id
@@ -360,7 +542,7 @@ export const useChatStore = defineStore('chat', () => {
    * 只允许存留一个「同一绑定」下未使用的新会话。
    */
   async function newSession(workspaceId?: string) {
-    closeActiveStream()
+    detachRun()
     const effWs = workspaceId ?? ''
     // 只能存留一个同绑定下未使用的新会话：复用它而不是继续新建
     const pending = sessions.value.find((s) => s.title === '新会话' && (s.workspaceId ?? '') === effWs)
@@ -439,8 +621,55 @@ export const useChatStore = defineStore('chat', () => {
     await loadHistory(id)
   }
 
+  /**
+   * 切换「当前工作空间」的唯一安全入口（侧栏项目节点、设置面板等共用）。
+   *
+   * <p>硬约束：`workspace.current` 必须与当前会话绑定的工作空间保持一致。
+   * submit 以「会话绑定空间」为准发起执行，而界面上的文件区、权限标识、上传目标
+   * 都读 `workspace.current`。两者一旦背离，就会出现「界面显示在 B、实际在 A 改文件」。</p>
+   *
+   * <p>因此本方法不直接把 current 改掉，而是先判定当前会话能否跟随：</p>
+   * <ul>
+   *   <li>无会话 / 会话未绑定 → 直接切；</li>
+   *   <li>会话已绑定目标空间 → 直接切；</li>
+   *   <li>空的新会话绑定其他空间 → 一并改绑（后端只锁定已有对话记录的会话）；</li>
+   *   <li>已有对话记录且绑定其他空间 → 拒绝，current 保持不动。</li>
+   * </ul>
+   *
+   * @returns false 表示当前会话已锁定在其他工作空间，调用方应提示用户改用该项目下的「＋」新建会话
+   */
+  async function switchWorkspace(workspaceId: string): Promise<boolean> {
+    const ws = useWorkspaceStore()
+    const cur = currentSession.value
+    if (!cur || !cur.workspaceId || cur.workspaceId === workspaceId) {
+      ws.setCurrent(workspaceId)
+      return true
+    }
+    // 空的新会话还没有对话记录，可以跟随切空间（后端此时不会锁定）
+    if (messages.value.length === 0 && cur.title === '新会话') {
+      const prev = cur.workspaceId
+      cur.workspaceId = workspaceId
+      ws.setCurrent(workspaceId)
+      try {
+        const meta = await chatApi.updateSession({ sessionId: cur.id, userId: userId(), workspaceId })
+        if (meta.workspaceId && meta.workspaceId !== workspaceId) {
+          cur.workspaceId = prev
+          ws.setCurrent(prev)
+          return false
+        }
+        return true
+      } catch {
+        cur.workspaceId = prev
+        ws.setCurrent(prev)
+        return false
+      }
+    }
+    // 已有对话记录：不改 current，避免界面与执行空间错位
+    return false
+  }
+
   async function removeSession(id: string) {
-    closeActiveStream()
+    detachRun()
     try {
       await chatApi.destroy({ sessionId: id, userId: userId() })
     } catch {
@@ -480,30 +709,45 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  /** 提交用户输入（异步：POST 立即返回，事件经 SSE 驱动收尾）。 */
-  async function submit(content: string, extra?: Record<string, any>) {
+  /**
+   * 提交用户输入（异步：POST 立即返回，事件经 SSE 驱动收尾）。
+   *
+   * @param opts.silentUser 不把本次内容渲染成用户气泡。
+   *   用于「拒绝危险操作」这类由界面代发的语义消息：它不是用户说过的话，
+   *   显示出来会让用户看到一条自己从未输入的消息，还会被拿去推导会话标题。
+   */
+  async function submit(content: string, extra?: Record<string, any>, opts?: { silentUser?: boolean }) {
     const ws = useWorkspaceStore()
+    const curWsId = ws.current?.workspaceId ?? ws.workspaces[0]?.workspaceId ?? ''
     const sessionId = ensureSession()
     const session = sessions.value.find((s) => s.id === sessionId)
-    // 会话绑定的工作空间优先（Composer 切换后即绑定），否则回退当前工作空间/默认
-    const workspaceId =
-      session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || ''
-    if (session && (session.title === '新会话' || session.title === '对话')) {
+    // 会话绑定的工作空间优先（Composer 切换后即绑定），否则回退当前工作空间/默认。
+    // 但还没有任何对话的新会话必须跟随当前空间：否则会出现「界面显示在 A、
+    // 实际在会话残留绑定的 B 里改文件」——所见即所得，以 current 为准。
+    let workspaceId = session?.workspaceId || curWsId
+    const started = messages.value.some((m) => m.role === 'user')
+    if (session && !started && curWsId && session.workspaceId !== curWsId) {
+      session.workspaceId = curWsId
+      workspaceId = curWsId
+    }
+    if (!opts?.silentUser && session && (session.title === '新会话' || session.title === '对话')) {
       session.title = deriveTitle(content)
     }
 
     // 复用同一份 ts 字符串（同时作为后端落盘的消息定位键，保证前后端一致，回退可命中）
     const userTs = new Date().toISOString()
-    messages.value.push({
-      id: uid(),
-      role: 'user',
-      content,
-      ts: userTs,
-      status: 'done',
-      thoughts: [],
-      toolCalls: [],
-      plan: null,
-    })
+    if (!opts?.silentUser) {
+      messages.value.push({
+        id: uid(),
+        role: 'user',
+        content,
+        ts: userTs,
+        status: 'done',
+        thoughts: [],
+        toolCalls: [],
+        plan: null,
+      })
+    }
 
     // 发送前探活：无可用模型端点时内联拦截，不进入 SSE/POST
     const gateMsg = await sendGate()
@@ -535,9 +779,9 @@ export const useChatStore = defineStore('chat', () => {
     }
     messages.value.push(assistant)
 
+    closeActiveStream()
     running.value = true
     error.value = null
-    closeActiveStream()
     // 新一轮运行：重置执行面板（悬浮于对话框上方，不混入回复正文）
     runPanel.value = emptyRunPanel()
 
@@ -553,46 +797,13 @@ export const useChatStore = defineStore('chat', () => {
      * 若直接改原始对象，属性值虽然变了，却不会触发依赖通知，界面会停在「空气泡」不刷新。
      */
     const assistantIndex = messages.value.length - 1
-    const liveItem = (): ChatItem | null => messages.value[assistantIndex] ?? null
-
-    activeClose = connectSse(ref, {
-      onEvent: (e) => {
-        const item = liveItem()
-        if (item) applyEvent(item, e)
-        if (e.type === 'stop' || e.type === 'error') {
-          running.value = false
-          // 收尾补拉一次最终指标（轮次/步骤/消耗），保证面板停留在真实终态
-          refreshMetrics(sessionId)
-          stopMetrics()
-          // 从后端历史补齐本轮产生的文件检查点，使刚完成的回复立即可回溯
-          syncCheckpointIds(sessionId)
-          if (activeClose) {
-            activeClose()
-            activeClose = null
-          }
-        }
-      },
-      onError: (m) => {
-        // 连接失败直接落在消息内提示，避免只出现在全局（无渲染）里
-        const item = liveItem()
-        if (item) {
-          item.status = 'error'
-          item.error = m
-        }
-        error.value = m
-        running.value = false
-        // 收尾：标记执行面板终态，避免错误后悬浮面板永久残留「执行中」
-        runPanel.value.done = true
-        runPanel.value.phase = '出错'
-        stopMetrics()
-      },
-    })
+    activeClose = attachStream(ref, assistantIndex)
 
     startMetrics(sessionId)
     try {
       // 带上用户在模型选择器里选定的端点，否则后端固定走主端点、界面选择形同虚设
       const modelStore = useModelStore()
-      await chatApi.submit({
+      const res = await chatApi.submit({
         sessionId,
         userId: ref.userId,
         workspaceId: ref.workspaceId,
@@ -602,9 +813,25 @@ export const useChatStore = defineStore('chat', () => {
         extra: { ...extra, userTs, assistantTs },
         modelId: modelStore.selectedId,
       })
+      // 后端拒绝（会话正在运行）：本轮根本没开始，必须把乐观渲染的消息撤回，
+      // 否则界面留一条「已发送」而历史里没有它，刷新即消失。
+      if (res && res.accepted === false) {
+        const msg = res.error || '会话正在运行中，请等待完成或先停止当前任务'
+        messages.value.splice(assistantIndex, 1) // 先摘掉占位的 assistant
+        if (messages.value[messages.value.length - 1]?.role === 'user') {
+          messages.value.pop()
+        }
+        error.value = msg
+        running.value = false
+        runPanel.value.done = true
+        runPanel.value.phase = '出错'
+        stopMetrics()
+        closeActiveStream()
+        return
+      }
       // 后端接受即返回；最终结果由 stop/error 事件驱动
     } catch (e) {
-      const item = liveItem()
+      const item = messages.value[assistantIndex]
       if (item) {
         item.status = 'error'
         item.error = (e as Error).message
@@ -623,9 +850,13 @@ export const useChatStore = defineStore('chat', () => {
   async function cancel() {
     const ws = useWorkspaceStore()
     const sessionId = currentSessionId.value
-    if (sessionId && ws.current) {
+    if (sessionId) {
+      // 与 submit 同一取值口径：会话绑定空间优先，避免传了另一个空间导致后端定位错会话
+      const session = sessions.value.find((s) => s.id === sessionId)
+      const workspaceId =
+        session?.workspaceId || ws.current?.workspaceId || ws.workspaces[0]?.workspaceId || ''
       try {
-        await chatApi.cancel({ sessionId, userId: userId(), workspaceId: ws.current.workspaceId })
+        await chatApi.cancel({ sessionId, userId: userId(), workspaceId })
       } catch {
         // 忽略取消失败
       }
@@ -690,7 +921,10 @@ export const useChatStore = defineStore('chat', () => {
     if (allow) {
       resumeAfterConfirm(item, op)
     } else {
-      submit('用户拒绝了该操作，请调整方案或说明。')
+      // 拒绝：不再伪造一条用户消息（原来推送「用户拒绝了该操作，请调整方案…」，
+      // 用户会在界面上看到自己从未输入的整句话，还会被拿去推导会话标题）。
+      // 用短否定文本走静默提交，后端 isNegation 能识别为「取消本轮」。
+      submit('取消', undefined, { silentUser: true })
     }
   }
 
@@ -1026,6 +1260,7 @@ export const useChatStore = defineStore('chat', () => {
     newSession,
     renameSession,
     setSessionWorkspace,
+    switchWorkspace,
     selectSession,
     removeSession,
     submit,

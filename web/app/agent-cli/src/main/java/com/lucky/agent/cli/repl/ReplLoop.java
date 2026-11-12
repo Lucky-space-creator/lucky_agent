@@ -88,39 +88,60 @@ public final class ReplLoop {
             }
             editor.addHistory(trimmed);
 
-            // ① slash 命令
-            if (trimmed.charAt(0) == SlashCommandRegistry.PREFIX) {
-                if (registry.dispatch(trimmed, ctx) == SlashCommandRegistry.Outcome.EXIT) {
+            // 单条输入的任何异常都不应带走会话：`!` 命令、`@` 文件展开、模型往返、
+            // 自定义命令都可能抛（IO、子进程、网络）。此前只有 readLine 有 try，
+            // 一次 IOException 就会让整个 REPL 直接退出。
+            try {
+                if (handleLine(trimmed)) {
                     break;
                 }
-                // 自定义命令（commands/*.md）可能登记了一个待提交的提示词，分发后作为一轮运行
-                String pending = ctx.consumePendingPrompt();
-                if (pending != null && !pending.isBlank()) {
-                    runTurn(pending);
-                }
-                continue;
+            } catch (Exception e) {
+                String msg = e.getMessage() == null || e.getMessage().isBlank()
+                        ? e.getClass().getSimpleName() : e.getMessage();
+                out.println(out.theme().red("本轮处理失败：" + msg));
             }
-            // ② ! 直执行（高危确认与 Agent 路径共用同一 ApprovalHandler）
-            if (ShellPrefix.matches(trimmed)) {
-                ShellPrefix.run(trimmed, holder.workspaceId(), ctx.services().files(),
-                        approval, ctx.services().permissions(), out);
-                continue;
-            }
-            // ③ @ 文件引用
-            String content = trimmed;
-            if (FileReference.matches(trimmed)) {
-                String expanded = FileReference.expand(trimmed, holder.workspaceId(),
-                        ctx.services().files(), out);
-                if (expanded == null) {
-                    continue;
-                }
-                content = expanded;
-            }
-            // ④ 提示词
-            runTurn(content);
         }
         out.println(out.theme().dim("再见。"));
         return CliExitCode.SUCCESS;
+    }
+
+    /**
+     * 处理一条已去空白的输入。
+     *
+     * @return {@code true} 表示应退出 REPL
+     */
+    private boolean handleLine(String trimmed) {
+        // ① slash 命令
+        if (trimmed.charAt(0) == SlashCommandRegistry.PREFIX) {
+            if (registry.dispatch(trimmed, ctx) == SlashCommandRegistry.Outcome.EXIT) {
+                return true;
+            }
+            // 自定义命令（commands/*.md）可能登记了一个待提交的提示词，分发后作为一轮运行
+            String pending = ctx.consumePendingPrompt();
+            if (pending != null && !pending.isBlank()) {
+                runTurn(pending);
+            }
+            return false;
+        }
+        // ② ! 直执行（高危确认与 Agent 路径共用同一 ApprovalHandler）
+        if (ShellPrefix.matches(trimmed)) {
+            ShellPrefix.run(trimmed, holder.workspaceId(), ctx.services().files(),
+                    approval, ctx.services().permissions(), out);
+            return false;
+        }
+        // ③ @ 文件引用
+        String content = trimmed;
+        if (FileReference.matches(trimmed)) {
+            String expanded = FileReference.expand(trimmed, holder.workspaceId(),
+                    ctx.services().files(), out);
+            if (expanded == null) {
+                return false;
+            }
+            content = expanded;
+        }
+        // ④ 提示词
+        runTurn(content);
+        return false;
     }
 
     // ------------------------------------------------------------------ 一轮运行

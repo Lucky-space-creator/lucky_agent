@@ -23,17 +23,17 @@ export interface WorkflowSseHandlers {
  *
  * <p><b>与 {@link connectSse}（会话流）的两点关键差别：</b></p>
  * <ol>
- *   <li><b>不会自动关闭。</b>后端 `WorkflowController#events` 的 Flux 由
- *       `mergeWith(Flux.interval(15s))` 维持，工作流结束后连接仍保持打开，
- *       因此终端事件（WORKFLOW_COMPLETED / WORKFLOW_FAILED）到达后
- *       <b>由调用方</b>在拿到最终快照后再关闭 —— 否则可能丢掉紧跟在
- *       终端事件之后的落盘状态。</li>
+ *   <li><b>收到终态事件即主动关闭。</b>后端 `WorkflowController#events` 在
+ *       WORKFLOW_COMPLETED / WORKFLOW_FAILED 上通过 `takeUntil` 主动 complete 连接
+ *       （引擎在发事件前已 persistProgress，落盘状态不会丢）。若不在这里置 closed，
+ *       EventSource 会因服务端正常关闭触发 error，白重连 3 次后才降级轮询，
+ *       界面还会闪一次「事件流中断」的误报。</li>
  *   <li><b>不保证事件完整。</b>后端用的是 `multicast().onBackpressureBuffer()`，
  *       订阅之前发布的事件不会补发。ASYNC 触发到浏览器建立连接之间存在
  *       真实窗口，故调用方必须用实例快照做对齐（见 `useWorkflowRun`）。</li>
  * </ol>
  *
- * <p>连接中断时有限重连（最多 3 次、指数退避），重连成功后只会收到
+ * <p>连接意外中断时仍有限重连（最多 3 次、指数退避），重连成功后只会收到
  * 「此刻之后」的事件 —— 这正是必须配合快照兜底的原因。</p>
  *
  * @returns 关闭函数（幂等）
@@ -45,6 +45,9 @@ export function connectWorkflowSse(instanceId: string, handlers: WorkflowSseHand
   let closeTimer: ReturnType<typeof setTimeout> | null = null
 
   const url = `/api/workflows/instances/${encodeURIComponent(instanceId)}/events`
+
+  /** 终态事件：工作流已结束，后端随后会 complete 连接。 */
+  const TERMINAL: WorkflowEventType[] = ['WORKFLOW_COMPLETED', 'WORKFLOW_FAILED']
 
   const cleanup = () => {
     if (es) {
@@ -69,7 +72,13 @@ export function connectWorkflowSse(instanceId: string, handlers: WorkflowSseHand
 
     const onData = (raw: string) => {
       try {
-        handlers.onEvent(JSON.parse(raw) as WorkflowEvent)
+        const event = JSON.parse(raw) as WorkflowEvent
+        // 先交给调用方（它要在终态后立即拉最终快照），再收口连接
+        handlers.onEvent(event)
+        if (TERMINAL.includes(event.type)) {
+          closed = true
+          cleanup()
+        }
       } catch {
         // 忽略无法解析的帧（心跳注释帧不会走 listener，无需处理）
       }

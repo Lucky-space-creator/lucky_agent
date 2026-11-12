@@ -11,6 +11,7 @@ import com.lucky.agent.common.dto.AgentEvent;
 import com.lucky.agent.common.dto.SessionRef;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -20,6 +21,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -85,9 +87,41 @@ class CliTurnLoopTest {
         verify(executor, times(1)).execute(any(), any(), any());
     }
 
+    @Test
+    @DisplayName("条件选择续跑后清空「已询问」指纹：新阶段再问同一操作不得被误判为重复（C5 回归）")
+    void optionContinuationClearsAskedOps() {
+        CliTurnExecutor executor = mock(CliTurnExecutor.class);
+        // 序列：ask 同一操作 → 该阶段结束并抛出选项 → 选完后续跑 → 新阶段又询问同一操作
+        when(executor.execute(any(), any(), any())).thenReturn(
+                askOutcome("WRITE", "same.txt"),
+                optionsOutcome(),
+                askOutcome("WRITE", "same.txt"),
+                plainOutcome());
+
+        CliTurnLoop loop = new CliTurnLoop(executor, autoApprove(), out, null);
+        CliTurnLoop.Result r = loop.run(REF, "开始", Map.of(), (q, opts) -> "选项A");
+
+        assertEquals(4, r.steps(), "选项续跑应推进到新一轮，而不是在第 3 步被「重复询问」中止");
+        assertFalse(text().contains("重复询问"), "阶段已变，旧指纹不得继续阻断：" + text());
+
+        // 选项续跑必须退回基础参数：确认键只对紧跟其后的那次提交有效
+        ArgumentCaptor<Map<String, Object>> extra = ArgumentCaptor.forClass(Map.class);
+        verify(executor, times(4)).execute(any(), any(), extra.capture());
+        assertFalse(extra.getAllValues().get(2).containsKey("confirm"),
+                "条件选择续跑不得携带上一轮的 confirm（内核会把它当成再次确认而忽略新目标）");
+    }
+
     /** 自动放行的裁决器：让 ASK 分支直接通过，聚焦循环控制本身。 */
     private ApprovalHandler autoApprove() {
         return new ApprovalHandler(out, null, null, null, true);
+    }
+
+    private static TurnOutcome optionsOutcome() {
+        TurnCapture cap = new TurnCapture();
+        cap.add(AgentEvent.options("sess-1", "选哪个？",
+                java.util.List.of(new AgentEvent.OptionItem("1", "选项A", null, true)), 30L));
+        cap.add(AgentEvent.stop("sess-1", "options", "等待选择"));
+        return new TurnOutcome(null, cap, null, false, 1L);
     }
 
     private static TurnOutcome askOutcome(String opType, String path) {

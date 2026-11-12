@@ -36,7 +36,8 @@ export const chatApi = {
     /** 用户选定的模型端点 id（空则后端回退主端点）。 */
     modelId?: string | null
   }) {
-    return http.post<{ sessionId: string; accepted: boolean }>('/api/chat/messages', input)
+    // accepted=false 表示后端拒绝本次提交（会话正在运行），error 为可直接展示的原因。
+    return http.post<{ sessionId: string; accepted: boolean; error?: string }>('/api/chat/messages', input)
   },
   snapshot(session: { sessionId: string; userId: string; workspaceId: string }) {
     const q = new URLSearchParams(session).toString()
@@ -289,9 +290,9 @@ export const workflowApi = {
   /**
    * 订阅实例执行事件流（SSE），返回幂等关闭函数。
    *
-   * <p>用法约束（详见 {@link connectWorkflowSse}）：事件流不重放、不自动关闭，
-   * 必须配合 {@link instance} 快照对齐，并在终态后由调用方关闭。
-   * 直接使用请优先走 {@code useWorkflowRun}，它已封装这套时序。</p>
+   * <p>用法约束（详见 {@link connectWorkflowSse}）：事件流不重放；收到终态事件后
+   * 连接由订阅层主动关闭（后端也会 complete）。调用方仍必须配合 {@link instance}
+   * 快照对齐，因为订阅建立之前的事件不会补发。</p>
    */
   events: (instanceId: string, handlers: WorkflowSseHandlers) =>
     connectWorkflowSse(instanceId, handlers),

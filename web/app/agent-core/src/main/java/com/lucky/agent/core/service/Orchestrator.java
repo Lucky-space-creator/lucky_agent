@@ -34,6 +34,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -499,6 +500,22 @@ public class Orchestrator implements AgentOrchestrator {
         return Optional.of(EngineRunResult.of(sessionId, Phase.ACT, summary, 0, null, reason));
     }
 
+    /**
+     * 粗略判断 PLAN 阶段的输出是否在「尝试产出结构化计划」。
+     *
+     * <p>用于区分两种都解析不出 Plan 的情形：一种是模型按阶段指令判定了简单任务、直接给结论
+     * （不应重规划），另一种是真在写计划但 JSON 坏了（值得重规划一次）。判据取结构特征而非
+     * 精确解析，宁可漏判重规划，也不要把普通对话都当成计划损坏。</p>
+     */
+    private static boolean looksLikePlanAttempt(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return false;
+        }
+        String s = raw.toLowerCase(Locale.ROOT);
+        return s.contains("{") || s.contains("\"steps\"") || s.contains("\"subagents\"")
+                || s.contains("canautoexecute");
+    }
+
     /** B: LLM 分析（PLAN），非法计划重规划一次；返回「步骤 + 子代理声明」两类决策。 */
     private Analysis analyze(ConversationCtx ctx, String goal, AgentEventPublisher publisher) {
         EngineRunResult planResult = engine.run(withSuppress(ctx, Phase.PLAN, goal), Phase.PLAN, goal).block();
@@ -513,9 +530,19 @@ public class Orchestrator implements AgentOrchestrator {
         if (plan != null && planValidator.isValid(plan)) {
             return new Analysis(plan, subagents, raw);
         }
-        // 计划非法（或无步骤）但声明了子代理：子代理仍是有效决策，优先保留
+        // 非法计划（或无步骤）但声明了子代理：子代理仍是有效决策，优先保留
         if (!subagents.isEmpty()) {
             return new Analysis(plan, subagents, raw);
+        }
+        // 「没写计划」≠「计划写坏了」：PLAN 阶段指令明确允许简单任务「不产出步骤列表，直接输出
+        // 结构化总结」，此时 PlanGenerator 解析为空是<b>预期结果</b>。此前一律按「无法解析计划」
+        // 触发重规划，导致每一次普通对话都必然多跑一轮完整 PLAN：
+        //   ① 实测每次多耗约 12k input token（「你好」这类请求总消耗被抬到 3 万+）；
+        //   ② PLAN 阶段与 ACT 共用同一引擎（带全套工具），重规划会把上一轮已执行的工具
+        //      再执行一遍 —— 读操作只是浪费，写/删就是重复副作用。
+        // 因此只有「看起来确实在写计划」的文本才值得重规划。
+        if (!looksLikePlanAttempt(raw)) {
+            return new Analysis(null, List.of(), raw);
         }
         // 非法计划：重规划一次（R3 闭环），仍失败返回空降级为「无需拆分」
         // 先发一条明确的进度：重规划会再触发一次引擎 run，而引擎自己只会发「开始PLAN阶段」——

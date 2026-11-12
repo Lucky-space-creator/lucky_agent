@@ -20,6 +20,14 @@ const EVENT_TYPES: AgentEventType[] = [
 export interface SseHandlers {
   onEvent: (event: AgentEvent) => void
   onError?: (message: string) => void
+  /**
+   * 断线后重连成功时回调。
+   *
+   * <p>后端事件流是多播无回放的（`Sinks.many().multicast()`），断线期间产生的事件
+   * 无法补发。重连成功后调用方应主动用快照/历史校准真实状态，否则界面会永久停在
+   * 「执行中」或漏掉本轮尾巴。</p>
+   */
+  onReconnect?: () => void
 }
 
 /**
@@ -76,7 +84,10 @@ export function connectSse(session: SessionRef, handlers: SseHandlers): () => vo
     }
 
     es.onopen = () => {
+      // retries > 0 说明这是断线后的重连：期间的事件已永久丢失，通知调用方校准
+      const reconnected = retries > 0
       retries = 0
+      if (reconnected) handlers.onReconnect?.()
     }
 
     es.onerror = () => {

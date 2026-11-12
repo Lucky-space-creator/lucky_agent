@@ -139,6 +139,23 @@ public class ConversationManager {
      * @param input 用户输入
      * @return 运行结果
      */
+    /**
+     * 会话当前是否有一轮运行正在进行。
+     *
+     * <p>供入口层在<b>提交前</b>给出明确拒绝：{@link #submit} 是异步的，运行中重复提交会被
+     * 内部的并发闸拦下并返回 ERROR 结果，但 Web 入口是 fire-and-forget，调用方只看到
+     * 「已接受」——用户的消息就此静默丢失（前端仍渲染了自己的气泡，刷新后消失）。
+     * 这里把判定暴露出来，让入口能同步告知「正在运行」。</p>
+     */
+    public boolean isRunning(SessionRef ref) {
+        if (ref == null || ref.sessionId() == null || ref.sessionId().isBlank()) {
+            return false;
+        }
+        return stateManager.find(ref.sessionId())
+                .map(ConversationStateManager.SessionState::running)
+                .orElse(false);
+    }
+
     public Mono<RunResult> submit(SessionRef ref, UserInput input) {
         return Mono.fromCallable(() -> execute(ref, input))
                 .subscribeOn(Schedulers.boundedElastic());

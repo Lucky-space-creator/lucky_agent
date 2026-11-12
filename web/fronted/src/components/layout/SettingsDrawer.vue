@@ -5,6 +5,7 @@ import Badge from '@/components/common/Badge.vue'
 import { modelApi, permissionApi, workspaceApi, systemApi, ruleApi, presetApi } from '@/api'
 import type { ModelConfig, ModelUsage, PermissionRule, ProbeResult, RuleItem, AgentPresetBundle } from '@/api/types'
 import { useModelStore } from '@/stores/model'
+import { useChatStore } from '@/stores/chat'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useThemeStore } from '@/stores/theme'
 import { useToastStore } from '@/stores/toast'
@@ -14,6 +15,7 @@ const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 
 const modelStore = useModelStore()
+const chat = useChatStore()
 const workspace = useWorkspaceStore()
 const theme = useThemeStore()
 const toast = useToastStore()
@@ -83,9 +85,19 @@ async function doCreate() {
   }
 }
 
+/**
+ * 切换当前工作空间。
+ *
+ * <p>必须走 chat.switchWorkspace：当前会话若已锁定在其他工作空间，直接改 current
+ * 会让「界面显示的空间」与「消息实际执行的空间」背离（文件改到错误目录）。
+ * 被拒绝时保持原空间不变并提示用户。</p>
+ */
 async function selectWorkspace(id: string) {
-  workspace.setCurrent(id)
+  const ok = await chat.switchWorkspace(id)
   await workspace.load()
+  if (!ok) {
+    toast.info('当前会话已绑定其它工作空间，切换未生效；如需在该空间下工作，请在侧栏对应项目下新建会话')
+  }
 }
 
 async function removeWorkspace(id: string, name: string) {

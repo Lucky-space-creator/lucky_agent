@@ -63,6 +63,14 @@ public class ChatController {
         if (request.modelId() != null && !request.modelId().isBlank()) {
             extra.put(MODEL_ID_KEY, request.modelId());
         }
+        // 运行中重复提交：必须显式拒绝，不能静默丢弃。
+        // 内核 execute() 内有并发闸，但它是异步返回 ERROR 结果，而这里是 fire-and-forget ——
+        // 结果没人消费，前端只看到 accepted:true，用户消息既不执行也不进历史（多标签页/
+        // 刷新后重发最容易踩到）。提交前同步判一次，把「正在运行」如实告诉调用方。
+        if (conversationManager.isRunning(ref)) {
+            return Mono.just(Map.of("sessionId", sessionId, "accepted", false,
+                    "error", "会话正在运行中，请等待完成或先停止当前任务"));
+        }
         // fire-and-forget：运行经 publisher + SSE 推送，POST 立即返回。
         // 台账 #44：此前 .subscribe() 无错误消费者 —— 后台提交失败（模型未配置、工作空间
         // 失效等）被 Reactor 按 onErrorDropped 静默吞掉，前端拿着 accepted:true 干等。

@@ -310,12 +310,24 @@ public final class ApprovalHandler {
         return (opType == null || opType.isBlank() ? "?" : opType) + " " + (path == null ? "" : path);
     }
 
-    /** 会话允许键：包含操作类型 + 归一化路径（大小写、分隔符归一）。 */
+    /**
+     * 文件系统是否大小写不敏感（Windows / macOS 默认不敏感，Linux 敏感）。
+     *
+     * <p>决定会话允许键是否要归一化大小写：在 Linux 上 {@code Foo.txt} 与 {@code foo.txt}
+     * 是两个不同文件，若把两者归一成同一个键，批准了前者就等于顺带放行了后者。</p>
+     */
+    private static final boolean CASE_INSENSITIVE_FS =
+            System.getProperty("os.name", "").toLowerCase(Locale.ROOT).matches(".*(win|mac).*");
+
+    /** 会话允许键：包含操作类型 + 归一化路径（分隔符；大小写仅在大小写不敏感的文件系统上归一）。 */
     private static String sessionKey(String opType, String path) {
         if (opType == null || opType.isBlank()) {
             return null;
         }
-        String normalized = path == null ? "" : path.replace('\\', '/').toLowerCase(Locale.ROOT).trim();
+        String normalized = path == null ? "" : path.replace('\\', '/').trim();
+        if (CASE_INSENSITIVE_FS) {
+            normalized = normalized.toLowerCase(Locale.ROOT);
+        }
         return opType.toUpperCase(Locale.ROOT) + "\u0000" + normalized;
     }
 

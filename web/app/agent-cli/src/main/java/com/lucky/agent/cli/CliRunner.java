@@ -189,7 +189,9 @@ public class CliRunner {
 
             SessionRef ref;
             try {
-                ref = resolveSession(options, workspace, out);
+                // 传「是否显式指定过工作空间」而不是只看命令行 -w：
+                // 项目配置/环境变量同样是一种明确指定，只看 options.workspace 会漏提示绑定冲突
+                ref = resolveSession(options, workspace, workspaceSelector != null, out);
             } catch (CliUsageException e) {
                 errSink.println(errSink.theme().red(e.getMessage()));
                 return CliExitCode.USAGE;
@@ -412,7 +414,8 @@ public class CliRunner {
         }
     }
 
-    private SessionRef resolveSession(CliOptions options, Workspace workspace, OutputSink out) {
+    private SessionRef resolveSession(CliOptions options, Workspace workspace,
+                                      boolean workspaceExplicit, OutputSink out) {
         if (options.resume != null && !options.resume.isBlank()) {
             // -r 与 -c 同时给出时，此前会静默以 -r 为准，用户无从得知自己的 -c 被忽略
             if (options.continueLast) {
@@ -425,12 +428,12 @@ public class CliRunner {
                         : "未找到该会话（用 --list-sessions 查看序号与 ID）。";
                 throw new CliUsageException("恢复会话失败：" + hint);
             }
-            return resumed(found.get(), options, workspace, out, "已恢复会话 ");
+            return resumed(found.get(), workspaceExplicit, workspace, out, "已恢复会话 ");
         }
         if (options.continueLast) {
             Optional<SessionRepository.SessionMeta> latest = sessions.latest(LOCAL_USER);
             if (latest.isPresent()) {
-                return resumed(latest.get(), options, workspace, out, "已继续最近会话 ");
+                return resumed(latest.get(), workspaceExplicit, workspace, out, "已继续最近会话 ");
             }
             out.println(out.theme().dim("没有可继续的历史会话，已为你开启新会话。"));
         }
@@ -439,13 +442,17 @@ public class CliRunner {
         return new SessionRef(UUID.randomUUID().toString(), LOCAL_USER, workspace.workspaceId());
     }
 
-    /** 组装「恢复/继续」的 SessionRef，并处理工作空间绑定冲突。 */
-    private SessionRef resumed(SessionRepository.SessionMeta meta, CliOptions options,
+    /**
+     * 组装「恢复/继续」的 SessionRef，并处理工作空间绑定冲突。
+     *
+     * @param workspaceExplicit 用户是否明确指定过工作空间（命令行 / 项目配置 / 环境变量任一来源）。
+     *                          只有「明确指定过且与会话绑定不符」才提示，避免默认启动时刷屏。
+     */
+    private SessionRef resumed(SessionRepository.SessionMeta meta, boolean workspaceExplicit,
                                Workspace requested, OutputSink out, String prefix) {
         String boundWs = meta.workspaceId() == null || meta.workspaceId().isBlank()
                 ? requested.workspaceId() : meta.workspaceId();
-        if (options.workspace != null && !options.workspace.isBlank()
-                && !boundWs.equals(requested.workspaceId())) {
+        if (workspaceExplicit && !boundWs.equals(requested.workspaceId())) {
             out.println(out.theme().yellow("注意：该会话已绑定到另一个工作空间，本次以会话自身的绑定为准"
                     + "（会话一旦有对话记录便不允许切换工作空间）。"));
         }

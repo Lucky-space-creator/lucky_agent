@@ -201,8 +201,17 @@ public final class SlashCommandRegistry {
         }
         List<String> args = parts.length <= 1
                 ? List.of() : List.of(Arrays.copyOfRange(parts, 1, parts.length));
-        boolean exit = cmd.run(ctx, args);
-        return exit ? Outcome.EXIT : Outcome.CONTINUE;
+        // 单个命令抛异常不能带走整个 REPL：命令里常做文件/网络/子进程操作，
+        // 一次 IOException 就退出会话对用户来说是完全不可接受的。
+        try {
+            boolean exit = cmd.run(ctx, args);
+            return exit ? Outcome.EXIT : Outcome.CONTINUE;
+        } catch (Exception e) {
+            String msg = e.getMessage() == null || e.getMessage().isBlank()
+                    ? e.getClass().getSimpleName() : e.getMessage();
+            ctx.out().println(ctx.out().theme().red("命令 /" + name + " 执行失败：" + msg));
+            return Outcome.CONTINUE;
+        }
     }
 
     // ================================================================== 内置命令

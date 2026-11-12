@@ -7,11 +7,13 @@ import WorkspaceCreateModal from './WorkspaceCreateModal.vue'
 import { useChatStore, type ChatSession } from '@/stores/chat'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useModelStore } from '@/stores/model'
+import { useToastStore } from '@/stores/toast'
 
 const router = useRouter()
 const chat = useChatStore()
 const workspace = useWorkspaceStore()
 const model = useModelStore()
+const toast = useToastStore()
 
 const settingsOpen = ref(false)
 /** 新建工作空间小窗（项目分组「＋」直接弹出，含目录选择）。 */
@@ -110,10 +112,28 @@ function newChat() {
 /** 展开显示其会话子列表的工作空间（key=workspaceId）。 */
 const expandedWs = ref<Record<string, boolean>>({})
 
-/** 点击项目：展开/收起其会话子列表，并同步切换当前工作空间。 */
+/**
+ * 点击项目节点：仅展开/收起其会话子列表。
+ *
+ * <p>刻意不在这里切换 `workspace.current`。切空间必须与当前会话的绑定保持一致：
+ * submit 以「会话绑定的 workspaceId」为准发起执行，而文件区/权限标识读的是 current，
+ * 两者一旦背离，就会出现「界面显示在项目 B、实际在项目 A 改文件」。
+ * 需要切换空间请用该节点右侧「＋」新建会话，或点开该项目下的既有会话。</p>
+ */
 function toggleWs(workspaceId: string) {
   expandedWs.value[workspaceId] = !expandedWs.value[workspaceId]
-  workspace.setCurrent(workspaceId)
+}
+
+/**
+ * 删除会话前二次确认。
+ *
+ * <p>后端删除会话是物理删除（`Files.deleteIfExists`），删完不可恢复，
+ * 侧栏原来的「×」点一下就直接删，误触即丢数据。</p>
+ */
+async function askRemoveSession(s: ChatSession) {
+  if (!confirm(`删除会话「${s.title}」？\n\n会话记录会被永久删除，无法恢复。`)) return
+  await chat.removeSession(s.id)
+  toast.success('会话已删除')
 }
 
 /** 某工作空间下的会话（按会话绑定的 workspaceId 过滤）。 */
@@ -270,7 +290,7 @@ onUnmounted(() => mq.removeEventListener('change', onMq))
                   @blur="commitRename"
                 />
                 <span v-else class="ellipsis tree-item__title" :title="'双击重命名'">{{ s.title }}</span>
-                <span class="tree-item__del" title="删除会话" @click.stop="chat.removeSession(s.id)"><Icon name="x" :size="11" /></span>
+                <span class="tree-item__del" title="删除会话" @click.stop="askRemoveSession(s)"><Icon name="x" :size="11" /></span>
               </button>
               <div v-if="wsSessions(w.workspaceId).length === 0" class="ws-node__empty text-3">
                 暂无会话，点击右侧「＋」新建
@@ -319,7 +339,7 @@ onUnmounted(() => mq.removeEventListener('change', onMq))
                 @blur="commitRename"
               />
               <span v-else class="ellipsis tree-item__title" :title="'双击重命名'">{{ s.title }}</span>
-              <span class="tree-item__del" title="删除会话" @click.stop="chat.removeSession(s.id)"><Icon name="x" :size="11" /></span>
+              <span class="tree-item__del" title="删除会话" @click.stop="askRemoveSession(s)"><Icon name="x" :size="11" /></span>
             </button>
           </template>
           <div v-if="filteredSessions.length === 0" class="tree-empty">暂无会话</div>

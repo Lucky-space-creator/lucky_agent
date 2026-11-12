@@ -222,10 +222,14 @@ public class ReactEngine implements Engine {
                             .messages(ThinkingConsistency.normalizeForThinkingMode(messages))
                             .toolSpecifications(tools)
                             .build();
-                    // 流式：整轮实时推送正文增量，工具请求在完成回调中返回；同步：整段返回后伪流式补齐
+                    // 流式：整轮实时推送正文增量，工具请求在完成回调中返回；同步：整段返回后伪流式补齐。
+                    // PLAN 阶段不推正文增量：该阶段的输出是「计划文本」，只被 Orchestrator 解析
+                    // （PlanGenerator）后丢弃，从不作为回答展示；推给前端会让用户看到同一答案
+                    // 重复 2~3 次（首轮计划 + 重规划 + ACT），CLI 与 Web 均复现。
+                    boolean emitDeltas = phase != Phase.PLAN;
                     outcome = streaming != null
-                            ? streamTurn(ctx, request, publisher, streaming, sync)
-                            : syncTurn(ctx, request, publisher, sync, "", true);
+                            ? streamTurn(ctx, request, publisher, streaming, sync, emitDeltas)
+                            : syncTurn(ctx, request, publisher, sync, "", true, emitDeltas);
                     ai = outcome.ai();
                 } catch (Exception e) {
                     throw new IllegalStateException("模型调用失败：" + e.getMessage(), e);
@@ -730,11 +734,13 @@ public class ReactEngine implements Engine {
      *
      * @param request 本轮请求（含当前上下文与工具集）
      * @param sync    同步回退模型（流式失败时同轮重试）
+     * @param emitDeltas 是否把正文增量推给前端；PLAN 阶段传 false（计划文本不对外展示）
      * @return 单轮结果（文本 + 思考 + AiMessage + 是否已流式）
      */
     private TurnOutcome streamTurn(ConversationCtx ctx, ChatRequest request,
                                    AgentEventPublisher publisher,
-                                   StreamingChatModel streaming, ChatModel sync) {
+                                   StreamingChatModel streaming, ChatModel sync,
+                                   boolean emitDeltas) {
         StringBuilder textBuf = new StringBuilder();
         StringBuilder thinkBuf = new StringBuilder();
         AtomicReference<AiMessage> aiRef = new AtomicReference<>();
@@ -765,7 +771,10 @@ public class ReactEngine implements Engine {
                     if (userCancelled.getAsBoolean()) {
                         return;
                     }
-                    publisher.publish(ctx.sessionId(), AgentEvent.contentDelta(ctx.sessionId(), partial.text()));
+                    // PLAN 阶段只累积正文供解析，不推给前端（见 execute 中 emitDeltas 注释）
+                    if (emitDeltas) {
+                        publisher.publish(ctx.sessionId(), AgentEvent.contentDelta(ctx.sessionId(), partial.text()));
+                    }
                 }
 
                 @Override
@@ -808,12 +817,12 @@ public class ReactEngine implements Engine {
         if (errorRef.get() != null) {
             log.warn("流式调用失败，降级同步：session={} error={}", ctx.sessionId(), errorRef.get().getMessage());
             // 已实时展示的思考/正文不重复推送（降级路径不再发布 thinking）
-            return syncTurn(ctx, request, publisher, sync, textBuf.toString(), false);
+            return syncTurn(ctx, request, publisher, sync, textBuf.toString(), false, emitDeltas);
         }
         AiMessage ai = aiRef.get();
         if (ai == null) {
             log.warn("流式调用无响应，降级同步：session={}", ctx.sessionId());
-            return syncTurn(ctx, request, publisher, sync, textBuf.toString(), false);
+            return syncTurn(ctx, request, publisher, sync, textBuf.toString(), false, emitDeltas);
         }
         // 收尾：把未到换行结尾的思考残量作为最后一个段落发布
         String thinkTail = thinkBuf.toString().trim();
@@ -823,7 +832,7 @@ public class ReactEngine implements Engine {
         String text = textBuf.length() > 0 ? textBuf.toString() : (ai.text() == null ? "" : ai.text());
         if (textBuf.isEmpty() && !text.isBlank()) {
             // 端点未下发增量（整段返回）：伪流式补齐，保证界面仍有逐字输出效果
-            streamChunked(ctx, text, publisher);
+            streamChunked(ctx, text, publisher, emitDeltas);
         }
         String thinking = thinkBuf.length() > 0 ? thinkBuf.toString() : thinkingOf(ai);
         // 思考链回传（必须补写，勿删）：推理模型在请求携带 tools 时要求历史所有轮 assistant 消息
@@ -848,23 +857,23 @@ public class ReactEngine implements Engine {
      */
     private TurnOutcome syncTurn(ConversationCtx ctx, ChatRequest request,
                                  AgentEventPublisher publisher, ChatModel sync, String alreadyShown,
-                                 boolean publishThinking) {
+                                 boolean publishThinking, boolean emitDeltas) {
         ChatResponse response = sync.chat(request);
         TokenUsage usage = response.tokenUsage();
         AiMessage ai = response.aiMessage();
         String full = ai.text() == null ? "" : ai.text();
         if (full.startsWith(alreadyShown) && full.length() > alreadyShown.length()) {
             // 已展示增量是同步文本前缀：仅补齐剩余，保证完整答案不被截断
-            streamChunked(ctx, full.substring(alreadyShown.length()), publisher);
+            streamChunked(ctx, full.substring(alreadyShown.length()), publisher, emitDeltas);
         } else if (alreadyShown.isEmpty() && !full.isBlank()) {
-            streamChunked(ctx, full, publisher);
+            streamChunked(ctx, full, publisher, emitDeltas);
         } else if (!full.isBlank()) {
             // P1-6 fix：已展示的增量与重试结果不一致（超时后重试文本通常不同）时，
             // 不能再静默丢文本（否则流式展示 ≠ 持久化内容）；先提示后完整输出，
             // 保证用户看到完整最终回答，且与落库结果一致
             publisher.publish(ctx.sessionId(), AgentEvent.progress(ctx.sessionId(),
                     "前序输出发生中断，正在重新生成完整回答…"));
-            streamChunked(ctx, full, publisher);
+            streamChunked(ctx, full, publisher, emitDeltas);
         }
         if (publishThinking) {
             String thinking = thinkingOf(ai);
@@ -879,14 +888,17 @@ public class ReactEngine implements Engine {
      * 伪流式补齐：将已生成的文本按小块切分，逐块发布 {@code CONTENT_DELTA} 事件，前端渲染出
      * 打字机效果。仅当端点不支持下发流式增量时使用（真实流式见 {@link #streamTurn}）。
      */
-    private String streamChunked(ConversationCtx ctx, String text, AgentEventPublisher publisher) {
+    private String streamChunked(ConversationCtx ctx, String text, AgentEventPublisher publisher,
+                                 boolean emitDeltas) {
         if (text == null || text.isEmpty()) {
             return text;
         }
         int chunk = 6;
         for (int i = 0; i < text.length(); i += chunk) {
             String delta = text.substring(i, Math.min(text.length(), i + chunk));
-            publisher.publish(ctx.sessionId(), AgentEvent.contentDelta(ctx.sessionId(), delta));
+            if (emitDeltas) {
+                publisher.publish(ctx.sessionId(), AgentEvent.contentDelta(ctx.sessionId(), delta));
+            }
             try {
                 Thread.sleep(16);
             } catch (InterruptedException e) {

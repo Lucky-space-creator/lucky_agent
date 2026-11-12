@@ -8,13 +8,11 @@ import com.lucky.agent.common.dto.UserInput;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.Disposable;
 
-import java.io.IOException;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -36,6 +34,12 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p><b>结束信号取「提交完成」为主</b>：内核 {@code ConversationManager#execute} 的
  * {@code finally} 会先 {@code publisher.complete(sessionId)} 再返回，因此提交 Mono 返回时
  * 事件流必然已经收尾；事件流的 {@code onComplete} 只作为异常路径的兜底宽限信号。</p>
+ *
+ * <p><b>运行期 Ctrl+C 只由 {@link InterruptTrap} 处理</b>：主线程阻塞在提交上、并不在行编辑里，
+ * 终端此时是 cooked 模式，Ctrl+C 由终端驱动转成 SIGINT，<b>不会</b>以 0x03 进入标准输入。
+ * 曾有一条旁路线程轮询 {@code System.in.available()} 找 0x03：既拿不到真正的 Ctrl+C，
+ * 又会把用户提前键入的内容（typeahead）逐字节吃掉，导致下一轮输入整行丢失。
+ * 不要再引入任何读取标准输入的运行期监听。</p>
  */
 @Slf4j
 public final class CliTurnExecutor {
@@ -83,11 +87,8 @@ public final class CliTurnExecutor {
                         },
                         streamDone::countDown);
 
-        CancelWatcher watcher = watchCancel
-                ? CancelWatcher.start(() -> channel.cancel(ref).subscribe())
-                : CancelWatcher.disabled();
         // 本轮内临时接管 SIGINT：见 InterruptTrap 的类注释（缺陷 D17）。
-        // 与 watcher 同开关：headless 下 stdin 承载数据、也不该吞掉脚本的信号语义。
+        // 与 watchCancel 同开关：headless 下 stdin 承载数据、也不该吞掉脚本的信号语义。
         InterruptTrap trap = watchCancel
                 ? InterruptTrap.install(() -> channel.cancel(ref).subscribe())
                 : InterruptTrap.disabled();
@@ -101,12 +102,14 @@ public final class CliTurnExecutor {
         } catch (Exception e) {
             if (isTimeout(e)) {
                 timedOut = true;
-                log.warn("单轮等待超时（{}），放弃等待并释放订阅：session={}", TURN_TIMEOUT, ref.sessionId());
+                // 超时不能只是「不等了」：内核线程仍在执行，会继续改文件、占用会话，
+                // 下一次提交还会与它竞争同一会话状态（幽灵运行）。必须发取消让它退出。
+                log.warn("单轮等待超时（{}），发起取消并释放订阅：session={}", TURN_TIMEOUT, ref.sessionId());
+                requestCancel(ref, "超时");
             } else {
                 failure = e;
             }
         } finally {
-            watcher.stop();
             // 必须先恢复原 SIGINT 处理器：提示符处 JLine 处于 raw 模式、根本不产生 SIGINT，
             // 但一旦有异常路径让终端停在 cooked 模式，留着我们的处理器会吞掉用户唯一的退出手段
             trap.close();
@@ -151,68 +154,16 @@ public final class CliTurnExecutor {
     }
 
     /**
-     * 运行期的 Ctrl+C 监听（best-effort）。
+     * 尽力发起取消（超时等补偿动作）。
      *
-     * <p>交互式终端进入原始模式后，Ctrl+C 不再触发 SIGINT，而是作为一个字节（0x03）流入标准输入。
-     * 运行期间主线程阻塞在提交上、并未处于行编辑状态，故用一条守护线程轮询该字节，
-     * 命中即发起优雅取消（置位取消标记让引擎在循环边界尽早退出），而不是让 JVM 直接终止进程。</p>
-     *
-     * <p><b>已知取舍</b>：运行期间用户提前键入的<b>其它</b>字符会被本监听消费掉，不会进入下一轮输入
-     * （主流 CLI 亦普遍忽略运行期 typeahead）。监听失败不影响主流程——最坏情况退化为进程默认行为。</p>
+     * <p>失败只记日志：取消是"止损"而非必需步骤，不应因为取消本身失败而丢掉本轮结果。</p>
      */
-    private static final class CancelWatcher {
-
-        private static final int CTRL_C = 3;
-        private static final int CTRL_D = 4;
-        private static final long POLL_MS = 80L;
-
-        private final Thread thread;
-        private final AtomicBoolean stopped = new AtomicBoolean(false);
-
-        private CancelWatcher(Runnable onCancel, boolean enabled) {
-            if (!enabled) {
-                this.thread = null;
-                return;
-            }
-            this.thread = new Thread(() -> run(onCancel), "cli-cancel-watcher");
-            this.thread.setDaemon(true);
-            this.thread.start();
-        }
-
-        static CancelWatcher disabled() {
-            return new CancelWatcher(null, false);
-        }
-
-        static CancelWatcher start(Runnable onCancel) {
-            return new CancelWatcher(onCancel, true);
-        }
-
-        private void run(Runnable onCancel) {
-            AtomicBoolean fired = new AtomicBoolean(false);
-            while (!stopped.get()) {
-                try {
-                    if (System.in.available() > 0) {
-                        int b = System.in.read();
-                        if ((b == CTRL_C || b == CTRL_D) && fired.compareAndSet(false, true)) {
-                            onCancel.run();
-                            return;
-                        }
-                    }
-                    Thread.sleep(POLL_MS);
-                } catch (IOException e) {
-                    return;
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-        }
-
-        void stop() {
-            stopped.set(true);
-            if (thread != null) {
-                thread.interrupt();
-            }
+    private void requestCancel(SessionRef ref, String reason) {
+        try {
+            channel.cancel(ref).subscribe(null,
+                    err -> log.warn("{}后取消失败：session={} err={}", reason, ref.sessionId(), err.getMessage()));
+        } catch (Exception e) {
+            log.warn("{}后取消发起异常：session={} err={}", reason, ref.sessionId(), e.getMessage());
         }
     }
 }

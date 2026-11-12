@@ -106,12 +106,9 @@ public final class CliTurnLoop {
 
             // ① 内核请求授权
             if (isAsk(outcome)) {
+                // isAsk 已保证 pendingAskOp() 非空，此处无需再做 null 判定
+                // （原先的「未给出操作详情」分支永不可达，属死代码）
                 Map<String, Object> op = outcome.capture().pendingAskOp();
-                if (op == null) {
-                    out.println(out.theme().yellow(
-                            "内核请求授权但未给出操作详情，已停止（无法确定在授权什么）。"));
-                    break;
-                }
                 if (!askedOps.add(opKey(op))) {
                     out.println(out.theme().yellow(
                             "同一操作被重复询问，已停止重试以免无限循环。\n"
@@ -141,7 +138,13 @@ public final class CliTurnLoop {
                     break;
                 }
                 current = pick;
-                extra = baseExtra == null ? Map.of() : baseExtra;
+                // 条件选择是执行阶段的推进：上一轮的 confirm 已被内核消费，
+                // 带着它提交会让内核把「选项文本」当成对旧操作的再次确认（isConfirmRequest 命中），
+                // 新目标被忽略。故这里必须退回基础参数。
+                extra = baseExtra == null ? new LinkedHashMap<>() : new LinkedHashMap<>(baseExtra);
+                // 同时清空「已询问操作」指纹：阶段已变，旧指纹继续生效会让新阶段
+                // 再次询问同一个文件时被立刻判成「重复询问」而中止。
+                askedOps.clear();
                 continue; // 以选项作为新的用户输入续跑（内核会在提交时消费挂起态）
             }
 
