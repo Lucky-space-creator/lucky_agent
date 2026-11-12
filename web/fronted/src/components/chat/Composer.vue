@@ -57,8 +57,10 @@ async function pickWs(workspaceId: string) {
   }
 }
 
-// 状态条指标优先取会话级真实数据（chat.metrics），拿不到时才回退本地消息统计
-const rounds = computed(() => chat.metrics?.modelCalls ?? chat.messages.filter((m) => m.role === 'user').length)
+// 状态条只描述「当前这条用户消息」的成本：后端每次提交都会把本轮计数清零，
+// 所以 metrics.modelCalls 就是本轮推理轮次。没有指标时显示 0，绝不回退到
+// 「会话里用户消息条数」—— 那属于会话累计口径，混进来会让第二条消息显示「N 轮」。
+const rounds = computed(() => chat.metrics?.modelCalls ?? 0)
 const steps = computed(() => {
   if (chat.metrics) {
     const tools = chat.metrics.toolCounts ?? {}
@@ -67,7 +69,7 @@ const steps = computed(() => {
     const toolSteps = Object.values(tools).reduce((s, n) => s + (n ?? 0), 0)
     return toolSteps + skill + mcp
   }
-  return chat.messages.reduce((s, m) => s + m.toolCalls.filter((t) => t.status === 'done').length, 0)
+  return 0
 })
 const llmText = computed(() => {
   if (chat.metrics?.lastModel) return chat.metrics.lastModel
@@ -311,7 +313,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onDoc))
       <span class="stats__sep">|</span>
       <span class="stats__item">LLM <span class="stats__val">{{ llmText }}</span></span>
       <span class="stats__sep">|</span>
-      <span class="stats__item">Token 消耗 <span class="stats__val">{{ tokenText }}</span></span>
+      <span class="stats__item">本轮 Token <span class="stats__val">{{ tokenText }}</span></span>
       <span v-if="uploadMsg" class="stats__err">{{ uploadMsg }}</span>
     </div>
   </div>

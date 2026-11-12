@@ -14,9 +14,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * 会话指标收集器（P3 透明面板后端数据源）。
  *
  * <p>在会话提交时调用 {@link #start(String)} 订阅该会话的事件流，按事件类型聚合到
- * {@link SessionMetrics}；{@link #snapshot(String)} 供 Web 端点轮询读取。缓存命中/未命中
- * 取自 {@link FingerprintCache} 真实计数器（全局累计，诚实反映本机缓存收益）。会话结束或
- * 销毁时调用 {@link #stop(String)} 取消订阅并清理。收集器只读取事件、不修改业务状态。</p>
+ * {@link SessionMetrics}；{@link #snapshot(String)} 供 Web 端点轮询读取。<b>每次提交都开启新一轮</b>
+ * （本轮计数清零、会话累计继续累加），因此面板上的「推理轮次」永远是当前这条用户消息的轮数，
+ * 不是整个会话的总轮数。缓存命中/未命中取自 {@link FingerprintCache} 真实计数器（全局累计，
+ * 诚实反映本机缓存收益）。会话销毁时调用 {@link #stop(String)} 取消订阅并清理。
+ * 收集器只读取事件、不修改业务状态。</p>
  */
 @Component
 public class MetricsCollector {
@@ -32,17 +34,20 @@ public class MetricsCollector {
     }
 
     /**
-     * 开始收集某会话指标（会话级累计，跨轮不重置）。
+     * 开始收集某会话本轮指标。
      *
-     * <p>每轮重新订阅当前事件流：{@code AgentEventPublisher.complete} 会销毁并重建 sink，
+     * <p><b>语义：一次提交 = 一轮。</b>每次 {@code ConversationManager#execute}（即用户发一条消息）
+     * 都会调用本方法，先把上一轮的计数清零（{@link SessionMetrics#beginTurn()}），再订阅最新事件流。
+     * 这样「推理轮次 / 本轮 token / 本轮工具数」始终只描述当前这条消息，不会把整个会话累计量
+     * 混进状态条（跨轮总量另存 {@code sessionTokenUsed}/{@code sessionModelCalls}）。</p>
+     *
+     * <p>订阅必须每轮重建：{@code AgentEventPublisher.complete} 会销毁并重建 sink，
      * 若只在首次 start 时订阅一次，第二轮起旧订阅已 complete、收不到任何事件（token 等
-     * 指标停止增长）。故每次 start 先释放旧订阅再订阅最新 sink，指标在会话内持续累加。</p>
+     * 指标停止增长）。</p>
      */
     public void start(String sessionId) {
         SessionMetrics m = metrics.computeIfAbsent(sessionId, k -> new SessionMetrics());
-        if (m.elapsedMs() == 0) {
-            m.setStartAt(System.currentTimeMillis());
-        }
+        m.beginTurn();
         Disposable prev = subs.remove(sessionId);
         if (prev != null && !prev.isDisposed()) {
             prev.dispose();
@@ -105,6 +110,8 @@ public class MetricsCollector {
                 }
             }
             case "error" -> m.incErrors();
+            // stop = 本轮终态：冻结本轮时长，避免面板上的「本轮时长」在结束后继续增长
+            case "stop" -> m.finishTurn();
             case "action" -> {
                 // 工具调用次数与成败统一在 tool_result 中裁决，ACTION 仅表示启动意图，不重复计数。
             }

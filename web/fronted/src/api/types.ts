@@ -160,11 +160,24 @@ export interface SessionSnapshot {
 }
 
 /** 透明面板指标（与后端 /api/chat/{sessionId}/metrics 对齐，会话级统一累计）。 */
+/**
+ * 会话运行指标。
+ *
+ * <p>默认字段（tokenUsed / modelCalls / toolCounts / …）是**本轮**口径：
+ * 后端每次用户发消息都会清零，只描述当前这条消息的成本。
+ * 跨轮总量在 session* 字段里，两者不要混用。</p>
+ */
 export interface SessionMetrics {
   tokenUsed: number
   inputTokens: number
   outputTokens: number
   modelCalls: number
+  /** 当前是第几轮用户消息（从 1 开始）。 */
+  turnIndex?: number
+  /** 会话累计 token（跨轮，不随本轮重置）。 */
+  sessionTokenUsed?: number
+  /** 会话累计模型调用次数（跨轮）。 */
+  sessionModelCalls?: number
   cacheHits: number
   cacheMisses: number
   cacheHitRate: number

@@ -170,7 +170,7 @@ class SlashCommandRegistryTest {
     }
 
     @Test
-    @DisplayName("/tokens 展示会话累计用量与上下文窗口占用率（P2-4）")
+    @DisplayName("/tokens 分「本轮用量」与会话累计两层展示，并给出上下文窗口占用率（P2-4）")
     void tokensShowsCumulativeAndWindowUsage() {
         SessionMetrics sm = new SessionMetrics();
         sm.addToken(1234);
@@ -194,12 +194,37 @@ class SlashCommandRegistryTest {
         StringBuilder sink = new StringBuilder();
         SlashCommandRegistry.withBuiltins().dispatch("/tokens", context(sink, metrics));
         String text = sink.toString();
-        assertTrue(text.contains("会话累计用量"), text);
+        // 本轮口径（用户当前这条消息）
+        assertTrue(text.contains("本轮用量"), text);
         assertTrue(text.contains("1234"), text);
         assertTrue(text.contains("gpt-4o"), text);
         assertTrue(text.contains("128000"), text);
+        // 跨轮总量单独一行，不与本轮混在一起
+        assertTrue(text.contains("会话累计"), text);
         // 1234 / 128000 ≈ 0.96%，按 %.1f 四舍五入显示为 1.0%
         assertTrue(text.contains("1.0%"), text);
+    }
+
+    @Test
+    @DisplayName("/tokens 展示轮次序号，让用户明确这是第几条消息的成本")
+    void tokensShowsTurnIndex() {
+        SessionMetrics sm = new SessionMetrics();
+        sm.beginTurn();
+        sm.beginTurn();
+        sm.incModelCalls();
+        sm.addToken(10);
+        MetricsCollector metrics = new MetricsCollector(null, null) {
+            @Override
+            public SessionMetrics snapshot(String sessionId) {
+                return sm;
+            }
+        };
+        StringBuilder sink = new StringBuilder();
+        SlashCommandRegistry.withBuiltins().dispatch("/tokens", context(sink, metrics));
+        String text = sink.toString();
+        assertTrue(text.contains("第 2 轮"), text);
+        // 本轮只调了 1 次模型，不能是会话累计的 2 次
+        assertTrue(text.contains("模型调用") && text.contains("1"), text);
     }
 
     @Test

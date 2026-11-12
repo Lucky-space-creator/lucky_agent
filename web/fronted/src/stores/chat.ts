@@ -169,6 +169,10 @@ export const useChatStore = defineStore('chat', () => {
    */
   function detachRun(phase = '已离开') {
     closeActiveStream()
+    // 指标也是「当前会话 / 当前这条消息」的现场：离开时必须清空，
+    // 否则切到另一个会话后状态条仍显示上一会话的轮次与 token（会话与单轮两个口径混在一起）。
+    // 注意：正常运行结束不走这里，用户仍能看到刚结束那条消息的指标。
+    metrics.value = null
     if (!running.value) return
     running.value = false
     stopMetrics()

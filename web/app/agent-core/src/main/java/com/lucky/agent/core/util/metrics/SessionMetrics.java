@@ -9,17 +9,33 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>由 {@link MetricsCollector} 从本会话 {@code Flux<AgentEvent>} 聚合得到，
  * 不引入额外存储；仅统计内存运行期计数，会话结束即丢弃。计数器线程安全。</p>
+ *
+ * <p><b>本轮 vs 会话累计是两个口径，不要混用</b>：</p>
+ * <ul>
+ *   <li><b>本轮计数器</b>（{@code tokenUsed}/{@code modelCalls}/{@code toolCounts}/…）：
+ *       每次用户发消息（{@link #beginTurn()}）归零，只反映「这一条消息跑了多少轮、花了多少」。
+ *       界面状态条与透明面板的「推理轮次」必须用它 —— 否则第二条消息会显示「9 轮」，
+ *       用户看到的不是这条消息的成本。</li>
+ *   <li><b>会话累计</b>（{@code sessionTokenUsed}/{@code sessionModelCalls}）：跨轮累加，
+ *       只用于「整个会话一共花了多少」这类汇总视图。</li>
+ * </ul>
  */
 public class SessionMetrics {
 
-    /** 累计 token 用量（每次模型调用增量累加，会话级总量）。 */
+    /** 本轮 token 用量（每次模型调用增量累加）。 */
     private final AtomicLong tokenUsed = new AtomicLong();
-    /** 累计输入 token。 */
+    /** 本轮输入 token。 */
     private final AtomicLong inputTokens = new AtomicLong();
-    /** 累计输出 token。 */
+    /** 本轮输出 token。 */
     private final AtomicLong outputTokens = new AtomicLong();
-    /** 模型调用次数（每次 model.chat 计 1，即推理轮次）。 */
+    /** 本轮模型调用次数（每次 model.chat 计 1，即本轮推理轮次）。 */
     private final AtomicLong modelCalls = new AtomicLong();
+    /** 会话累计 token（跨轮，不随 beginTurn 归零）。 */
+    private final AtomicLong sessionTokenUsed = new AtomicLong();
+    /** 会话累计模型调用次数（跨轮）。 */
+    private final AtomicLong sessionModelCalls = new AtomicLong();
+    /** 当前是第几轮用户消息（从 1 开始）。 */
+    private final AtomicLong turnIndex = new AtomicLong();
     /** 工具结果命中缓存次数。 */
     private final AtomicLong cacheHits = new AtomicLong();
     /** 工具结果未命中缓存次数。 */
@@ -39,13 +55,16 @@ public class SessionMetrics {
     private volatile String lastModel;
     /** 模型上下文窗口（token）。 */
     private volatile long contextWindow;
-    /** 会话指标开始时间（epoch ms），用于计算运行时长。 */
+    /** 本轮指标开始时间（epoch ms），用于计算本轮运行时长。 */
     private volatile long startAt;
+    /** 本轮结束时间（epoch ms）；0 表示仍在运行，用于把时长冻结在真实结束时刻。 */
+    private volatile long endAt;
     /** 子代理进度（taskId -> done/total/status）。 */
     private final ConcurrentHashMap<String, TaskProgress> subAgents = new ConcurrentHashMap<>();
 
     public void addToken(long used) {
         tokenUsed.addAndGet(used);
+        sessionTokenUsed.addAndGet(used);
     }
 
     public void addInput(long input) {
@@ -65,7 +84,19 @@ public class SessionMetrics {
     }
 
     public long elapsedMs() {
-        return startAt <= 0 ? 0 : Math.max(0, System.currentTimeMillis() - startAt);
+        if (startAt <= 0) {
+            return 0;
+        }
+        // 收到 stop 后冻结：否则面板上的「本轮时长」会在任务结束后继续往上涨
+        long end = endAt > 0 ? endAt : System.currentTimeMillis();
+        return Math.max(0, end - startAt);
+    }
+
+    /** 本轮结束（收到 stop 事件）：冻结时长，并拒绝后续重复调用。 */
+    public void finishTurn() {
+        if (endAt == 0) {
+            endAt = System.currentTimeMillis();
+        }
     }
 
     public long totalToolOk() {
@@ -78,6 +109,32 @@ public class SessionMetrics {
 
     public void incModelCalls() {
         modelCalls.incrementAndGet();
+        sessionModelCalls.incrementAndGet();
+    }
+
+    /**
+     * 开启新一轮用户消息：本轮计数器全部归零，会话累计保持不变。
+     *
+     * <p>由 {@link MetricsCollector#start(String)} 在每次提交时调用。缓存命中/未命中
+     * 属于全局缓存器读数（快照时直接覆盖），归零无意义但也无害。</p>
+     */
+    public void beginTurn() {
+        tokenUsed.set(0);
+        inputTokens.set(0);
+        outputTokens.set(0);
+        modelCalls.set(0);
+        cacheHits.set(0);
+        cacheMisses.set(0);
+        toolCounts.clear();
+        toolOk.clear();
+        toolFail.clear();
+        errors.set(0);
+        skillInvokes.set(0);
+        mcpInvokes.set(0);
+        subAgents.clear();
+        startAt = System.currentTimeMillis();
+        endAt = 0;
+        turnIndex.incrementAndGet();
     }
 
     public void recordCache(boolean hit) {
@@ -154,6 +211,9 @@ public class SessionMetrics {
         snap.put("inputTokens", inputTokens.get());
         snap.put("outputTokens", outputTokens.get());
         snap.put("modelCalls", modelCalls.get());
+        snap.put("turnIndex", turnIndex.get());
+        snap.put("sessionTokenUsed", sessionTokenUsed.get());
+        snap.put("sessionModelCalls", sessionModelCalls.get());
         snap.put("cacheHits", cacheHits.get());
         snap.put("cacheMisses", cacheMisses.get());
         snap.put("cacheHitRate", cacheHitRate());

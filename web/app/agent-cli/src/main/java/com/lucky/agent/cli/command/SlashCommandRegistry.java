@@ -611,7 +611,7 @@ public final class SlashCommandRegistry {
 
         @Override
         public String summary() {
-            return "查看会话累计 token / 工具 / 缓存用量与上下文窗口占用";
+            return "查看本轮 token / 工具 / 耗时与会话累计用量";
         }
 
         @Override
@@ -619,7 +619,7 @@ public final class SlashCommandRegistry {
             OutputSink out = ctx.out();
             Map<String, Object> snap;
             try {
-                // MetricsCollector#snapshot 是会话级累计量（每次模型调用增量累加），
+                // MetricsCollector 每轮提交都会重置本轮计数（会话累计另存 session* 键），
                 // 对未知会话返回「空指标」而不是 null，故不能用 null 判空，按「有没有真实调用」判定。
                 snap = ctx.services().metrics().snapshot(ctx.holder().sessionId()).snapshot();
             } catch (Exception e) {
@@ -630,7 +630,10 @@ public final class SlashCommandRegistry {
                 out.println(out.theme().dim("当前会话还没有运行记录。"));
                 return false;
             }
-            out.println(out.theme().bold("会话累计用量"));
+            Object turn = snap.get("turnIndex");
+            String turnLabel = turn instanceof Number n && n.longValue() > 0
+                    ? "本轮用量（第 " + n.longValue() + " 轮）" : "本轮用量";
+            out.println(out.theme().bold(turnLabel));
             print(out, "token", snap.get("tokenUsed") + "（输入 " + snap.get("inputTokens")
                     + " / 输出 " + snap.get("outputTokens") + "）");
             print(out, "模型调用", snap.get("modelCalls"));
@@ -650,6 +653,9 @@ public final class SlashCommandRegistry {
             if (elapsed instanceof Number n) {
                 print(out, "耗时", StatusBar.formatDuration(n.longValue()));
             }
+            // 会话累计单独一行：本轮数字只描述当前这条消息，跨轮总量在这里看，两者不混
+            print(out, "会话累计", snap.get("sessionTokenUsed") + " tokens / "
+                    + snap.get("sessionModelCalls") + " 次模型调用");
             return false;
         }
 

@@ -84,19 +84,19 @@ const subAgentEntries = computed(() => {
       <span v-if="running" class="tp__live mono">实时</span>
     </div>
 
-    <!-- 会话级核心指标（未开对话时显示 0 / — 基础框架，不空屏） -->
+    <!-- 本轮核心指标（每次用户消息重置；未开对话时显示 0 / — 基础框架，不空屏） -->
     <div class="tp__grid">
       <div class="tp__cell">
         <span class="tp__num mono">{{ tokenText }}</span>
-        <span class="tp__lbl mono">TOKENS 总量</span>
+        <span class="tp__lbl mono">本轮 TOKENS</span>
       </div>
       <div class="tp__cell">
         <span class="tp__num mono">{{ metrics?.modelCalls ?? 0 }}</span>
-        <span class="tp__lbl mono">推理轮次</span>
+        <span class="tp__lbl mono">本轮推理轮次</span>
       </div>
       <div class="tp__cell">
         <span class="tp__num mono">{{ elapsedText }}</span>
-        <span class="tp__lbl mono">运行时长</span>
+        <span class="tp__lbl mono">本轮时长</span>
       </div>
       <div class="tp__cell">
         <span class="tp__num mono">{{ cacheText }}</span>
@@ -122,6 +122,12 @@ const subAgentEntries = computed(() => {
         <span class="tp__mini-num mono">{{ metrics?.errors ?? 0 }}</span>
         <span class="tp__lbl mono">错误</span>
       </div>
+    </div>
+
+    <!-- 跨轮总量：与本轮指标显式分开，避免「这条消息」和「整个会话」混为一谈 -->
+    <div v-if="(metrics?.sessionTokenUsed ?? 0) > 0" class="tp__model mono">
+      会话累计 {{ (metrics?.sessionTokenUsed ?? 0).toLocaleString('en-US') }} tokens ·
+      {{ metrics?.sessionModelCalls ?? 0 }} 次模型调用
     </div>
 
     <!-- 模型名：无会话指标时显示当前主端点 -->

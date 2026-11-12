@@ -82,6 +82,47 @@ class MetricsCollectorTest {
         collector.stop(sid);
     }
 
+    /**
+     * 每次提交（{@code start}）都开启新一轮：本轮计数清零，会话累计继续累加。
+     *
+     * <p>这是「每次用户消息的轮数从 0 算」的回归保护：第二条消息不能沿用第一条的轮数，
+     * 否则界面上的「推理轮次」会显示整个会话的总数。</p>
+     */
+    @Test
+    void startBeginsNewTurnWithoutLosingSessionTotals() throws InterruptedException {
+        String sid = "sess-metrics-turn";
+        // 真实链路里 sink 至少有两个订阅者（SSE/CLI 渲染 + 指标收集），
+        // 若只剩指标一个订阅者，其 dispose→resubscribe 会触发 multicast sink 自动终止。
+        // 这里保留一个常驻订阅者来还原真实订阅拓扑。
+        reactor.core.Disposable keeper = publisher.stream(sid).subscribe(e -> { });
+        collector.start(sid);
+        collector.reportModelCall(sid);
+        collector.reportModelCall(sid);
+        emit(AgentEvent.token(sid, 100, 8192, "m", false));
+        Thread.sleep(50);
+
+        Map<String, Object> first = collector.snapshot(sid).snapshot();
+        assertEquals(2L, first.get("modelCalls"));
+        assertEquals(100L, first.get("tokenUsed"));
+        assertEquals(1L, first.get("turnIndex"));
+
+        // 第二条用户消息
+        collector.start(sid);
+        collector.reportModelCall(sid);
+        emit(AgentEvent.token(sid, 40, 8192, "m", false));
+        Thread.sleep(50);
+
+        Map<String, Object> second = collector.snapshot(sid).snapshot();
+        assertEquals(1L, second.get("modelCalls"), "本轮只调了 1 次模型");
+        assertEquals(40L, second.get("tokenUsed"), "本轮 token 不含上一轮");
+        assertEquals(2L, second.get("turnIndex"));
+        assertEquals(140L, second.get("sessionTokenUsed"), "会话累计仍跨轮累加");
+        assertEquals(3L, second.get("sessionModelCalls"));
+
+        collector.stop(sid);
+        keeper.dispose();
+    }
+
     @Test
     void cacheHitRateReflectsFingerprintCounter() {
         String sid = "sess-metrics-2";
