@@ -594,6 +594,11 @@ public class LangGraphOrchestrator implements AgentOrchestrator {
         if (planResult == null || planResult.error() != null) {
             return null;
         }
+        // 规划阶段主动收口（PLAN 驳回工具后模型没产出计划）不是「计划写坏了」：
+        // 直接判定无需拆分，不再触发一次重规划（否则白跑一轮完整 PLAN）。
+        if (planResult.finalText() == null || planResult.finalText().isBlank()) {
+            return null;
+        }
         Plan plan = planGenerator.parse(planResult.finalText()).orElse(null);
         if (plan != null && planValidator.isValid(plan)) {
             return plan;

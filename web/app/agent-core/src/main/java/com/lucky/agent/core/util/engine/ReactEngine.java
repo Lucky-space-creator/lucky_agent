@@ -83,6 +83,14 @@ public class ReactEngine implements Engine {
     /** 工具结果回灌模型的最大字符数：300 过小导致模型看不到文件完整内容而反复查询；提高到 20k 并标注截断。 */
     private static final int MAX_TOOL_RESULT_TEXT = 20000;
 
+    /** 规划阶段容忍「模型仍在调工具」的轮数上限；达到即判定穷举并放弃本轮规划。 */
+    private static final int PLAN_TOOL_TURN_LIMIT = 2;
+
+    /** 规划阶段工具被驳回时回灌给模型的说明（要给出替代动作，否则模型会换个工具继续试）。 */
+    private static final String PLAN_TOOL_DENIED =
+            "规划阶段禁止调用工具：本阶段只产出计划或直接结论，不读取、不列举、不执行。"
+                    + "请立即基于已知信息用文字回答；需要工具才能完成的部分写进计划的步骤里。";
+
     private final ModelRouter modelRouter;
     private final ToolGateway toolGateway;
     private final PersonaService personaService;
@@ -197,6 +205,8 @@ public class ReactEngine implements Engine {
             ChatModel sync = modelRouter.resolve(modelId);
 
             int step = 0;
+            // 规划阶段累计「模型仍在调工具」的轮数：达到上限即放弃本轮规划（见工具闸注释）
+            int planToolTurns = 0;
             String finalText = null;
             long tokenUsed = 0;
             // 上一轮输入侧 token（增量统计：每轮只计新增消息，避免全量历史平方级虚高）
@@ -270,6 +280,28 @@ public class ReactEngine implements Engine {
                     return EngineRunResult.of(ctx.sessionId(), phase, finalText, tokenUsed,
                             modelRouter.modelName(modelId), "cancelled");
                 }
+                // 规划阶段工具闸：PLAN 的产物只有「计划文本」，不需要任何工具。
+                // 但工具定义必须照常下发 —— 推理模型要求「请求携带 tools」时历史 assistant 消息
+                // 原样带 reasoning_content（见 ThinkingConsistency），撤掉 tools 反而 400。
+                // 于是在分发前拦截：不执行、不发 action/tool_result（否则前端会把一次目录穷举
+                // 渲染成一屏「查看的文件」），只回灌一条拒绝；连续两轮仍在调工具即判定为穷举，
+                // 直接退出规划。此前无此闸：模型在 PLAN 里逐个目录 file.list，12 步全耗在列举上，
+                // 最终以「已达最大步数」收场（实测一次 PLAN 就产生 52 条目录查询）。
+                if (phase == Phase.PLAN) {
+                    boolean giveUp = ++planToolTurns >= PLAN_TOOL_TURN_LIMIT;
+                    for (ToolExecutionRequest req : reqs) {
+                        messages.add(ToolExecutionResultMessage.from(
+                                req.id(), req.name(), PLAN_TOOL_DENIED));
+                    }
+                    if (giveUp) {
+                        log.info("规划阶段连续 {} 轮调用工具，判定为穷举，放弃本轮规划：session={}",
+                                planToolTurns, ctx.sessionId());
+                        break;
+                    }
+                    publisher.publish(ctx.sessionId(), AgentEvent.progress(ctx.sessionId(),
+                            "【分析】规划阶段无需执行操作，已驳回工具调用，继续产出计划。"));
+                    continue;
+                }
                 List<ToolGateway.ToolCall> calls = new ArrayList<>();
                 for (ToolExecutionRequest req : reqs) {
                     calls.add(new ToolGateway.ToolCall(req.name(), parseArgs(req.arguments())));
@@ -308,6 +340,32 @@ public class ReactEngine implements Engine {
                 }
             }
 
+            // 步数耗尽但无正文：PLAN 阶段不是致命错误（编排层会降级为「无需拆分，直接执行」），
+            // ACT/ASK 则先做一次「无工具收尾」把已收集到的信息收成结论，仍无产出才如实报错。
+            if (finalText == null || finalText.isBlank()) {
+                if (phase == Phase.PLAN) {
+                    // 此前 PLAN 无产出也发 error 事件 → 用户看到红色「已达最大步数」，而编排层
+                    // 其实继续执行了 → 界面上挂着一条骗人的失败提示。这里改为可归因的进度提示。
+                    log.warn("规划阶段未产出计划：session={} steps={} toolTurns={}",
+                            ctx.sessionId(), step, planToolTurns);
+                    publisher.publish(ctx.sessionId(), AgentEvent.progress(ctx.sessionId(),
+                            "【分析】规划阶段未产出结构化计划（已用 " + step + " 步），转为直接执行。"));
+                    return new EngineRunResult(ctx.sessionId(), phase, "", tokenUsed,
+                            modelRouter.modelName(modelId), "plan-empty", null);
+                }
+                // 步数用尽的「止损产出」：本轮已经读/列了不少东西，却因为没产出正文就整轮丢弃，
+                // 用户拿到的是「一无所有 + 一条报错」。这里禁用工具再要一次正文（一次调用），
+                // 把已有信息收成结论；模型仍无正文则按原样报错（不伪造结论）。
+                publisher.publish(ctx.sessionId(), AgentEvent.progress(ctx.sessionId(),
+                        "【安全阀】步数用尽，正在汇总本轮已获得的信息…"));
+                Salvage salvage = salvageConclusion(ctx, messages, streaming, sync, publisher, lastInput);
+                if (salvage != null) {
+                    finalText = salvage.text();
+                    lastAi = salvage.ai();
+                    tokenUsed += salvage.tokens();
+                }
+            }
+
             if (finalText != null && !finalText.isBlank()) {
                 // 条件选择（选项块）：模型按约定输出 ```options 受控 JSON 块时，
                 // 剥离该块（用户只看说明文字）、发布 options 事件并挂起，等待用户选择后继续。
@@ -338,6 +396,7 @@ public class ReactEngine implements Engine {
                 // 台账 #17：步数耗尽（或模型始终没产出正文）时，此前既不发 error、也不落库，
                 // 却返回 status="success" —— 用户看到一条空白回答，日志全绿，无法归因。
                 // 现在如实报错：错误事件 + status="max-steps" + error 文案（会话层据此返回 ERROR）。
+                // 走到这里的只剩「连无工具收尾也拿不到正文」的情形（见上面的 Salvage）。
                 String reason = "已达最大步数（" + maxSteps + "）仍未产出结论，本轮未完成，请调整目标或拆分任务后重试";
                 log.warn("引擎步数耗尽：session={} phase={} steps={}", ctx.sessionId(), phase, step);
                 publisher.publish(ctx.sessionId(), AgentEvent.error(
@@ -361,6 +420,62 @@ public class ReactEngine implements Engine {
         } finally {
             state.running(wasRunning);
         }
+    }
+
+    /**
+     * 步数耗尽的「止损产出」：禁用工具再要一次正文，把本轮已读/已列到的信息收成结论。
+     *
+     * <p>为什么需要：步数用尽时此前直接丢整轮上下文并报错，用户看到的只有
+     * 「已达最大步数」—— 而这一轮其实已经拿到了大量事实（目录结构、文件内容、命令输出）。
+     * 用一次不带工具的调用把这些事实总结成答案，比「一无所有 + 一条红色报错」有用得多。</p>
+     *
+     * <p>约束：只有一次机会，且请求不带任何工具（模型无法再发起探索）；模型仍无正文时返回
+     * {@code null}，由调用方按原样如实报错，绝不伪造结论。任何异常同样降级为 {@code null}。</p>
+     *
+     * @param messages  当前完整消息（含本轮全部工具结果）
+     * @param lastInput 上一次调用的输入 token（用于增量计费，与主循环口径一致）
+     * @return 收尾结果（文本 + AiMessage + 本次消耗）；失败返回 null
+     */
+    private Salvage salvageConclusion(ConversationCtx ctx, List<ChatMessage> messages,
+                                      StreamingChatModel streaming, ChatModel sync,
+                                      AgentEventPublisher publisher, long lastInput) {
+        try {
+            List<ChatMessage> finalMessages = new ArrayList<>(messages);
+            finalMessages.add(UserMessage.from(
+                    "你已用完本轮的步数预算，不能再调用任何工具（本轮对话也不再提供工具）。"
+                            + "请立刻基于上面已经获得的信息，用文字给出最终结论："
+                            + "已经查清/完成了什么、还没查清什么、建议的下一步是什么。"
+                            + "不要道歉、不要复述过程、不要请求继续。"));
+            ChatRequest request = ChatRequest.builder()
+                    .messages(ThinkingConsistency.normalizeForThinkingMode(finalMessages))
+                    .build();
+            TurnOutcome out = streaming != null
+                    ? streamTurn(ctx, request, publisher, streaming, sync, true)
+                    : syncTurn(ctx, request, publisher, sync, "", true, true);
+            String text = out.text();
+            if (text == null || text.isBlank()) {
+                return null;
+            }
+            metricsCollector.reportModelCall(ctx.sessionId());
+            TokenUsage usage = out.tokenUsage();
+            long inputTokens = usage != null && usage.inputTokenCount() != null
+                    ? usage.inputTokenCount() : tokenMeter.count(finalMessages);
+            long outputTokens = usage != null && usage.outputTokenCount() != null
+                    ? usage.outputTokenCount() : tokenMeter.count(out.ai());
+            long callTokens = Math.max(0, inputTokens - lastInput) + outputTokens;
+            publisher.publish(ctx.sessionId(), AgentEvent.token(
+                    ctx.sessionId(), callTokens, inputTokens, outputTokens,
+                    modelRouter.contextWindow(modelIdOf(ctx)),
+                    modelRouter.modelName(modelIdOf(ctx)), false));
+            return new Salvage(text, out.ai(), callTokens);
+        } catch (Exception e) {
+            log.warn("步数耗尽收尾调用失败（按原错误返回）：session={}", ctx.sessionId(), e);
+            return null;
+        }
+    }
+
+    /** 收尾产出：正文 + 该次调用的 AiMessage（保留 thinking，供下一轮推理模型回传）+ 消耗。 */
+    private record Salvage(String text, AiMessage ai, long tokens) {
     }
 
     /**
@@ -508,6 +623,8 @@ public class ReactEngine implements Engine {
         return switch (phase) {
             case PLAN -> """
                     【阶段指令】当前为规划阶段：先判断任务复杂度，产出结构化计划。
+                    本阶段不执行任何操作是框架约束（工具会被驳回），**不要向用户解释或抱怨这一点**，
+                    也不要因此声称「无法完成任务」——执行由下一步负责，你只需给出计划。
                     - 若为简单任务（无需工具拆分、一次问答即可完成）：不要产出步骤列表，直接输出结构化总结（结论 + 关键信息），一步到位。
                     - 若为复杂任务：产出结构化计划 JSON（goal/steps/canAutoExecute），不要执行任何操作。
                     每个步骤尽可能声明 verify 字段，说明「如何客观证明这一步做成了」：
@@ -517,6 +634,7 @@ public class ReactEngine implements Engine {
                     无法客观校验的步骤省略 verify，交由整体判定。
                     关于拆解方式，二选一或并存：
                     1) 常规拆分：若问题可拆成同属你职责的连续步骤，用 "steps" 数组给出 id/type/desc/target/safe/verify；
+                       type 取 file / shell / ask / tool 之一（仅用于说明该步性质，不写也能执行）；
                     2) 隔离子代理：仅当任务含多个互相独立、可并行/需隔离上下文的高复杂度子问题（如分别评审多模块、
                        分别生成多份独立产物）时，用顶层 "subagents" 数组声明，每项 {"id","name","task","tools","permissionMode"}，
                        框架会为每项启动一个隔离子代理执行并回传摘要；不要把本可由主链路步骤完成的普通拆解放进 subagents。

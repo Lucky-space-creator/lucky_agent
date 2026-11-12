@@ -162,7 +162,13 @@ public class Orchestrator implements AgentOrchestrator {
             // PLAN 阶段模型要么直接向用户征询信息（询问型回答），要么产出可执行计划。
             // 询问型回答（如「请提供报错信息」「请回复……」）一次问完即停，
             // 不再强制拆步骤/继续下一轮，从根上杜绝「用户没提问却反复收到提问」。
-            if (isAskingReply(analysis.rawText())) {
+            //
+            // 但**有可执行计划时不能按询问型处理**：计划正文里出现「请确认是否按此执行？」这类
+            // 说明句是常态，此前一律先判询问 → 直接 return ask，用户发「帮我审查代码」永远等不到执行。
+            // 判定顺序改为：先看有没有「可执行的计划」，没有才看它是不是在反问。
+            boolean planRunnable = plan != null && plan.canAutoExecute()
+                    && plan.steps() != null && !plan.steps().isEmpty();
+            if (!planRunnable && isAskingReply(analysis.rawText())) {
                 publisher.publish(sessionId, AgentEvent.progress(sessionId,
                         "【分析】模型向用户征询信息，等待用户回复后再继续。"));
                 return EngineRunResult.of(sessionId, Phase.PLAN, analysis.rawText(),

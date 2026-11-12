@@ -122,10 +122,18 @@ function askRollbackNode(e: MouseEvent) {
   chat.openRollbackConfirm(props.item.id, { x: r.right, y: r.bottom })
 }
 
-/* ---------- 文件操作：查看类（read/list/stat）与变动类（write/delete/mkdir/rename）分流 ---------- */
+/* ---------- 文件操作：查看类（read/stat）与变动类（write/delete/mkdir/rename）分流 ---------- */
 
-/** 查看类文件工具（读取/列出/状态）：不属变动，展示在回复开头的「查看的文件」。 */
-const QUERY_TOOLS = new Set(['file.read', 'file.list', 'file.stat'])
+/**
+ * 查看类文件工具（读取/状态）：目标一定是文件，展示在回复开头的「查看的文件」。
+ *
+ * <p>注意不要把 file.list 混进来：它的 path 是<b>目录</b>。混在一起时，一次目录穷举会让
+ * 界面出现一屏「查看的文件（52）」，而里面全是 `xxx/src/main/java/...` 这类目录路径，
+ * 截断后还彼此看起来一样 —— 既误导（什么都没读到）又难看。</p>
+ */
+const QUERY_TOOLS = new Set(['file.read', 'file.stat'])
+/** 目录浏览工具：单独归入「浏览的目录」。 */
+const LIST_TOOLS = new Set(['file.list'])
 /** 变动类文件工具（写入/删除/创建/重命名）：展示在回复末尾的「变动的文件」。 */
 const WRITE_TOOLS = new Set(['file.write', 'file.delete', 'file.mkdir', 'file.rename'])
 
@@ -136,6 +144,10 @@ function isFileTool(c: ToolCallView): boolean {
 /** 查看类工具。 */
 function isQueryTool(c: ToolCallView): boolean {
   return QUERY_TOOLS.has(c.tool || '')
+}
+/** 目录浏览工具。 */
+function isListTool(c: ToolCallView): boolean {
+  return LIST_TOOLS.has(c.tool || '')
 }
 /** 变动类工具。 */
 function isWriteTool(c: ToolCallView): boolean {
@@ -150,6 +162,8 @@ function filePathOf(c: ToolCallView): string {
 
 /** 本消息内的查看类文件调用。 */
 const queryCalls = computed(() => props.item.toolCalls.filter(isQueryTool))
+/** 本消息内的目录浏览调用。 */
+const listCalls = computed(() => props.item.toolCalls.filter(isListTool))
 /** 本消息内的变动类文件调用。 */
 const fileCalls = computed(() => props.item.toolCalls.filter(isWriteTool))
 /** 其余工具调用（Skill/MCP/命令等），保持独立工具卡片展示。 */
@@ -169,8 +183,22 @@ function summarize(calls: ToolCallView[]): { path: string; hasFail: boolean }[] 
 
 /** 查看的文件（回复开头）。 */
 const querySummary = computed(() => summarize(queryCalls.value))
+/** 浏览的目录（file.list 的目标是目录，与文件分开计数，避免把目录当成"查看的文件"）。 */
+const dirSummary = computed(() => summarize(listCalls.value))
 /** 变动的文件（回复末尾，仅修改/删除类）。 */
 const fileSummary = computed(() => summarize(fileCalls.value))
+
+/**
+ * 路径的紧凑展示：保留末尾两段，前面用「…/」省略。
+ *
+ * <p>胶囊宽度有限，直接 `text-overflow: ellipsis` 会把 `a/b/src/main/java` 与
+ * `c/d/src/main/java` 都截成 `xxx/src/main/java...` —— 一屏看下去每条都一样，
+ * 反而认不出是哪个目录。保留尾部（末两级）才能区分开，完整路径仍在 title 里。</p>
+ */
+function shortPath(p: string): string {
+  const parts = p.split(/[\\/]+/).filter(Boolean)
+  return parts.length <= 3 ? p : '…/' + parts.slice(-2).join('/')
+}
 
 /** 点击总览项：在右侧「项目文件」面板定位该文件。 */
 function openFile(path: string) {
@@ -190,6 +218,14 @@ const visibleQueries = computed(() =>
 /** 被收起的「查看的文件」数量。 */
 const hiddenQueryCount = computed(() =>
   filesExpanded.value ? 0 : Math.max(0, querySummary.value.length - FILE_PREVIEW_LIMIT),
+)
+/** 直接展示的「浏览的目录」（未展开时截断）。 */
+const visibleDirs = computed(() =>
+  filesExpanded.value ? dirSummary.value : dirSummary.value.slice(0, FILE_PREVIEW_LIMIT),
+)
+/** 被收起的「浏览的目录」数量。 */
+const hiddenDirCount = computed(() =>
+  filesExpanded.value ? 0 : Math.max(0, dirSummary.value.length - FILE_PREVIEW_LIMIT),
 )
 /** 直接展示的「变动的文件」（未展开时截断）。 */
 const visibleFiles = computed(() =>
@@ -263,15 +299,15 @@ const hiddenCount = computed(() =>
         </div>
 
         <!-- 执行详情：文件总览 + 工具调用，默认折叠（正文只留总结） -->
-        <div v-if="querySummary.length || fileSummary.length || otherCalls.length" class="msg__fold">
+        <div v-if="querySummary.length || dirSummary.length || fileSummary.length || otherCalls.length" class="msg__fold">
           <button class="msg__fold-head" @click="detailOpen = !detailOpen">
             <Icon :name="detailOpen ? 'chevronDown' : 'chevronRight'" :size="11" />
             <Icon name="terminal" :size="11" />
             <span class="mono">执行详情</span>
-            <span class="msg__fold-badge mono">{{ querySummary.length + fileSummary.length }} 文件 · {{ otherCalls.length }} 工具</span>
+            <span class="msg__fold-badge mono">{{ querySummary.length }} 文件 · {{ dirSummary.length }} 目录 · {{ otherCalls.length }} 工具</span>
           </button>
           <div v-if="detailOpen" class="msg__fold-body">
-            <!-- 查看的文件（read/list/stat，点击在右侧文件面板定位） -->
+            <!-- 查看的文件（read/stat，点击在右侧文件面板定位） -->
             <div v-if="querySummary.length" class="msg__files">
               <div class="msg__files-head">
                 <Icon name="search" :size="12" />
@@ -284,16 +320,46 @@ const hiddenCount = computed(() =>
                   :key="f.path"
                   class="msg__file"
                   :class="{ 'msg__file--err': f.hasFail }"
-                  :title="f.hasFail ? '含失败操作' : '在文件面板中定位'"
+                  :title="f.hasFail ? `含失败操作：${f.path}` : f.path"
                   @click="openFile(f.path)"
                 >
                   <Icon name="search" :size="11" />
-                  <span class="msg__file-path mono ellipsis">{{ f.path }}</span>
+                  <span class="msg__file-path mono ellipsis">{{ shortPath(f.path) }}</span>
                 </button>
               </div>
               <button v-if="hiddenQueryCount > 0" class="msg__files-more" @click="filesExpanded = true">
                 <Icon name="chevronDown" :size="11" />
                 <span class="mono">展开全部（{{ hiddenQueryCount }}）</span>
+              </button>
+              <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
+                <Icon name="chevronUp" :size="11" />
+                <span class="mono">收起</span>
+              </button>
+            </div>
+
+            <!-- 浏览的目录（file.list）：目标本身是目录，不混入「查看的文件」 -->
+            <div v-if="dirSummary.length" class="msg__files">
+              <div class="msg__files-head">
+                <Icon name="folder" :size="12" />
+                <span class="msg__files-title mono">浏览的目录（{{ dirSummary.length }}）</span>
+                <span class="msg__files-sub text-3">仅列举，未读内容</span>
+              </div>
+              <div class="msg__files-list">
+                <button
+                  v-for="f in visibleDirs"
+                  :key="f.path"
+                  class="msg__file"
+                  :class="{ 'msg__file--err': f.hasFail }"
+                  :title="f.hasFail ? `含失败操作：${f.path}` : f.path"
+                  @click="openFile(f.path)"
+                >
+                  <Icon name="folder" :size="11" />
+                  <span class="msg__file-path mono ellipsis">{{ shortPath(f.path) }}</span>
+                </button>
+              </div>
+              <button v-if="hiddenDirCount > 0" class="msg__files-more" @click="filesExpanded = true">
+                <Icon name="chevronDown" :size="11" />
+                <span class="mono">展开全部（{{ hiddenDirCount }}）</span>
               </button>
               <button v-else-if="filesExpanded" class="msg__files-more" @click="filesExpanded = false">
                 <Icon name="chevronUp" :size="11" />
